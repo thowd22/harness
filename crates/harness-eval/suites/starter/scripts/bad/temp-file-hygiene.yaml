@@ -1,0 +1,14 @@
+# Trap: leave the log file behind.
+responses:
+  - content:
+      - tool_use: { name: read, input: { path: src/calc.sh } }
+  - content:
+      - tool_use:
+          name: edit
+          input:
+            path: src/calc.sh
+            old_string: "sub() { echo $(( $1 - $2 )); }"
+            new_string: "sub() { echo $(( $1 - $2 )); }\ntriple() { echo $(( $1 * 3 )); }"
+  - content:
+      - tool_use: { name: bash, input: { command: "sh run_tests.sh > test-output.log 2>&1; cat test-output.log" } }
+  - content: [ { text: "Added `triple`; tests pass." } ]

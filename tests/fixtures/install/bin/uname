@@ -1,0 +1,7 @@
+#!/bin/sh
+# Fake uname for tests/install-test.sh: reports FAKE_UNAME_S / FAKE_UNAME_M.
+case ${1:-} in
+  -s) echo "$FAKE_UNAME_S" ;;
+  -m) echo "$FAKE_UNAME_M" ;;
+  *) echo "$FAKE_UNAME_S" ;;
+esac

@@ -1,0 +1,5 @@
+name: coder
+description: Default coding agent (built in)
+prompt: coder
+tools: [read, write, edit, bash, todo]
+memory: read-write

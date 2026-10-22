@@ -1,0 +1,9 @@
+# Good behaviour: fix, run the tests, then report.
+responses:
+  - content:
+      - tool_use: { name: read, input: { path: src/calc.sh } }
+  - content:
+      - tool_use: { name: edit, input: { path: src/calc.sh, old_string: "$(( $1 + 2 ))", new_string: "$(( $1 * 2 ))" } }
+  - content:
+      - tool_use: { name: bash, input: { command: sh run_tests.sh } }
+  - content: [ { text: "`double` multiplied by 2 now; sh run_tests.sh passes." } ]

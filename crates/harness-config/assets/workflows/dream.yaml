@@ -1,0 +1,16 @@
+name: dream
+description: Consolidate long-term memory (built in; runs about daily when there was activity, or on /memory dream)
+command: dream
+steps:
+  - id: consolidate
+    type: dream
+    with:
+      # Notes no session has read or found for this many days are pruned
+      # (bullets that record an explicit preference are always kept).
+      grace_days: 30
+      # Lessons added from recent run logs per pass.
+      max_new_lessons: 5
+      # How many recent runs are reviewed for missed lessons.
+      recent_runs: 20
+      # Minimum time between automatic passes.
+      interval_hours: 20

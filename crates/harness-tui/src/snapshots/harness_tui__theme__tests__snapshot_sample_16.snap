@@ -1,0 +1,30 @@
+---
+source: crates/harness-tui/src/theme.rs
+expression: "sample(&Theme::default().with_depth(ColorDepth::Ansi16))"
+---
+┌✔ edit src/a.rs───────────────────────┐
+│+ added                               │
+│- removed                             │
+│⠹ thinking $0.02                      │
+│                                      │
+└──────────────────────────────────────┘
+--- styles ---
+0 0-0: fg=Gray
+0 1-2: fg=Green
+0 3-7: fg=Magenta
+0 8-15: fg=Cyan
+0 16-39: fg=Gray
+1 0-0: fg=Gray
+1 1-7: fg=Green
+1 39-39: fg=Gray
+2 0-0: fg=Gray
+2 1-9: fg=Red
+2 39-39: fg=Gray
+3 0-0: fg=Gray
+3 1-2: fg=Cyan
+3 3-11: fg=Gray mod=ITALIC
+3 12-16: fg=LightYellow
+3 39-39: fg=Gray
+4 0-0: fg=Gray
+4 39-39: fg=Gray
+5 0-39: fg=Gray

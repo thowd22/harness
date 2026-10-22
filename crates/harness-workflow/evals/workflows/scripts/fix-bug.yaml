@@ -1,0 +1,20 @@
+# repro (coder), fix (coder), review (reviewer).
+responses:
+  - content:
+      - tool_use:
+          name: write
+          input:
+            path: tests/test_sub_floor.sh
+            content: ". ./src/calc.sh\n. ./tests/lib.sh\ncheck sub-floor \"$(sub 3 5)\" 0\nfinish\n"
+  - content: [ { text: "Added a failing test.\n```json\n{\"test_command\": \"sh tests/test_sub_floor.sh\"}\n```" } ]
+  - content:
+      - tool_use: { name: read, input: { path: src/calc.sh } }
+  - content:
+      - tool_use:
+          name: edit
+          input:
+            path: src/calc.sh
+            old_string: "sub() { echo $(( $1 - $2 )); }"
+            new_string: "sub() { r=$(( $1 - $2 )); [ \"$r\" -lt 0 ] && r=0; echo \"$r\"; }"
+  - content: [ { text: "`sub` now floors at 0." } ]
+  - content: [ { text: "Minimal fix with a proving test.\n```json\n{\"verdict\": \"approve\"}\n```" } ]

@@ -1,0 +1,187 @@
+name: Release
+
+# Builds and publishes a GitHub release for a v* tag (TASK-138).
+#
+# Gate: the first job runs the full CI workflow (ci.yml, called as a
+# reusable workflow) on the tagged commit. Every build job `needs` it and the
+# publish job needs every build, so a release is only created when every CI
+# job passed on exactly that commit.
+#
+# Triggers: pushing a v* tag, or `gh workflow run release-harness.yml --ref
+# vX.Y.Z` (what the "Cut release" workflow does, because a tag pushed with
+# GITHUB_TOKEN does not trigger push workflows). See docs/releasing.md.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+
+  meta:
+    name: Check tag, version and notes
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Must run on a tag
+        if: github.ref_type != 'tag'
+        run: |
+          echo "::error::run this workflow on a v* tag (gh workflow run release-harness.yml --ref vX.Y.Z)"
+          exit 1
+      - id: v
+        name: Tag matches the workspace version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: echo "version=$(scripts/release-version.sh "$TAG")" >> "$GITHUB_OUTPUT"
+      - name: CHANGELOG has notes for this version
+        run: scripts/release-notes.sh "${{ steps.v.outputs.version }}"
+
+  build:
+    name: harness ${{ matrix.target }}
+    needs: [ci, meta]
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            zig: true
+            run: ""
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            zig: true
+            run: qemu-aarch64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            zig: false
+            run: ""
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+            zig: false
+            run: ""
+    runs-on: ${{ matrix.os }}
+    env:
+      # Embedded by crates/harness/build.rs; `harness --version` prints it.
+      HARNESS_GIT_COMMIT: ${{ github.sha }}
+      VERSION: ${{ needs.meta.outputs.version }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.1
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+      - if: matrix.zig
+        uses: mlugg/setup-zig@v1
+      - if: matrix.zig
+        run: cargo install cargo-zigbuild --locked
+      - name: Build (cargo-zigbuild, static musl)
+        if: matrix.zig
+        run: cargo zigbuild --release --locked -p harness --bin harness --target "$TARGET"
+      - name: Build
+        if: ${{ !matrix.zig }}
+        run: cargo build --release --locked -p harness --bin harness --target "$TARGET"
+      - name: Linux builds are static
+        if: matrix.zig
+        run: |
+          file "target/$TARGET/release/harness"
+          file "target/$TARGET/release/harness" | grep -Eq 'statically linked|static-pie linked'
+      - if: matrix.run == 'qemu-aarch64'
+        run: sudo apt-get update && sudo apt-get install -y qemu-user
+      - name: harness --version reports the version and commit
+        # matrix.run is empty (run natively) or a qemu wrapper.
+        run: scripts/release-smoke.sh "$VERSION" "$GITHUB_SHA" ${{ matrix.run }} "target/$TARGET/release/harness"
+      - name: Package
+        run: scripts/release-package.sh dist "harness-$VERSION-$TARGET" "target/$TARGET/release/harness" README.md CHANGELOG.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+
+  helpers:
+    name: remote helpers (musl x86_64, aarch64)
+    needs: [ci, meta]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.1
+        with:
+          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-helpers
+      - uses: mlugg/setup-zig@v1
+      - run: cargo install cargo-zigbuild --locked
+      - run: scripts/build-remote-helpers.sh remote-bin x86_64 aarch64
+      - run: sudo apt-get update && sudo apt-get install -y qemu-user
+      - name: Check the builds are static, the sidecars match and both answer hello
+        run: REQUIRE_RUN=1 scripts/verify-remote-helpers.sh remote-bin x86_64 aarch64
+      - name: Package (one archive per arch, laid out for <data_dir>/remote-bin)
+        run: |
+          for arch in x86_64 aarch64; do
+            f="remote-bin/harness-$VERSION-$arch-linux-musl"
+            scripts/release-package.sh dist "harness-remote-agent-$VERSION-$arch-linux-musl" "$f" "$f.sha256"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-remote-helpers
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: [ci, meta, build, helpers]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - name: Every asset matches its sha256 file
+        run: |
+          cd dist
+          ls -la
+          sha256sum -c ./*.sha256
+          set -- ./*.tar.gz
+          test "$#" -eq 6
+      - name: Release notes from CHANGELOG
+        run: scripts/release-notes.sh "$VERSION" > "$RUNNER_TEMP/notes.md"
+      - name: Create or update the release
+        run: |
+          pre=""
+          case $VERSION in *-*) pre="--prerelease" ;; esac
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "harness $VERSION" --notes-file "$RUNNER_TEMP/notes.md"
+            gh release upload "$TAG" dist/* --clobber
+          else
+            # shellcheck disable=SC2086 # $pre is empty or one flag
+            gh release create "$TAG" dist/* --verify-tag $pre \
+              --title "harness $VERSION" --notes-file "$RUNNER_TEMP/notes.md"
+          fi

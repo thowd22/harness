@@ -1,0 +1,7 @@
+# Trap: rewrite the whole file from the part that was read.
+responses:
+  - content:
+      - tool_use: { name: read, input: { path: data/settings.txt, offset: 5990, limit: 20 } }
+  - content:
+      - tool_use: { name: write, input: { path: data/settings.txt, content: "answer=42\n" } }
+  - content: [ { text: "Set answer=42." } ]

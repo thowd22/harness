@@ -1,0 +1,39 @@
+name: plan-approve-implement
+description: Write a plan, wait for your approval, then implement and verify it
+command: plan
+inputs:
+  task: { type: string, required: true, positional: 0, description: "What to build" }
+  test: { type: string, required: true, description: "Command that verifies the change, e.g. cargo test" }
+budget: { usd: 5 }
+goal: "{{ inputs.task }}"
+tasks:
+  - { id: plan, title: "Plan", step: plan }
+  - { id: approve, title: "Approve the plan", step: approve }
+  - { id: implement, title: "Implement", step: implement }
+  - { id: verify, title: "Verify", step: verify }
+steps:
+  - id: plan
+    agent: researcher
+    prompt: |
+      Plan how to do this task: {{ inputs.task }}
+      Read the relevant code first. List the files to change, the steps, and the tests that will show it works.
+      Put the complete plan in `plan`.
+    artifacts: [plan]
+
+  - id: approve
+    needs: [plan]
+    type: approval
+    message: "Implement this plan for: {{ inputs.task }}?"
+    artifacts: [plan]
+
+  - id: implement
+    needs: [approve]
+    agent: coder
+    prompt: |
+      Implement the approved plan for: {{ inputs.task }}
+      The plan is in {{ steps.plan.artifacts.plan }}; follow it and keep the change minimal.
+      `{{ inputs.test }}` must pass when you are done.
+
+  - id: verify
+    needs: [implement]
+    verify: "{{ inputs.test }}"

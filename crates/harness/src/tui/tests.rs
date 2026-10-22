@@ -1,0 +1,1058 @@
+//! The TUI driver in-process: real core, fake provider, the UI side
+//! replaced by the request and event channels.
+
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use harness_events::schema::EventKind;
+use harness_policy::approvals::{ApprovalAnswer, ApprovalScope};
+use harness_tui::palette::Invocation;
+
+use super::*;
+
+struct Env {
+    _tmp: tempfile::TempDir,
+    root: PathBuf,
+    project: PathBuf,
+}
+
+impl Env {
+    fn new() -> Env {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        Env {
+            _tmp: tmp,
+            root,
+            project,
+        }
+    }
+
+    fn script(&self, yaml: &str) -> PathBuf {
+        let p = self.root.join(format!("script-{}.yaml", rand_suffix()));
+        std::fs::write(&p, yaml).unwrap();
+        p
+    }
+}
+
+fn rand_suffix() -> String {
+    harness_events::schema::NodeId::random().as_str().to_owned()
+}
+
+struct Harness {
+    d: Driver,
+    rx: mpsc::Receiver<AppEvent>,
+    prompts: mpsc::Receiver<PromptEnvelope>,
+    seen: Vec<AppEvent>,
+}
+
+impl Harness {
+    async fn start(env: &Env, script: &Path) -> Harness {
+        Harness::with(env, script, false).await
+    }
+
+    async fn with(env: &Env, script: &Path, memory: bool) -> Harness {
+        Harness::with_ini(env, script, memory, "").await
+    }
+
+    async fn with_ini(env: &Env, script: &Path, memory: bool, ini: &str) -> Harness {
+        let mut cfg = harness_config::ini::load_str(ini, None).unwrap();
+        cfg.general.data_dir = env.root.join("data");
+        cfg.memory.enabled = memory;
+        // The sandbox launcher is the `harness` binary; unit tests run
+        // inside the test executable instead (the binary tests cover it).
+        cfg.sandbox.enabled = false;
+        let data = harness_config::paths::DataDir::from_config(&cfg)
+            .open()
+            .unwrap();
+        let (tx, rx) = event_channel();
+        let (approvals, prompts) = ChannelUi::new(8);
+        let mut d = Driver::new(
+            cfg,
+            data,
+            Vec::new(),
+            Arc::new(Redactor::default()),
+            tx,
+            approvals,
+        );
+        d.start(TuiOptions {
+            cwd: Some(env.project.clone()),
+            fake_script: Some(script.to_path_buf()),
+            ..TuiOptions::default()
+        })
+        .await
+        .unwrap();
+        Harness {
+            d,
+            rx,
+            prompts,
+            seen: Vec::new(),
+        }
+    }
+
+    /// Waits for the running turn and hands the core back.
+    async fn finish_turn(&mut self) {
+        if let Some(t) = self.d.turn.take() {
+            let (core, outcome) = t.await.unwrap();
+            self.d.turn_done(core, outcome).await;
+        }
+    }
+
+    /// Collects events until `pred` matches one (or times out).
+    async fn until(&mut self, mut pred: impl FnMut(&AppEvent) -> bool) -> &AppEvent {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            if let Some(i) = self.seen.iter().position(&mut pred) {
+                return &self.seen[i];
+            }
+            match tokio::time::timeout_at(deadline, self.rx.recv()).await {
+                Ok(Some(ev)) => self.seen.push(ev),
+                _ => panic!("event not seen; got {:?}", self.seen),
+            }
+        }
+    }
+
+    async fn panel(&mut self, title: &str) -> Vec<String> {
+        let t = title.to_owned();
+        match self
+            .until(|e| matches!(e, AppEvent::Core(CoreEvent::Panel { title, .. }) if *title == t))
+            .await
+        {
+            AppEvent::Core(CoreEvent::Panel { lines, .. }) => lines.clone(),
+            _ => unreachable!(),
+        }
+    }
+}
+
+const TEXT: &str = "responses:\n  - content:\n      - text: \"All done.\"\n";
+
+#[tokio::test]
+async fn turns_stream_events_and_queue_while_busy() {
+    let env = Env::new();
+    let script = env.script(
+        "responses:\n  - delay_ms: 200\n    content: [ { text: \"first answer\" } ]\n  - content: [ { text: \"second answer\" } ]\n",
+    );
+    let mut h = Harness::start(&env, &script).await;
+    h.until(|e| matches!(e, AppEvent::Core(CoreEvent::Session { .. })))
+        .await;
+    h.d.request(UiRequest::Submit("one".into())).await;
+    assert!(h.d.busy());
+    h.d.request(UiRequest::Submit("two".into())).await;
+    assert_eq!(h.d.queue.len(), 1, "queued while busy");
+    h.finish_turn().await;
+    // The queued prompt starts right after.
+    assert!(h.d.busy());
+    h.finish_turn().await;
+    for want in ["first answer", "second answer"] {
+        h.until(|e| {
+            matches!(e, AppEvent::Run(ev) if matches!(&ev.kind, EventKind::Delta { text, .. } if text.contains(want)))
+        })
+        .await;
+    }
+    h.until(|e| {
+        matches!(e, AppEvent::Run(ev) if matches!(&ev.kind, EventKind::UserMessage { text } if text == "two"))
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn interrupt_cancels_the_running_turn() {
+    let env = Env::new();
+    let script = env.script("responses:\n  - delay_ms: 30000\n    content: [ { text: late } ]\n");
+    let mut h = Harness::start(&env, &script).await;
+    h.d.request(UiRequest::Submit("go".into())).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    h.d.request(UiRequest::Interrupt).await;
+    let t = h.d.turn.take().unwrap();
+    let (core, outcome) = tokio::time::timeout(Duration::from_secs(10), t)
+        .await
+        .expect("cancelled promptly")
+        .unwrap();
+    assert_eq!(
+        outcome.stop,
+        harness_agent::agent_loop::StopReason::Cancelled
+    );
+    h.d.turn_done(core, outcome).await;
+}
+
+#[tokio::test]
+async fn builtin_commands_open_panels() {
+    let env = Env::new();
+    let script = env.script(TEXT);
+    let mut h = Harness::start(&env, &script).await;
+    h.d.request(UiRequest::Submit("/help".into())).await;
+    let help = h.panel("Help").await;
+    assert!(help.iter().any(|l| l.contains("/cost")), "{help:?}");
+    h.d.request(UiRequest::Submit("/config".into())).await;
+    let cfg = h.panel("Effective config").await;
+    assert!(cfg.iter().any(|l| l.contains("default_model")), "{cfg:?}");
+    h.d.request(UiRequest::Submit("/cost".into())).await;
+    let cost = h.panel("Cost").await;
+    assert!(cost[0].starts_with("total:"), "{cost:?}");
+    h.d.request(UiRequest::Submit("/remote".into())).await;
+    let remote = h.panel(commands::REMOTE_TITLE).await;
+    assert!(remote[0].contains("no remote hosts"), "{remote:?}");
+    h.d.request(UiRequest::Submit("/context".into())).await;
+    let ctx = h.panel("Context").await;
+    assert!(ctx[0].contains("tokens before history"), "{ctx:?}");
+    // The palette entry of a built-in runs the same command.
+    h.d.request(UiRequest::Run(Invocation {
+        id: "cmd.agents".into(),
+        args: vec![],
+    }))
+    .await;
+    let agents = h.panel("Agents").await;
+    assert!(agents.iter().any(|l| l.starts_with("coder")), "{agents:?}");
+    h.d.request(UiRequest::Submit("/nope".into())).await;
+    h.until(|e| {
+        matches!(
+            e,
+            AppEvent::Core(CoreEvent::Notify {
+                level: Level::Error,
+                ..
+            })
+        )
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn palette_lists_every_builtin_with_description_and_argument_help() {
+    let env = Env::new();
+    let script = env.script(TEXT);
+    let mut h = Harness::start(&env, &script).await;
+    let entries = match h
+        .until(|e| matches!(e, AppEvent::Core(CoreEvent::PaletteEntries(_))))
+        .await
+    {
+        AppEvent::Core(CoreEvent::PaletteEntries(v)) => v.clone(),
+        _ => unreachable!(),
+    };
+    for b in harness_agent::commands::Builtin::ALL {
+        let e = entries
+            .iter()
+            .find(|e| e.id == format!("cmd.{}", b.name()))
+            .unwrap_or_else(|| panic!("/{} missing from the palette", b.name()));
+        assert_eq!(e.description, b.description());
+        assert_eq!(e.args.len(), b.args().len(), "/{}", b.name());
+        for a in &e.args {
+            assert!(
+                a.hint.is_some(),
+                "/{} {} has argument help",
+                b.name(),
+                a.name
+            );
+        }
+    }
+    let mode = entries.iter().find(|e| e.id == "cmd.mode").unwrap();
+    assert!(
+        mode.title.contains("ask"),
+        "usage in the title: {}",
+        mode.title
+    );
+    let slash = match h
+        .until(|e| matches!(e, AppEvent::Core(CoreEvent::SlashCommands(_))))
+        .await
+    {
+        AppEvent::Core(CoreEvent::SlashCommands(v)) => v.clone(),
+        _ => unreachable!(),
+    };
+    assert!(slash.iter().any(|c| c.name == "fix" && c.scope.is_some()));
+}
+
+#[tokio::test]
+async fn undo_and_diff_use_the_turn_checkpoint() {
+    let env = Env::new();
+    std::fs::write(env.project.join("keep.txt"), "kept\n").unwrap();
+    let script = env.script(
+        "responses:\n  - content:\n      - tool_use: { name: write, input: { path: made.txt, content: \"new\\n\" } }\n  - content: [ { text: done } ]\n",
+    );
+    let mut h = Harness::start(&env, &script).await;
+    h.d.request(UiRequest::Submit("make a file".into())).await;
+    h.finish_turn().await;
+    assert!(env.project.join("made.txt").exists());
+    // The diff shows the change and can revert it.
+    h.d.request(UiRequest::OpenDiff(None)).await;
+    match h
+        .until(|e| matches!(e, AppEvent::Core(CoreEvent::Diff(_))))
+        .await
+    {
+        AppEvent::Core(CoreEvent::Diff(spec)) => {
+            assert!(spec.reverter.is_some(), "revertable to the turn checkpoint")
+        }
+        _ => unreachable!(),
+    }
+    // The change ledger reaches node detail.
+    h.until(|e| matches!(e, AppEvent::Core(CoreEvent::Hygiene { ledger, .. }) if ledger.iter().any(|l| l.contains("made.txt"))))
+        .await;
+    h.d.request(UiRequest::Submit("/undo".into())).await;
+    h.until(
+        |e| matches!(e, AppEvent::Core(CoreEvent::Notify { title, .. }) if title == "restored"),
+    )
+    .await;
+    assert!(
+        !env.project.join("made.txt").exists(),
+        "undo restored the turn"
+    );
+    assert!(env.project.join("keep.txt").exists());
+}
+
+#[tokio::test]
+async fn mode_changes_reach_the_policy_gate() {
+    let env = Env::new();
+    let script = env.script(
+        "responses:\n  - content: [ { tool_use: { name: bash, input: { command: \"touch made.txt\" } } } ]\n  - content: [ { text: finished } ]\n",
+    );
+    let mut h = Harness::start(&env, &script).await;
+    h.d.request(UiRequest::ModeChanged(Mode::Ask)).await;
+    h.d.request(UiRequest::Submit("make a file".into())).await;
+    // In ask mode the bash call needs approval, answered in the chat.
+    let env_ = tokio::time::timeout(Duration::from_secs(10), h.prompts.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let id = env_.prompt.requests[0].approval_id.clone();
+    env_.reply
+        .send(vec![(id, ApprovalAnswer::Approve(ApprovalScope::Once))])
+        .unwrap();
+    h.finish_turn().await;
+    assert!(env.project.join("made.txt").exists());
+}
+
+#[tokio::test]
+async fn workflow_commands_prompt_for_missing_inputs_and_gates_are_answered_in_chat() {
+    let env = Env::new();
+    let fixtures = crate_root().join("../harness-workflow/evals/workflows/fixtures/calc");
+    copy_dir(&fixtures, &env.project);
+    std::fs::write(
+        env.project.join("tests/test_double.sh"),
+        ". ./src/calc.sh\n. ./tests/lib.sh\ncheck double \"$(double 4)\" 8\nfinish\n",
+    )
+    .unwrap();
+    let script = crate_root()
+        .join("../harness-workflow/evals/workflows/scripts/plan-approve-implement.yaml");
+    let mut h = Harness::start(&env, &script).await;
+    h.d.request(UiRequest::Submit("/plan".into())).await;
+    let entry = match h
+        .until(|e| matches!(e, AppEvent::Core(CoreEvent::PromptArgs(_))))
+        .await
+    {
+        AppEvent::Core(CoreEvent::PromptArgs(e)) => e.clone(),
+        _ => unreachable!(),
+    };
+    assert_eq!(entry.id, "workflow.plan");
+    assert_eq!(entry.args.len(), 2, "{:?}", entry.args);
+    assert!(entry.args.iter().all(|a| a.required && a.hint.is_some()));
+    h.d.request(UiRequest::Run(Invocation {
+        id: entry.id.clone(),
+        args: vec![
+            "Add a `double` function to src/calc.sh (double 4 prints 8).".into(),
+            "sh run_tests.sh".into(),
+        ],
+    }))
+    .await;
+    // The plan gate arrives as an approval prompt for the chat.
+    let gate = tokio::time::timeout(Duration::from_secs(30), h.prompts.recv())
+        .await
+        .expect("gate prompt")
+        .unwrap();
+    assert!(gate.prompt.requests[0].call_id.starts_with("gate."));
+    let id = gate.prompt.requests[0].approval_id.clone();
+    gate.reply
+        .send(vec![(id, ApprovalAnswer::Approve(ApprovalScope::Once))])
+        .unwrap();
+    h.until(|e| matches!(e, AppEvent::Core(CoreEvent::Notify { title, .. }) if title.contains("succeeded")))
+        .await;
+    assert!(
+        std::fs::read_to_string(env.project.join("src/calc.sh"))
+            .unwrap()
+            .contains("double()")
+    );
+    // The workflow's budget reaches the map as a badge on its node.
+    h.until(|e| {
+        matches!(e, AppEvent::Core(CoreEvent::NodeBadge { node, badge, .. })
+        if node.as_str() == "plan-approve-implement" && badge.contains("/$5.00"))
+    })
+    .await;
+    // The plan step's artifact is listed in its node detail and opens.
+    let plan = harness_events::schema::NodeId::from("plan-approve-implement/plan");
+    h.d.request(UiRequest::Artifacts(plan.clone())).await;
+    h.until(|e| matches!(e, AppEvent::Core(CoreEvent::Artifacts { names, .. }) if names == &["plan".to_owned()]))
+        .await;
+    h.d.request(UiRequest::OpenArtifact {
+        node: plan,
+        name: "plan".into(),
+    })
+    .await;
+    let lines = h.panel("Artifact plan").await;
+    assert!(lines.len() > 2, "the plan's content: {lines:?}");
+}
+
+fn crate_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn copy_dir(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap() {
+        let e = e.unwrap();
+        let dest = to.join(e.file_name());
+        if e.file_type().unwrap().is_dir() {
+            copy_dir(&e.path(), &dest);
+        } else {
+            std::fs::copy(e.path(), dest).unwrap();
+        }
+    }
+}
+
+#[test]
+fn parses_tui_flags() {
+    let args = |s: &str| -> Vec<String> { s.split_whitespace().map(str::to_owned).collect() };
+    let o = parse(&args(
+        "--resume last --agent reviewer --mode=ask --cwd /tmp",
+    ))
+    .unwrap();
+    assert_eq!(o.resume.as_deref(), Some("last"));
+    assert_eq!(o.agent.as_deref(), Some("reviewer"));
+    assert_eq!(o.mode, Some(Mode::Ask));
+    assert_eq!(o.cwd, Some(PathBuf::from("/tmp")));
+    assert!(
+        parse(&args("--bogus"))
+            .unwrap_err()
+            .contains("unknown option")
+    );
+    assert!(parse(&args("--mode loose")).is_err());
+    assert!(
+        parse(&args("--agent"))
+            .unwrap_err()
+            .contains("needs a value")
+    );
+}
+
+#[tokio::test]
+async fn any_turn_checkpoint_can_be_restored() {
+    let env = Env::new();
+    let script = env.script(
+        "responses:\n  - content: [ { tool_use: { name: write, input: { path: a.txt, content: \"a\\n\" } } } ]\n  - content: [ { text: one } ]\n  - content: [ { tool_use: { name: write, input: { path: b.txt, content: \"b\\n\" } } } ]\n  - content: [ { text: two } ]\n",
+    );
+    let mut h = Harness::start(&env, &script).await;
+    h.d.request(UiRequest::Submit("first".into())).await;
+    h.finish_turn().await;
+    h.d.request(UiRequest::Submit("second".into())).await;
+    h.finish_turn().await;
+    let turns = h.d.h.as_ref().unwrap().turn_checkpoints.clone();
+    assert_eq!(turns.len(), 2);
+    assert!(env.project.join("a.txt").exists() && env.project.join("b.txt").exists());
+    // Restore to before the second turn: its file goes, the first stays.
+    h.d.request(UiRequest::RestoreCheckpoint(turns[1].0.clone()))
+        .await;
+    h.until(
+        |e| matches!(e, AppEvent::Core(CoreEvent::Notify { title, .. }) if title == "restored"),
+    )
+    .await;
+    assert!(env.project.join("a.txt").exists());
+    assert!(!env.project.join("b.txt").exists());
+}
+
+#[tokio::test]
+async fn hygiene_reports_reach_node_detail_and_temp_files_can_be_removed() {
+    let env = Env::new();
+    let script = env.script(
+        "responses:\n  - content:\n      - tool_use: { name: write, input: { path: src/lib.rs, content: \"pub fn f() {}\\n\" } }\n      - tool_use: { name: write, input: { path: debug.log, content: \"trace\\n\" } }\n  - content: [ { text: done } ]\n",
+    );
+    let mut h = Harness::start(&env, &script).await;
+    h.d.request(UiRequest::Submit("change it".into())).await;
+    h.finish_turn().await;
+    let (node, report, temp) = match h
+        .until(|e| matches!(e, AppEvent::Core(CoreEvent::Hygiene { .. })))
+        .await
+    {
+        AppEvent::Core(CoreEvent::Hygiene {
+            node,
+            report,
+            temp_files,
+            ..
+        }) => (node.clone(), report.clone(), *temp_files),
+        _ => unreachable!(),
+    };
+    assert!(report[0].starts_with("Hygiene"), "{report:?}");
+    assert_eq!(temp, 1, "{report:?}");
+    // The problem is reported before the turn counts as done.
+    h.until(|e| matches!(e, AppEvent::Core(CoreEvent::Notify { title, .. }) if title == "hygiene"))
+        .await;
+    // The score is recorded as a metric of the run.
+    let metrics =
+        h.d.h
+            .as_ref()
+            .unwrap()
+            .run_dir
+            .join(harness_hygiene::report::METRICS_FILE);
+    assert!(
+        std::fs::read_to_string(metrics)
+            .unwrap()
+            .contains("hygiene.score")
+    );
+    h.d.request(UiRequest::RemoveTempFiles(node)).await;
+    h.until(|e| matches!(e, AppEvent::Core(CoreEvent::Notify { title, .. }) if title == "removed"))
+        .await;
+    assert!(!env.project.join("debug.log").exists());
+    assert!(env.project.join("src/lib.rs").exists());
+}
+
+#[tokio::test]
+async fn memory_cards_undo_their_commit() {
+    let env = Env::new();
+    let script = env.script(
+        "responses:\n  - content: [ { tool_use: { name: memory, input: { action: write, path: tools/cargo, text: \"Use cargo nextest here.\" } } } ]\n  - content: [ { text: saved } ]\n",
+    );
+    let mut h = Harness::with(&env, &script, true).await;
+    h.d.request(UiRequest::Submit("remember".into())).await;
+    h.finish_turn().await;
+    let sha = match h
+        .until(|e| matches!(e, AppEvent::Run(ev) if matches!(ev.kind, EventKind::Memory { .. })))
+        .await
+    {
+        AppEvent::Run(ev) => match &ev.kind {
+            EventKind::Memory { memory_id, .. } => memory_id.clone(),
+            _ => unreachable!(),
+        },
+        _ => unreachable!(),
+    };
+    let checkout = h.d.h.as_ref().unwrap().memory.clone().unwrap();
+    let note = checkout.path().join("tools/cargo.md");
+    assert!(std::fs::read_to_string(&note).unwrap().contains("nextest"));
+    h.d.request(UiRequest::UndoMemory(sha.clone())).await;
+    h.until(|e| matches!(e, AppEvent::Core(CoreEvent::MemoryUndone(s)) if *s == sha))
+        .await;
+    let text = std::fs::read_to_string(&note).unwrap_or_default();
+    assert!(!text.contains("nextest"), "reverted: {text}");
+}
+
+#[tokio::test]
+async fn remote_lists_hosts_and_tests_them_with_health_badges() {
+    let env = Env::new();
+    let script = env.script(TEXT);
+    // Port 1 on localhost refuses connections: the test fails fast, offline.
+    let ini = "[remote.box]\nhost = 127.0.0.1\nport = 1\nlabels = gpu\n";
+    let mut h = Harness::with_ini(&env, &script, false, ini).await;
+    h.d.request(UiRequest::Submit("/remote".into())).await;
+    let (lines, buttons) = match h
+        .until(|e| matches!(e, AppEvent::Core(CoreEvent::Panel { title, .. }) if title == commands::REMOTE_TITLE))
+        .await
+    {
+        AppEvent::Core(CoreEvent::Panel { lines, buttons, .. }) => (lines.clone(), buttons.clone()),
+        _ => unreachable!(),
+    };
+    assert!(lines.iter().any(|l| l.contains("box")), "{lines:?}");
+    assert!(
+        lines[0].starts_with("[?"),
+        "health unknown before a test: {lines:?}"
+    );
+    assert_eq!(buttons.len(), 1);
+    assert_eq!(buttons[0].id, "remote.test:box");
+    h.d.request(UiRequest::PanelAction(buttons[0].id.clone()))
+        .await;
+    let text = match h
+        .until(|e| matches!(e, AppEvent::Core(CoreEvent::PanelText { lines, .. }) if lines.iter().any(|l| l.contains("connection:"))))
+        .await
+    {
+        AppEvent::Core(CoreEvent::PanelText { lines, .. }) => lines.clone(),
+        _ => unreachable!(),
+    };
+    assert!(
+        text.iter().any(|l| l.contains("connection: FAILED")),
+        "{text:?}"
+    );
+    assert!(text.iter().any(|l| l.contains("helper:")), "{text:?}");
+    assert!(
+        text[0].starts_with("[down"),
+        "the listing shows the new health: {text:?}"
+    );
+    h.until(|e| matches!(e, AppEvent::Core(CoreEvent::HostBadge { host, badge, .. }) if host == "box" && badge == "down"))
+        .await;
+}
+
+#[tokio::test]
+async fn memory_dream_consolidates_in_the_background() {
+    let env = Env::new();
+    let script = env.script(TEXT);
+    let mut h = Harness::with(&env, &script, true).await;
+    h.d.request(UiRequest::Submit("/memory dream".into())).await;
+    h.until(|e| matches!(e, AppEvent::Core(CoreEvent::Notify { title, .. }) if title == "consolidating memory"))
+        .await;
+    let body = match h
+        .until(|e| matches!(e, AppEvent::Core(CoreEvent::Notify { title, .. }) if title == "memory consolidated" || title == "dream failed"))
+        .await
+    {
+        AppEvent::Core(CoreEvent::Notify { title, body, .. }) => {
+            assert_eq!(title, "memory consolidated", "{body:?}");
+            body.clone()
+        }
+        _ => unreachable!(),
+    };
+    assert!(body.is_some());
+    let log = env.root.join("data/memory/.harness/dream-log.jsonl");
+    assert!(log.exists(), "the pass is logged");
+}
+
+#[tokio::test]
+async fn a_scheduled_pass_runs_when_due_after_activity() {
+    let env = Env::new();
+    let script = env.script(TEXT);
+    let mut h = Harness::with(&env, &script, true).await;
+    h.d.request(UiRequest::Submit("do something".into())).await;
+    h.finish_turn().await;
+    // Activity and no pass yet: due ([memory] dream = daily).
+    commands::dream(&mut h.d, false).await;
+    h.until(|e| matches!(e, AppEvent::Core(CoreEvent::Notify { title, .. }) if title == "memory consolidated"))
+        .await;
+    // Right after a pass nothing is due.
+    let before = h.seen.len();
+    commands::dream(&mut h.d, false).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    while let Ok(ev) = h.rx.try_recv() {
+        h.seen.push(ev);
+    }
+    assert!(
+        !h.seen[before..]
+            .iter()
+            .any(|e| matches!(e, AppEvent::Core(CoreEvent::Notify { title, .. }) if title == "memory consolidated")),
+        "a second pass ran"
+    );
+}
+
+#[test]
+fn lessons_use_the_configured_dream_model() {
+    let cfg = harness_config::ini::load_str(
+        "[provider.anthropic]\napi_key = test-key-not-used\n[memory]\ndream_model = haiku\n",
+        None,
+    )
+    .unwrap();
+    let (provider, model) = crate::dream::lesson_model(&cfg, None).expect("a provider");
+    assert_eq!(provider.name(), "anthropic");
+    assert_eq!(model, "claude-haiku-5-5");
+    // Without a key the pass runs without lessons.
+    let cfg = harness_config::ini::load_str("", None).unwrap();
+    assert!(crate::dream::lesson_model(&cfg, None).is_none());
+}
+
+#[tokio::test]
+async fn the_memory_toggle_keeps_notes_and_removes_the_tool_for_the_session() {
+    let env = Env::new();
+    let script = env.script(
+        "responses:\n  - content: [ { tool_use: { name: memory, input: { action: write, path: tools/cargo, text: \"Use cargo nextest here.\" } } } ]\n  - content: [ { text: saved } ]\n  - content: [ { text: next } ]\n",
+    );
+    let mut h = Harness::with(&env, &script, true).await;
+    h.d.request(UiRequest::Submit("remember".into())).await;
+    h.finish_turn().await;
+    h.d.request(UiRequest::Submit("/memory".into())).await;
+    let data = match h
+        .until(|e| matches!(e, AppEvent::Core(CoreEvent::Memory(_))))
+        .await
+    {
+        AppEvent::Core(CoreEvent::Memory(d)) => d.clone(),
+        _ => unreachable!(),
+    };
+    assert!(data.enabled);
+    assert!(
+        data.files.iter().any(|f| f.path == "tools/cargo.md"),
+        "{data:?}"
+    );
+    assert!(!data.recent.is_empty(), "the write is a recent commit");
+    // Off: the session continues without the memory tool; notes stay.
+    h.d.request(UiRequest::Memory(
+        harness_tui::app::MemoryRequest::SetEnabled(false),
+    ))
+    .await;
+    h.until(|e| matches!(e, AppEvent::Core(CoreEvent::Notify { title, .. }) if title == "memory off for this session"))
+        .await;
+    assert!(h.d.h.as_ref().unwrap().memory.is_none());
+    assert!(
+        !h.d.h
+            .as_ref()
+            .unwrap()
+            .tools
+            .iter()
+            .any(|t| t.name == "memory")
+    );
+    let note = env.root.join("data/memory/tools/cargo.md");
+    assert!(
+        std::fs::read_to_string(&note).unwrap().contains("nextest"),
+        "notes are kept"
+    );
+    // The conversation continues in the same session.
+    let session = h.d.core.as_ref().unwrap().session_id().to_owned();
+    h.d.request(UiRequest::Memory(
+        harness_tui::app::MemoryRequest::SetEnabled(true),
+    ))
+    .await;
+    h.until(|e| matches!(e, AppEvent::Core(CoreEvent::Notify { title, .. }) if title == "memory on for this session"))
+        .await;
+    assert_eq!(h.d.core.as_ref().unwrap().session_id(), session);
+    assert!(
+        h.d.h
+            .as_ref()
+            .unwrap()
+            .tools
+            .iter()
+            .any(|t| t.name == "memory")
+    );
+    // Search goes through the drive's index.
+    h.d.request(UiRequest::Memory(harness_tui::app::MemoryRequest::Search(
+        "nextest".into(),
+    )))
+    .await;
+    h.until(|e| matches!(e, AppEvent::Core(CoreEvent::MemorySearch(rows)) if rows.iter().any(|r| r.path.contains("tools/cargo"))))
+        .await;
+}
+
+/// No API keys resolve, so the catalog never fetches live lists.
+const NO_KEYS: &str = "[provider.anthropic]\napi_key_env = HARNESS_T135_UNSET_ANTHROPIC\n\
+     [provider.openai]\napi_key_env = HARNESS_T135_UNSET_OPENAI\n\
+     [provider.openrouter]\napi_key_env = HARNESS_T135_UNSET_OPENROUTER\n";
+
+fn is_picker(e: &AppEvent) -> bool {
+    matches!(e, AppEvent::Core(CoreEvent::ModelPicker { .. }))
+}
+
+#[tokio::test]
+async fn model_without_argument_and_the_palette_entry_open_the_picker() {
+    let env = Env::new();
+    let script = env.script(TEXT);
+    let mut h = Harness::with_ini(&env, &script, false, NO_KEYS).await;
+    let entries = match h
+        .until(|e| matches!(e, AppEvent::Core(CoreEvent::PaletteEntries(_))))
+        .await
+    {
+        AppEvent::Core(CoreEvent::PaletteEntries(v)) => v.clone(),
+        _ => unreachable!(),
+    };
+    let entry = entries
+        .iter()
+        .find(|e| e.id == harness_tui::model_picker::PALETTE_ID)
+        .expect("palette entry");
+    assert!(entry.args.is_empty(), "opens without an argument prompt");
+
+    let started = std::time::Instant::now();
+    h.d.request(UiRequest::Submit("/model".into())).await;
+    let took = started.elapsed();
+    let current = h.d.core.as_ref().unwrap().model.reference.clone();
+    match h.until(is_picker).await {
+        AppEvent::Core(CoreEvent::ModelPicker {
+            catalog,
+            current: c,
+        }) => {
+            assert_eq!(c.as_deref(), Some(current.as_str()));
+            assert!(!catalog.entries().is_empty(), "built-in models listed");
+            assert!(!catalog.refreshing(), "nothing to fetch without keys");
+        }
+        _ => unreachable!(),
+    }
+    assert!(took.as_millis() < 50, "opened in {took:?}");
+    assert!(
+        !h.seen
+            .iter()
+            .any(|e| matches!(e, AppEvent::Core(CoreEvent::Panel { .. }))),
+        "no panel"
+    );
+
+    h.seen.clear();
+    h.d.request(UiRequest::Run(Invocation {
+        id: harness_tui::model_picker::PALETTE_ID.into(),
+        args: vec![],
+    }))
+    .await;
+    h.until(is_picker).await;
+    // The `/model` command entry with an empty argument opens it too.
+    h.seen.clear();
+    h.d.request(UiRequest::Run(Invocation {
+        id: "cmd.model".into(),
+        args: vec![String::new()],
+    }))
+    .await;
+    h.until(is_picker).await;
+}
+
+#[tokio::test]
+async fn model_with_a_name_switches_directly_and_the_picker_choice_switches() {
+    let env = Env::new();
+    let script = env.script(TEXT);
+    let mut h = Harness::with_ini(&env, &script, false, NO_KEYS).await;
+    h.until(|e| matches!(e, AppEvent::Core(CoreEvent::Session { .. })))
+        .await;
+    h.seen.clear();
+    h.d.request(UiRequest::Submit("/model haiku".into())).await;
+    h.until(|e| matches!(e, AppEvent::Core(CoreEvent::Session { .. })))
+        .await;
+    assert!(!h.seen.iter().any(is_picker), "{:?}", h.seen);
+    assert_eq!(h.d.opts.model.as_deref(), Some("haiku"));
+
+    h.seen.clear();
+    h.d.request(UiRequest::SetModel("anthropic/claude-opus-5-5".into()))
+        .await;
+    h.until(|e| matches!(e, AppEvent::Core(CoreEvent::Session { .. })))
+        .await;
+    assert!(!h.seen.iter().any(is_picker));
+    assert_eq!(h.d.opts.model.as_deref(), Some("anthropic/claude-opus-5-5"));
+}
+
+/// Accepts only one key.
+struct OneKey(&'static str);
+
+#[async_trait::async_trait]
+impl crate::login::Verifier for OneKey {
+    async fn verify(
+        &self,
+        provider: &str,
+        key: &harness_config::secrets::Secret,
+        _base_url: Option<&str>,
+    ) -> Result<harness_providers::login::KeyCheck, harness_providers::provider::ProviderError>
+    {
+        if key.expose() == self.0 {
+            Ok(harness_providers::login::KeyCheck {
+                provider: provider.into(),
+                url: "http://mock.local/key".into(),
+                detail: None,
+            })
+        } else {
+            Err(harness_providers::provider::ProviderError::Auth(
+                "invalid key".into(),
+            ))
+        }
+    }
+}
+
+/// Every file under `dir`, read as bytes.
+fn files_containing(dir: &Path, needle: &str) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if std::fs::read(&p)
+                .map(|b| b.windows(needle.len()).any(|w| w == needle.as_bytes()))
+                .unwrap_or(false)
+            {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+/// What the `/login` modal sends for an inline key.
+fn submitted(provider: &str, key: &str) -> harness_tui::login::LoginSubmission {
+    use harness_tui::login::{LoginAction, LoginModal, LoginOutcome};
+    let mut m = LoginModal::new(Some(provider)).unwrap();
+    m.activate(LoginAction::Option(0));
+    m.paste(key);
+    match m.activate(LoginAction::Primary) {
+        LoginOutcome::Submit(s) => s,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn login_opens_the_modal_and_saves_a_checked_key_without_leaking_it() {
+    // Shapes no built-in redaction pattern knows, so only registering them
+    // masks them.
+    const GOOD: &str = "tui-login-good-key-0123456789";
+    const BAD: &str = "tui-login-bad-key-9876543210";
+    for k in [GOOD, BAD] {
+        assert_eq!(Redactor::default().redact(k), k, "precondition");
+    }
+    let env = Env::new();
+    let script = env.script(TEXT);
+    let mut h = Harness::with_ini(&env, &script, false, NO_KEYS).await;
+    let ini = env.root.join("cfg").join("harness.ini");
+    h.d.login_path = ini.clone();
+    h.d.login_verifier = Arc::new(OneKey(GOOD));
+
+    // `/login` is a palette entry and a slash command, with or without
+    // the provider.
+    let entries = match h
+        .until(|e| matches!(e, AppEvent::Core(CoreEvent::PaletteEntries(_))))
+        .await
+    {
+        AppEvent::Core(CoreEvent::PaletteEntries(v)) => v.clone(),
+        _ => unreachable!(),
+    };
+    assert!(entries.iter().any(|e| e.id == "cmd.login"), "palette entry");
+    h.d.request(UiRequest::Run(Invocation {
+        id: "cmd.login".into(),
+        args: vec![String::new()],
+    }))
+    .await;
+    h.until(|e| matches!(e, AppEvent::Core(CoreEvent::Login { provider: None })))
+        .await;
+    h.d.request(UiRequest::Submit("/login openrouter".into()))
+        .await;
+    h.until(|e| {
+        matches!(e, AppEvent::Core(CoreEvent::Login { provider: Some(p) }) if p == "openrouter")
+    })
+    .await;
+
+    // A rejected key: an error for the modal, nothing saved.
+    h.d.request(UiRequest::Login(submitted("openrouter", BAD)))
+        .await;
+    match h
+        .until(|e| matches!(e, AppEvent::Core(CoreEvent::LoginResult(_))))
+        .await
+    {
+        AppEvent::Core(CoreEvent::LoginResult(Err(e))) => {
+            assert!(e.contains("OpenRouter rejected the key"), "{e}");
+            assert!(e.contains("Nothing was saved"), "{e}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(!ini.exists());
+    h.seen.clear();
+
+    // An accepted key: saved with mode 0600 and used by the provider.
+    h.d.request(UiRequest::Login(submitted("openrouter", GOOD)))
+        .await;
+    match h
+        .until(|e| matches!(e, AppEvent::Core(CoreEvent::LoginResult(_))))
+        .await
+    {
+        AppEvent::Core(CoreEvent::LoginResult(Ok(m))) => {
+            assert!(m.contains("OpenRouter accepted the key"), "{m}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(
+        std::fs::read_to_string(&ini)
+            .unwrap()
+            .contains(&format!("api_key = {GOOD}"))
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&ini).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+    let resolved = h.d.cfg.providers["openrouter"].resolve_api_key().unwrap();
+    assert_eq!(resolved.unwrap().expose(), GOOD);
+
+    // Both keys are now redacted, and a new session uses that redactor:
+    // a prompt quoting them is stored masked.
+    for k in [GOOD, BAD] {
+        assert!(!h.d.redactor.redact(k).contains(k), "{k} redacted");
+    }
+    h.d.request(UiRequest::Submit("/new".into())).await;
+    h.d.request(UiRequest::Submit(format!("keys: {GOOD} and {BAD}")))
+        .await;
+    h.finish_turn().await;
+
+    assert!(
+        !files_containing(&env.root.join("data"), "keys: [REDACTED] and [REDACTED]").is_empty(),
+        "the prompt is stored, masked"
+    );
+    // No UI event and no stored event or file carries either key.
+    let seen = format!("{:?}", h.seen);
+    let events = format!("{:?}", h.d.events.lock().unwrap());
+    for k in [GOOD, BAD] {
+        assert!(!seen.contains(k), "{k} in a UI event");
+        assert!(!events.contains(k), "{k} in a run event");
+        assert_eq!(
+            files_containing(&env.root.join("data"), k),
+            Vec::<PathBuf>::new(),
+            "{k} stored"
+        );
+    }
+}
+
+/// Records the links it is asked to open instead of starting a browser.
+#[derive(Default)]
+struct RecordingBrowser(std::sync::Mutex<Vec<String>>);
+
+impl harness_providers::chatgpt::Browser for RecordingBrowser {
+    fn open(&self, url: &str) -> Result<(), String> {
+        self.0.lock().unwrap().push(url.to_owned());
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn usage_limit_offers_manage_usage_as_the_primary_button() {
+    // TASK-133 AC6: hitting the ChatGPT plan usage limit stops the turn and
+    // shows the error with *Manage usage* as its primary (first, focused)
+    // button, operable by keyboard and mouse, with no fallback call.
+    use harness_tui::app::{App, AppConfig};
+    use harness_tui::interaction::testing::{buffer_text, click, find_text, key};
+    use harness_tui::panel::PanelButton;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let url = harness_providers::chatgpt::MANAGE_USAGE_URL;
+    let env = Env::new();
+    let script = env.script(
+        "responses:\n  - error: { kind: usage_limit, message: \"You have reached your plan's usage limit.\" }\n  - content: [ { text: \"must not be used\" } ]\n",
+    );
+    let mut h = Harness::start(&env, &script).await;
+    let browser = Arc::new(RecordingBrowser::default());
+    h.d.browser = browser.clone();
+    h.until(|e| matches!(e, AppEvent::Core(CoreEvent::Session { .. })))
+        .await;
+    h.d.request(UiRequest::Submit("hi".into())).await;
+    h.finish_turn().await;
+
+    let (lines, buttons) = match h
+        .until(|e| {
+            matches!(e, AppEvent::Core(CoreEvent::Panel { title, .. }) if title == commands::ERROR_TITLE)
+        })
+        .await
+    {
+        AppEvent::Core(CoreEvent::Panel { lines, buttons, .. }) => (lines.clone(), buttons.clone()),
+        _ => unreachable!(),
+    };
+    assert_eq!(
+        buttons,
+        vec![PanelButton::new(commands::ERROR_ACTION, "Manage usage")],
+        "Manage usage is the first (primary) button"
+    );
+    assert!(lines.iter().any(|l| l.contains("usage limit")), "{lines:?}");
+    assert!(lines.iter().any(|l| l.contains(url)), "{lines:?}");
+    // No silent fallback: the second scripted reply never streamed.
+    assert!(
+        !h.seen.iter().any(|e| matches!(
+            e,
+            AppEvent::Run(ev) if matches!(&ev.kind, EventKind::Delta { text, .. } if text.contains("must not"))
+        )),
+        "a second model call was made"
+    );
+
+    // The real app renders the panel; the button is focused, so Enter runs it.
+    let (tx, mut requests) = mpsc::unbounded_channel();
+    let mut app = App::new(AppConfig::default(), tx);
+    let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    app.handle(AppEvent::Core(CoreEvent::Panel {
+        title: commands::ERROR_TITLE.into(),
+        lines,
+        buttons,
+    }));
+    term.draw(|f| app.render(f)).unwrap();
+    let text = buffer_text(term.backend().buffer());
+    assert!(text.contains("[ Manage usage ]"), "{text}");
+    app.handle(AppEvent::Terminal(key("enter")));
+    let req = requests.try_recv().expect("Enter activates Manage usage");
+    assert_eq!(req, UiRequest::PanelAction(commands::ERROR_ACTION.into()));
+    h.d.request(req).await;
+    assert_eq!(*browser.0.lock().unwrap(), vec![url.to_owned()]);
+    h.until(|e| {
+        matches!(e, AppEvent::Core(CoreEvent::Notify { title, .. }) if title == "opened in the browser")
+    })
+    .await;
+
+    // Mouse: clicking the button does the same.
+    term.draw(|f| app.render(f)).unwrap();
+    let (x, y) = find_text(term.backend().buffer(), "[ Manage usage ]").unwrap();
+    app.handle(AppEvent::Terminal(click(x + 2, y)));
+    let req = requests.try_recv().expect("a click activates Manage usage");
+    assert_eq!(req, UiRequest::PanelAction(commands::ERROR_ACTION.into()));
+    h.d.request(req).await;
+    assert_eq!(browser.0.lock().unwrap().len(), 2);
+}

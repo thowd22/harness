@@ -1,0 +1,38 @@
+name: implement-verify-review
+description: Implement a change, verify it with the test command, and loop until an independent reviewer approves
+command: ivr
+inputs:
+  task: { type: string, required: true, positional: 0, description: "What to implement" }
+  test: { type: string, required: true, description: "Command that verifies the change, e.g. cargo test" }
+budget: { usd: 5 }
+goal: "{{ inputs.task }}"
+tasks:
+  - { id: implement, title: "Implement the change", step: implement }
+  - { id: verify, title: "Verify with the tests", step: verify }
+  - { id: review, title: "Independent review", step: review }
+steps:
+  - id: implement
+    agent: coder
+    prompt: |
+      {{ inputs.task }}
+
+      Keep the change minimal and add or update tests for it. `{{ inputs.test }}` must pass when you are done.
+      {%- if steps.review is defined %}
+
+      A reviewer asked for changes to your previous attempt:
+      {{ steps.review.outputs.summary }}
+      {%- endif %}
+
+  - id: verify
+    needs: [implement]
+    verify: "{{ inputs.test }}"
+
+  - id: review
+    needs: [verify]
+    agent: reviewer
+    prompt: |
+      Review the change just made for this task: {{ inputs.task }}
+      Check correctness, unrequested changes, over-engineering and test adequacy. `{{ inputs.test }}` passes.
+      Set `verdict` to "approve" or "request_changes", and explain what to change in your reply.
+    outputs: [verdict]
+    loop: { until: "{{ steps.review.outputs.verdict == 'approve' }}", max_iterations: 3, retry_step: implement }

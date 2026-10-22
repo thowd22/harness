@@ -1,0 +1,53 @@
+name: Install script
+
+# Lints install.sh and runs it against a local fake release server for every
+# supported platform name (TASK-139). tests/install-test.sh builds the fake
+# assets with scripts/release-package.sh for each target in
+# release-harness.yml, so a renamed asset or target breaks this job.
+on:
+  push:
+    branches: [main]
+    paths:
+      - install.sh
+      - tests/install-test.sh
+      - tests/fixtures/install/**
+      - scripts/release-package.sh
+      - scripts/release-common.sh
+      - .github/workflows/release-harness.yml
+      - .github/workflows/install-test.yml
+  pull_request:
+    paths:
+      - install.sh
+      - tests/install-test.sh
+      - tests/fixtures/install/**
+      - scripts/release-package.sh
+      - scripts/release-common.sh
+      - .github/workflows/release-harness.yml
+      - .github/workflows/install-test.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: shellcheck --version
+      - run: shellcheck install.sh tests/install-test.sh tests/fixtures/install/bin/*
+
+  fake-release:
+    name: install.sh on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: wget is available (the wget-only path is tested too)
+        if: runner.os == 'macOS'
+        run: command -v wget || brew install wget
+      - run: tests/install-test.sh

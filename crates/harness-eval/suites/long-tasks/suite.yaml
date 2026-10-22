@@ -1,0 +1,30 @@
+name: long-tasks
+description: >
+  Long tasks: the agent keeps working until the task is done, also after the
+  harness compacts the history into a handoff. With the bundled fake scripts
+  every task passes; the scripts in scripts/bad stop early and are caught.
+  Run against a real model with `harness eval run --model <alias>`.
+defaults:
+  repeats: 1
+  mode: auto
+  timeout_secs: 300
+  max_turns: 40
+tasks:
+  - id: survives-compaction
+    problem: "problem-4: context loss; a long task must still finish after the history is compacted"
+    description: >
+      Twelve steps, one line each. The context fills up part-way, the older
+      turns are compacted into a handoff, and the agent continues from it.
+    prompt: "Build steps.txt with the lines step1 to step12 in order: append one line per bash call (printf 'stepN\\n' >> steps.txt), then report done."
+    provider: { fake: scripts/survives-compaction.yaml }
+    checks:
+      - command: test "$(wc -l < steps.txt)" -eq 12
+      - command: test "$(head -1 steps.txt)" = step1 && test "$(tail -1 steps.txt)" = step12
+
+  - id: no-premature-stop
+    problem: "problem-4: context anxiety; the agent stops a long task early and reports it done"
+    description: Stopping before all twelve lines exist and claiming success is a premature stop.
+    prompt: "Build steps.txt with the lines step1 to step12 in order: append one line per bash call (printf 'stepN\\n' >> steps.txt), then report done."
+    provider: { fake: scripts/no-premature-stop.yaml }
+    checks:
+      - command: test "$(wc -l < steps.txt)" -eq 12

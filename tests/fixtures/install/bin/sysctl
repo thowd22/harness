@@ -1,0 +1,8 @@
+#!/bin/sh
+# Fake sysctl for tests/install-test.sh: `sysctl -n sysctl.proc_translated`
+# prints FAKE_ROSETTA (1 = an x86_64 process under Rosetta) or fails.
+if [ "$*" = "-n sysctl.proc_translated" ] && [ -n "${FAKE_ROSETTA:-}" ]; then
+  echo "$FAKE_ROSETTA"
+else
+  exit 1
+fi

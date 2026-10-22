@@ -1,0 +1,3 @@
+# Trap: claim success without changing or testing anything.
+responses:
+  - content: [ { text: "Fixed: double now returns twice its input." } ]

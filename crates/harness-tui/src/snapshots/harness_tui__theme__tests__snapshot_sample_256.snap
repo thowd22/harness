@@ -1,0 +1,34 @@
+---
+source: crates/harness-tui/src/theme.rs
+expression: "sample(&Theme::default().with_depth(ColorDepth::Ansi256))"
+---
+┌✔ edit src/a.rs───────────────────────┐
+│+ added                               │
+│- removed                             │
+│⠹ thinking $0.02                      │
+│                                      │
+└──────────────────────────────────────┘
+--- styles ---
+0 0-0: fg=Indexed(61) bg=Indexed(236)
+0 1-2: fg=Indexed(84) bg=Indexed(236)
+0 3-7: fg=Indexed(141) bg=Indexed(236)
+0 8-15: fg=Indexed(117) bg=Indexed(236)
+0 16-39: fg=Indexed(61) bg=Indexed(236)
+1 0-0: fg=Indexed(61) bg=Indexed(236)
+1 1-7: fg=Indexed(84) bg=Indexed(237)
+1 8-38: fg=Indexed(255) bg=Indexed(236)
+1 39-39: fg=Indexed(61) bg=Indexed(236)
+2 0-0: fg=Indexed(61) bg=Indexed(236)
+2 1-9: fg=Indexed(203) bg=Indexed(237)
+2 10-38: fg=Indexed(255) bg=Indexed(236)
+2 39-39: fg=Indexed(61) bg=Indexed(236)
+3 0-0: fg=Indexed(61) bg=Indexed(236)
+3 1-2: fg=Indexed(117) bg=Indexed(236)
+3 3-11: fg=Indexed(61) bg=Indexed(236) mod=ITALIC
+3 12-16: fg=Indexed(228) bg=Indexed(236)
+3 17-38: fg=Indexed(255) bg=Indexed(236)
+3 39-39: fg=Indexed(61) bg=Indexed(236)
+4 0-0: fg=Indexed(61) bg=Indexed(236)
+4 1-38: fg=Indexed(255) bg=Indexed(236)
+4 39-39: fg=Indexed(61) bg=Indexed(236)
+5 0-39: fg=Indexed(61) bg=Indexed(236)

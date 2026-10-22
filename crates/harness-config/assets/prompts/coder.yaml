@@ -1,0 +1,10 @@
+name: coder
+description: Default coding prompt (built in)
+layers:
+  - file: base.md
+  - file: coder.md
+  - file: memory.md
+  - file: context.md
+  - text: |
+      Project: {{ cwd }} ({{ os }}, branch {{ git_branch }}). Today is {{ date }}.
+vars: [cwd, os, date, git_branch]

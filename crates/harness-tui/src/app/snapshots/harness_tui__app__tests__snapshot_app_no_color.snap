@@ -1,0 +1,66 @@
+---
+source: crates/harness-tui/src/app/tests.rs
+expression: "snapshot(ColorDepth::None)"
+---
+Type a message and press Enter. Ctrl+P opens the command palette.
+
+
+          ┌ Keys ───────────────────────────────────────────────────┐
+          │ enter                   send message                    │
+          │ shift+enter, alt+enter  new line                        │
+          │ esc                     cancel / back                   │
+          │ tab                     switch view (chat / map)        │
+          │ ctrl+p                  command palette                 │
+          │ ctrl+y                  copy to clipboard               │
+          │ ctrl+t                  select text in the transcript   │
+          │ ctrl+c                  interrupt agent                 │
+          │ ctrl+q                  quit                            │
+          │ ctrl+z                  suspend (resume with fg)        │
+          │ shift+tab / arrows      move focus                      │
+          │ enter                   activate focused element        │
+          │ pgup / pgdn             scroll focused pane             │
+          │ mouse                   click activates, wheel scrolls  │
+          │                                                         │
+          │                        [ Close ]                        │
+◐ sending └─────────────────────────────────────────── esc to close ┘
+› Type a message, / for commands
+. │ no model · auto-edit │ ↑0 ↓0 │ $? │ ◐ 1 agent
+ chat  map  │ ◐ running                                                    keys
+--- styles ---
+3 10-68: mod=BOLD
+4 10-10: mod=BOLD
+4 68-68: mod=BOLD
+5 10-10: mod=BOLD
+5 68-68: mod=BOLD
+6 10-10: mod=BOLD
+6 68-68: mod=BOLD
+7 10-10: mod=BOLD
+7 68-68: mod=BOLD
+8 10-10: mod=BOLD
+8 68-68: mod=BOLD
+9 10-10: mod=BOLD
+9 68-68: mod=BOLD
+10 10-10: mod=BOLD
+10 68-68: mod=BOLD
+11 10-10: mod=BOLD
+11 68-68: mod=BOLD
+12 10-10: mod=BOLD
+12 68-68: mod=BOLD
+13 10-10: mod=BOLD
+13 68-68: mod=BOLD
+14 10-10: mod=BOLD
+14 68-68: mod=BOLD
+15 10-10: mod=BOLD
+15 68-68: mod=BOLD
+16 10-10: mod=BOLD
+16 68-68: mod=BOLD
+17 10-10: mod=BOLD
+17 68-68: mod=BOLD
+18 10-10: mod=BOLD
+18 68-68: mod=BOLD
+19 10-10: mod=BOLD
+19 35-43: mod=REVERSED
+19 68-68: mod=BOLD
+20 10-68: mod=BOLD
+21 0-79: mod=REVERSED
+23 0-5: mod=BOLD

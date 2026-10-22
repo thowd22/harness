@@ -1,0 +1,86 @@
+name: Cut release
+
+# Run from the Actions tab (or `gh workflow run cut-release.yml -f
+# version=X.Y.Z`) on the branch to release from (TASK-138). It:
+#   1. checks CI is green on the branch head (scripts/release-ci-gate.sh),
+#   2. bumps the workspace version, Cargo.lock and CHANGELOG
+#      (scripts/release-bump.sh turns `## Unreleased` into `## [X.Y.Z]`),
+#   3. commits, tags vX.Y.Z and pushes both atomically,
+#   4. dispatches the Release workflow for the tag, which runs the full CI
+#      again on the release commit before building anything.
+# See docs/releasing.md.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, X.Y.Z (a leading v is stripped)"
+        required: true
+        type: string
+
+permissions:
+  contents: write # push the release commit and tag
+  actions: write # dispatch release-harness.yml
+
+concurrency:
+  group: cut-release
+  cancel-in-progress: false
+
+jobs:
+  cut:
+    name: Cut v${{ inputs.version }}
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ inputs.version }}
+      BRANCH: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Must run on a branch
+        if: github.ref_type != 'branch'
+        run: |
+          echo "::error::choose the branch to release from, not a tag"
+          exit 1
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Normalise and validate the version
+        # Accept "v0.1.0" as well as "0.1.0", and refuse anything else before
+        # a tag name is built from it: every later step uses the normalised
+        # $VERSION from GITHUB_ENV, so the tag is always vX.Y.Z, never vvX.Y.Z.
+        run: |
+          v=${VERSION#v}
+          . scripts/release-common.sh
+          if ! valid_version "$v"; then
+            echo "::error::version must be X.Y.Z or X.Y.Z-pre, got '$VERSION'"
+            exit 1
+          fi
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+          echo "Releasing v$v"
+      - name: Tag does not exist yet
+        run: |
+          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            echo "::error::tag v$VERSION already exists"
+            exit 1
+          fi
+      - name: CI is green on this commit
+        env:
+          RELEASE_CI_WAIT: "1800"
+        run: scripts/release-ci-gate.sh "$GITHUB_SHA" ci.yml
+      - uses: dtolnay/rust-toolchain@1.93.1
+      - name: Bump version and CHANGELOG
+        run: scripts/release-bump.sh "$VERSION"
+      - name: Cargo.lock is consistent with the bump
+        run: cargo metadata --locked --format-version 1 > /dev/null
+      - name: Notes for this version exist
+        run: scripts/release-notes.sh "$VERSION"
+      - name: Commit, tag and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock CHANGELOG.md
+          git commit -m "Release v$VERSION"
+          git tag -a "v$VERSION" -m "harness v$VERSION"
+          git push --atomic origin "HEAD:refs/heads/$BRANCH" "refs/tags/v$VERSION"
+      - name: Trigger the Release workflow for the tag
+        run: |
+          gh workflow run release-harness.yml --ref "v$VERSION"
+          echo "Release for v$VERSION dispatched: https://github.com/$GITHUB_REPOSITORY/actions/workflows/release-harness.yml" >> "$GITHUB_STEP_SUMMARY"

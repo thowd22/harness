@@ -1,0 +1,14 @@
+---
+source: crates/harness-tui/src/layout.rs
+expression: "draw(&run, Density::Full)"
+---
+╭──────────────────────╮     ╭──────────────────────╮
+│main                  │────►│review                │
+│                      │     │                      │
+│                      │     │                      │
+│                      │     │                      │
+│                      │     │                      │
+╰─┬────────────────────╯     ╰──────────────────────╯
+  ├──►researcher
+  │   └──►reader
+  └──►writer

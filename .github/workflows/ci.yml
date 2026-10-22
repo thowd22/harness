@@ -1,0 +1,100 @@
+name: CI
+
+# fmt, clippy (warnings denied), the full test suite and cargo-deny on every
+# push and pull request, on Linux and macOS. Tests that need host features
+# hosted runners lack (Landlock, bwrap/unshare, sshd, a TTY) detect that and
+# take their degraded-path assertions, logging the reason; see
+# docs/ci.md. The release workflow requires this workflow to be
+# green on the commit it releases (scripts/release-ci-gate.sh).
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # Never cancel tag or main runs: the release gate needs their result.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTFLAGS: -D warnings
+  RUST_BACKTRACE: 1
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.1
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.1
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: clippy
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - name: Build tests
+        run: cargo test --workspace --locked --no-run
+      - name: Host features available to host-dependent tests
+        shell: bash
+        run: |
+          uname -a
+          for tool in bwrap unshare sshd; do
+            if command -v "$tool" >/dev/null 2>&1; then echo "$tool: $(command -v "$tool")"; else echo "$tool: missing"; fi
+          done
+          if [ -t 0 ]; then echo "tty: yes"; else echo "tty: no"; fi
+          cargo run --quiet --locked -p harness-policy --bin harness-sandbox -- --probe || true
+      - name: Test
+        run: cargo test --workspace --locked
+      - name: Sandbox tests with skip reasons
+        run: cargo test --locked -p harness-policy --test sandbox -- --nocapture
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check

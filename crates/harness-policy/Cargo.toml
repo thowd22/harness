@@ -1,0 +1,33 @@
+[package]
+name = "harness-policy"
+description = "Rules engine, shell parsing, protected paths, approvals and sandboxing."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait.workspace = true
+globset.workspace = true
+harness-config.workspace = true
+harness-events.workspace = true
+harness-tools.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+which.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock.workspace = true
+
+[dev-dependencies]
+serde_norway.workspace = true
+tempfile.workspace = true
+tokio.workspace = true

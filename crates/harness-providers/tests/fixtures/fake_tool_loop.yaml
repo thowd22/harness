@@ -1,0 +1,11 @@
+# Two-turn tool loop: the model reads a file, then answers.
+responses:
+  - chunk_size: 4
+    content:
+      - text: "Let me look at the file."
+      - tool_use: { id: call_1, name: read, input: { path: README.md } }
+    usage: { input_tokens: 50, output_tokens: 12 }
+  - error: { kind: overloaded, message: busy }
+  - content:
+      - text: "The README describes the project."
+    usage: { input_tokens: 80, output_tokens: 8 }

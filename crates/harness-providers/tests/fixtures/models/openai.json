@@ -1,0 +1,107 @@
+{
+ "object": "list",
+ "data": [
+  {
+   "id": "gpt-5.6-sol",
+   "object": "model",
+   "created": 1790000000,
+   "owned_by": "openai"
+  },
+  {
+   "id": "gpt-5.5",
+   "object": "model",
+   "created": 1789999000,
+   "owned_by": "openai"
+  },
+  {
+   "id": "gpt-5.1",
+   "object": "model",
+   "created": 1789998000,
+   "owned_by": "system"
+  },
+  {
+   "id": "gpt-5-mini",
+   "object": "model",
+   "created": 1789997000,
+   "owned_by": "system"
+  },
+  {
+   "id": "gpt-4.1",
+   "object": "model",
+   "created": 1789996000,
+   "owned_by": "system"
+  },
+  {
+   "id": "o3",
+   "object": "model",
+   "created": 1789995000,
+   "owned_by": "system"
+  },
+  {
+   "id": "gpt-4o-search-preview",
+   "object": "model",
+   "created": 1789994000,
+   "owned_by": "system"
+  },
+  {
+   "id": "chatgpt-4o-latest",
+   "object": "model",
+   "created": 1789993000,
+   "owned_by": "system"
+  },
+  {
+   "id": "text-embedding-3-large",
+   "object": "model",
+   "created": 1789992000,
+   "owned_by": "system"
+  },
+  {
+   "id": "whisper-1",
+   "object": "model",
+   "created": 1789991000,
+   "owned_by": "openai-internal"
+  },
+  {
+   "id": "tts-1",
+   "object": "model",
+   "created": 1789990000,
+   "owned_by": "openai-internal"
+  },
+  {
+   "id": "dall-e-3",
+   "object": "model",
+   "created": 1789989000,
+   "owned_by": "system"
+  },
+  {
+   "id": "gpt-image-1",
+   "object": "model",
+   "created": 1789988000,
+   "owned_by": "system"
+  },
+  {
+   "id": "omni-moderation-latest",
+   "object": "model",
+   "created": 1789987000,
+   "owned_by": "system"
+  },
+  {
+   "id": "gpt-4o-realtime-preview",
+   "object": "model",
+   "created": 1789986000,
+   "owned_by": "system"
+  },
+  {
+   "id": "gpt-4o-transcribe",
+   "object": "model",
+   "created": 1789985000,
+   "owned_by": "system"
+  },
+  {
+   "id": "codex-mini-latest",
+   "object": "model",
+   "created": 1789984000,
+   "owned_by": "system"
+  }
+ ]
+}

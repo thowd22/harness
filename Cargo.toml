@@ -1,0 +1,121 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/harness-config",
+    "crates/harness-events",
+    "crates/harness-providers",
+    "crates/harness-tools",
+    "crates/harness-policy",
+    "crates/harness-agent",
+    "crates/harness-workflow",
+    "crates/harness-hygiene",
+    "crates/harness-memory",
+    "crates/harness-remote",
+    "crates/harness-tui",
+    "crates/harness-eval",
+    "crates/harness",
+]
+default-members = ["crates/harness"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+license = "MIT"
+repository = "https://github.com/harness-dev/harness"
+publish = false
+
+[workspace.lints.rust]
+# `deny` rather than `forbid` so a module that truly needs unsafe (e.g. a
+# sandbox syscall) can opt out locally with a justified `#[allow(unsafe_code)]`.
+unsafe_code = "deny"
+missing_docs = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[workspace.dependencies]
+# Internal crates
+harness-config = { path = "crates/harness-config" }
+harness-events = { path = "crates/harness-events" }
+harness-providers = { path = "crates/harness-providers" }
+harness-tools = { path = "crates/harness-tools" }
+harness-policy = { path = "crates/harness-policy" }
+harness-agent = { path = "crates/harness-agent" }
+harness-workflow = { path = "crates/harness-workflow" }
+harness-hygiene = { path = "crates/harness-hygiene" }
+harness-memory = { path = "crates/harness-memory" }
+harness-remote = { path = "crates/harness-remote" }
+harness-tui = { path = "crates/harness-tui" }
+harness-eval = { path = "crates/harness-eval" }
+
+# Async runtime
+tokio = { version = "1.54.1", features = ["full"] }
+futures = "0.3.34"
+async-trait = "0.1.92"
+bytes = "1.12.1"
+
+# Serialization
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+# serde_norway: maintained serde_yaml fork (serde_yaml_ng pulls unmaintained unsafe-libyaml, RUSTSEC-2024-0449).
+serde_norway = "0.9.42"
+rust-ini = "0.21.3"
+
+# Errors
+thiserror = "2.0.21"
+anyhow = "1.0.104"
+
+# Logging
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+tracing-appender = "0.2.5"
+
+# TUI
+ratatui = "0.30.2"
+crossterm = { version = "0.29.0", features = ["event-stream"] }
+nucleo-matcher = "0.3.1"
+
+# HTTP
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "stream", "json", "http2"] }
+# gzip request bodies (pure-Rust miniz_oxide backend)
+flate2 = "1.1.10"
+
+# Utilities
+uuid = { version = "1.28.0", features = ["v7", "serde"] }
+time = { version = "0.3.55", features = ["formatting", "parsing", "serde", "macros"] }
+sha2 = "0.11.1"
+# RSA ID-token signature checks and PKCE randomness for Sign in with ChatGPT
+# (already built as the reqwest/rustls crypto provider; same features)
+aws-lc-rs = { version = "1.18.2", default-features = false, features = ["aws-lc-sys", "prebuilt-nasm"] }
+hex = "0.4.3"
+globset = "0.4.20"
+ignore = "0.4.33"
+similar = "3.2.0"
+minijinja = "3.0.2"
+notify = "8.2.0"
+zeroize = { version = "1.9.1", features = ["derive"] }
+dirs = "7.0.0"
+which = "8.0.6"
+regex = "1.13.1"
+tokio-util = "0.7.20"
+# Unix process-group signalling (safe killpg) for harness-tools exec
+nix = { version = "0.31.3", features = ["signal", "process"] }
+# Linux Landlock LSM bindings for the harness-policy bash sandbox
+landlock = "0.4.4"
+# Binary payloads in the harness-remote JSON-RPC protocol
+base64 = "0.22.1"
+# Negotiated frame compression in the harness-remote helper protocol
+zstd = { version = "0.13.3", default-features = false }
+
+# Testing
+tempfile = "3.27.0"
+insta = { version = "1.49.0", features = ["yaml", "json"] }
+# Display width of text for harness-tui layout (same version ratatui uses)
+unicode-width = "0.2.2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"

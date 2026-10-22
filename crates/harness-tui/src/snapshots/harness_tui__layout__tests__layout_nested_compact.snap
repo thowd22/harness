@@ -1,0 +1,8 @@
+---
+source: crates/harness-tui/src/layout.rs
+expression: "draw(&run, Density::Compact)"
+---
+main                      ────►review
+ ├──►researcher
+ │   └──►reader
+ └──►writer

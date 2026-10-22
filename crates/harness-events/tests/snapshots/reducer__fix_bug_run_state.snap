@@ -1,0 +1,196 @@
+---
+source: crates/harness-events/tests/reducer.rs
+expression: state
+---
+run_id: 0199a3b2-0c4e-7a10-8000-0000000000f1
+name: fix-bug
+workflow: fix-bug
+host: gpu-box
+status: failed
+started_at: "2026-10-22T12:00:00Z"
+finished_at: "2026-10-22T12:02:14Z"
+error: step proof failed
+nodes:
+  - id: repro
+    parent: ~
+    kind: agent
+    name: repro
+    agent: implementer
+    model: sonnet
+    host: ~
+    status: succeeded
+    started_at: "2026-10-22T12:00:00Z"
+    finished_at: "2026-10-22T12:00:41Z"
+    duration_ms: 41000
+    tokens:
+      input: 2700
+      cached_input: 1200
+      output: 420
+      reasoning: 0
+    cost_usd: 0.08
+    retries: 0
+    model_calls: 2
+    tool_calls: 1
+    files_changed: 1
+    pending_approvals: 0
+    last_verify_passed: ~
+    error: ~
+    children: []
+    last_seq: 18
+  - id: prove-fail
+    parent: ~
+    kind: verify
+    name: prove-fail
+    agent: ~
+    model: ~
+    host: ~
+    status: succeeded
+    started_at: "2026-10-22T12:00:41Z"
+    finished_at: "2026-10-22T12:00:47Z"
+    duration_ms: 6000
+    tokens:
+      input: 0
+      cached_input: 0
+      output: 0
+      reasoning: 0
+    cost_usd: 0
+    retries: 1
+    model_calls: 0
+    tool_calls: 0
+    files_changed: 0
+    pending_approvals: 0
+    last_verify_passed: true
+    error: ~
+    children: []
+    last_seq: 24
+  - id: fix
+    parent: ~
+    kind: agent
+    name: fix
+    agent: implementer
+    model: sonnet
+    host: gpu-box
+    status: succeeded
+    started_at: "2026-10-22T12:00:47Z"
+    finished_at: "2026-10-22T12:01:49Z"
+    duration_ms: 62000
+    tokens:
+      input: 25400
+      cached_input: 24300
+      output: 1212
+      reasoning: 0
+    cost_usd: 0.31
+    retries: 0
+    model_calls: 2
+    tool_calls: 0
+    files_changed: 1
+    pending_approvals: 0
+    last_verify_passed: ~
+    error: ~
+    children:
+      - r1
+      - r2
+    last_seq: 49
+  - id: proof
+    parent: ~
+    kind: agent
+    name: proof
+    agent: bugfix-proof
+    model: ~
+    host: ~
+    status: failed
+    started_at: "2026-10-22T12:01:50Z"
+    finished_at: "2026-10-22T12:02:14Z"
+    duration_ms: 24000
+    tokens:
+      input: 0
+      cached_input: 0
+      output: 0
+      reasoning: 0
+    cost_usd: 0
+    retries: 0
+    model_calls: 0
+    tool_calls: 0
+    files_changed: 0
+    pending_approvals: 0
+    last_verify_passed: ~
+    error: regression test still passes on old code
+    children: []
+    last_seq: 51
+  - id: r1
+    parent: fix
+    kind: subagent
+    name: researcher
+    agent: researcher
+    model: haiku
+    host: ~
+    status: succeeded
+    started_at: "2026-10-22T12:00:52Z"
+    finished_at: "2026-10-22T12:01:04Z"
+    duration_ms: 12000
+    tokens:
+      input: 3000
+      cached_input: 0
+      output: 200
+      reasoning: 0
+    cost_usd: 0.01
+    retries: 0
+    model_calls: 1
+    tool_calls: 0
+    files_changed: 0
+    pending_approvals: 0
+    last_verify_passed: ~
+    error: ~
+    children: []
+    last_seq: 39
+  - id: r2
+    parent: fix
+    kind: subagent
+    name: researcher
+    agent: researcher
+    model: haiku
+    host: ~
+    status: succeeded
+    started_at: "2026-10-22T12:00:53Z"
+    finished_at: "2026-10-22T12:01:01Z"
+    duration_ms: 8000
+    tokens:
+      input: 0
+      cached_input: 0
+      output: 0
+      reasoning: 0
+    cost_usd: 0
+    retries: 0
+    model_calls: 0
+    tool_calls: 0
+    files_changed: 0
+    pending_approvals: 0
+    last_verify_passed: ~
+    error: ~
+    children: []
+    last_seq: 38
+edges:
+  - from: repro
+    to: prove-fail
+    kind: needs
+  - from: prove-fail
+    to: fix
+    kind: needs
+  - from: fix
+    to: proof
+    kind: needs
+  - from: fix
+    to: r1
+    kind: spawn
+  - from: fix
+    to: r2
+    kind: spawn
+tokens:
+  input: 31100
+  cached_input: 25500
+  output: 1832
+  reasoning: 0
+cost_usd: 0.4
+event_count: 53
+last_seq: 52
+topology_version: 11

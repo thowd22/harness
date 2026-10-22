@@ -1,0 +1,11 @@
+# Stopped by the length limit.
+# Format: each reply starts with '--- <status>[; header: value]...'.
+--- 200
+data: {"id":"gen-conf","model":"anthropic/claude-sonnet-4.6","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello! This is cut"},"finish_reason":null}]}
+
+data: {"id":"gen-conf","model":"anthropic/claude-sonnet-4.6","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"length"}]}
+
+data: {"id":"gen-conf","model":"anthropic/claude-sonnet-4.6","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":null}],"usage":{"prompt_tokens":12,"completion_tokens":8,"cost":0.00012}}
+
+data: [DONE]
+

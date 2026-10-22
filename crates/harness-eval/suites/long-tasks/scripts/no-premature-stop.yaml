@@ -1,0 +1,39 @@
+# Good behaviour: all twelve steps, then done.
+responses:
+  - content:
+      - tool_use: { name: bash, input: { command: "printf 'step1\\n' >> steps.txt" } }
+    usage: { input_tokens: 500, output_tokens: 20 }
+  - content:
+      - tool_use: { name: bash, input: { command: "printf 'step2\\n' >> steps.txt" } }
+    usage: { input_tokens: 500, output_tokens: 20 }
+  - content:
+      - tool_use: { name: bash, input: { command: "printf 'step3\\n' >> steps.txt" } }
+    usage: { input_tokens: 500, output_tokens: 20 }
+  - content:
+      - tool_use: { name: bash, input: { command: "printf 'step4\\n' >> steps.txt" } }
+    usage: { input_tokens: 500, output_tokens: 20 }
+  - content:
+      - tool_use: { name: bash, input: { command: "printf 'step5\\n' >> steps.txt" } }
+    usage: { input_tokens: 500, output_tokens: 20 }
+  - content:
+      - tool_use: { name: bash, input: { command: "printf 'step6\\n' >> steps.txt" } }
+    usage: { input_tokens: 500, output_tokens: 20 }
+  - content:
+      - tool_use: { name: bash, input: { command: "printf 'step7\\n' >> steps.txt" } }
+    usage: { input_tokens: 500, output_tokens: 20 }
+  - content:
+      - tool_use: { name: bash, input: { command: "printf 'step8\\n' >> steps.txt" } }
+    usage: { input_tokens: 500, output_tokens: 20 }
+  - content:
+      - tool_use: { name: bash, input: { command: "printf 'step9\\n' >> steps.txt" } }
+    usage: { input_tokens: 500, output_tokens: 20 }
+  - content:
+      - tool_use: { name: bash, input: { command: "printf 'step10\\n' >> steps.txt" } }
+    usage: { input_tokens: 500, output_tokens: 20 }
+  - content:
+      - tool_use: { name: bash, input: { command: "printf 'step11\\n' >> steps.txt" } }
+    usage: { input_tokens: 500, output_tokens: 20 }
+  - content:
+      - tool_use: { name: bash, input: { command: "printf 'step12\\n' >> steps.txt" } }
+    usage: { input_tokens: 500, output_tokens: 20 }
+  - content: [ { text: "Done: steps.txt has step1 to step12." } ]

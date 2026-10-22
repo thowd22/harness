@@ -1,0 +1,36 @@
+[package]
+name = "harness-agent"
+description = "Agent loop, tool dispatch, subagents, context management, compaction and budgets."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait.workspace = true
+futures.workspace = true
+harness-config.workspace = true
+harness-events.workspace = true
+harness-policy.workspace = true
+harness-providers.workspace = true
+harness-tools.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+harness-memory.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

@@ -1,0 +1,15 @@
+# 429 then success.
+# Format: each reply starts with '--- <status>[; header: value]...'.
+--- 429; retry-after-ms: 1
+{"error": {"code": 429, "message": "Rate limit exceeded"}}
+--- 200
+data: {"id":"gen-conf","model":"anthropic/claude-sonnet-4.6","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"Hel"},"finish_reason":null}]}
+
+data: {"id":"gen-conf","model":"anthropic/claude-sonnet-4.6","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"lo!"},"finish_reason":null}]}
+
+data: {"id":"gen-conf","model":"anthropic/claude-sonnet-4.6","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: {"id":"gen-conf","model":"anthropic/claude-sonnet-4.6","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":null}],"usage":{"prompt_tokens":12,"completion_tokens":8,"cost":0.00012}}
+
+data: [DONE]
+

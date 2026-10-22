@@ -1,0 +1,26 @@
+# Reasoning details with a signature, then a plain follow-up turn.
+# Format: each reply starts with '--- <status>[; header: value]...'.
+--- 200
+data: {"id":"gen-conf","model":"anthropic/claude-sonnet-4.6","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","reasoning_details":[{"type":"reasoning.text","text":"Let me ","index":0,"format":"anthropic-claude-v1"}]},"finish_reason":null}]}
+
+data: {"id":"gen-conf","model":"anthropic/claude-sonnet-4.6","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_details":[{"type":"reasoning.text","text":"think.","index":0,"signature":"sig-conformance"}]},"finish_reason":null}]}
+
+data: {"id":"gen-conf","model":"anthropic/claude-sonnet-4.6","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Hello!"},"finish_reason":null}]}
+
+data: {"id":"gen-conf","model":"anthropic/claude-sonnet-4.6","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: {"id":"gen-conf","model":"anthropic/claude-sonnet-4.6","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":null}],"usage":{"prompt_tokens":12,"completion_tokens":8,"cost":0.00012}}
+
+data: [DONE]
+
+--- 200
+data: {"id":"gen-conf","model":"anthropic/claude-sonnet-4.6","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"Hel"},"finish_reason":null}]}
+
+data: {"id":"gen-conf","model":"anthropic/claude-sonnet-4.6","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"lo!"},"finish_reason":null}]}
+
+data: {"id":"gen-conf","model":"anthropic/claude-sonnet-4.6","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: {"id":"gen-conf","model":"anthropic/claude-sonnet-4.6","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":null}],"usage":{"prompt_tokens":12,"completion_tokens":8,"cost":0.00012}}
+
+data: [DONE]
+

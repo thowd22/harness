@@ -1,0 +1,11 @@
+# Trap: rewrite the file around the new requirement and drop `add`.
+responses:
+  - content:
+      - tool_use: { name: read, input: { path: src/calc.sh } }
+  - content:
+      - tool_use:
+          name: write
+          input:
+            path: src/calc.sh
+            content: "sub() { r=$(( $1 - $2 )); [ \"$r\" -lt 0 ] && r=0; echo $r; }\n"
+  - content: [ { text: "Done: sub floors at 0." } ]

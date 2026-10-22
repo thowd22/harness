@@ -1,0 +1,45 @@
+# Good behaviour: keep appending after the history is compacted.
+capabilities: { tools: true, parallel_tool_calls: true, context_window: 20000, max_output_tokens: 4096 }
+responses:
+  - content:
+      - tool_use: { name: bash, input: { command: "printf 'step1\\n' >> steps.txt" } }
+    usage: { input_tokens: 2000, output_tokens: 20 }
+  - content:
+      - tool_use: { name: bash, input: { command: "printf 'step2\\n' >> steps.txt" } }
+    usage: { input_tokens: 4000, output_tokens: 20 }
+  - content:
+      - tool_use: { name: bash, input: { command: "printf 'step3\\n' >> steps.txt" } }
+    usage: { input_tokens: 6000, output_tokens: 20 }
+  - content:
+      - tool_use: { name: bash, input: { command: "printf 'step4\\n' >> steps.txt" } }
+    usage: { input_tokens: 8000, output_tokens: 20 }
+  - content:
+      - tool_use: { name: bash, input: { command: "printf 'step5\\n' >> steps.txt" } }
+    usage: { input_tokens: 10000, output_tokens: 20 }
+  - content:
+      - tool_use: { name: bash, input: { command: "printf 'step6\\n' >> steps.txt" } }
+    usage: { input_tokens: 12000, output_tokens: 20 }
+  - content:
+      - tool_use: { name: bash, input: { command: "printf 'step7\\n' >> steps.txt" } }
+    usage: { input_tokens: 14000, output_tokens: 20 }
+  - content:
+      - tool_use: { name: bash, input: { command: "printf 'step8\\n' >> steps.txt" } }
+    usage: { input_tokens: 16000, output_tokens: 20 }
+  # The compaction call: a structured handoff replaces the older turns.
+  - content:
+      - text: "## Goal\nBuild steps.txt with step1 to step12, one line per bash call.\n\n## Decisions\nAppend with printf one line at a time.\n\n## Current state\nsteps.txt has step1 to step8.\n\n## Files touched\n- steps.txt\n\n## Next steps\nAppend step9 to step12, then report done.\n\n## Open questions\nnone"
+    usage: { input_tokens: 3000, output_tokens: 120 }
+  - content:
+      - tool_use: { name: bash, input: { command: "printf 'step9\\n' >> steps.txt" } }
+    usage: { input_tokens: 3200, output_tokens: 20 }
+  - content:
+      - tool_use: { name: bash, input: { command: "printf 'step10\\n' >> steps.txt" } }
+    usage: { input_tokens: 3400, output_tokens: 20 }
+  - content:
+      - tool_use: { name: bash, input: { command: "printf 'step11\\n' >> steps.txt" } }
+    usage: { input_tokens: 3600, output_tokens: 20 }
+  - content:
+      - tool_use: { name: bash, input: { command: "printf 'step12\\n' >> steps.txt" } }
+    usage: { input_tokens: 3800, output_tokens: 20 }
+  - content: [ { text: "Done: steps.txt has step1 to step12." } ]
+    usage: { input_tokens: 4000, output_tokens: 20 }

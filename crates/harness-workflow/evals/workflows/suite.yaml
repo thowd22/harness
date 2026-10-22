@@ -1,0 +1,63 @@
+name: bundled-workflows
+description: >
+  One task per bundled workflow (crates/harness-config/assets/workflows). With
+  the fake scripts every task passes; run against a real model with
+  `harness eval run --model <alias>` to measure the workflow. Approval gates
+  are approved up front (`harness eval` passes --approve-all to `harness wf
+  run`; plan-approve-implement has one).
+defaults:
+  repeats: 1
+  mode: auto
+  timeout_secs: 300
+  max_turns: 20
+tasks:
+  - id: implement-verify-review
+    problem: "problem-5: weak self-verification; changes are claimed done without tests or review"
+    description: Implement, run the tests, and pass an independent review.
+    fixture: fixtures/calc
+    files:
+      tests/test_triple.sh: |
+        . ./src/calc.sh
+        . ./tests/lib.sh
+        check triple "$(triple 3)" 9
+        finish
+    workflow:
+      name: implement-verify-review
+      inputs: { task: "Add a `triple` function to src/calc.sh (triple 3 prints 9).", test: "sh run_tests.sh" }
+    provider: { fake: scripts/implement-verify-review.yaml }
+    checks:
+      - command: sh run_tests.sh
+      - file: { path: src/calc.sh, contains: "triple()" }
+      - unchanged: ["tests/**"]
+
+  - id: fix-bug
+    problem: "problem-5: a fix without a failing test is unproven"
+    description: The test must fail before the fix and pass after it.
+    fixture: fixtures/calc
+    workflow:
+      name: fix-bug
+      inputs: { issue: "sub 3 5 prints -2; sub must never return a negative number (print 0)." }
+    provider: { fake: scripts/fix-bug.yaml }
+    checks:
+      - command: sh run_tests.sh
+      - command: sh tests/test_sub_floor.sh
+      - file: { path: src/calc.sh, contains: "sub()" }
+
+  - id: plan-approve-implement
+    problem: "problem-7: control; nothing changes before the plan is approved"
+    description: Plan first, approve, then implement and verify.
+    fixture: fixtures/calc
+    files:
+      tests/test_double.sh: |
+        . ./src/calc.sh
+        . ./tests/lib.sh
+        check double "$(double 4)" 8
+        finish
+    workflow:
+      name: plan-approve-implement
+      inputs: { task: "Add a `double` function to src/calc.sh (double 4 prints 8).", test: "sh run_tests.sh" }
+    provider: { fake: scripts/plan-approve-implement.yaml }
+    checks:
+      - command: sh run_tests.sh
+      - file: { path: src/calc.sh, contains: "double()" }
+      - unchanged: ["tests/**"]

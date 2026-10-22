@@ -1,0 +1,13 @@
+# plan (researcher), then implement (coder) after the approval gate.
+responses:
+  - content: [ { text: "Plan ready.\n```json\n{\"plan\": \"1. Add double() to src/calc.sh next to add/sub.\\n2. Run sh run_tests.sh.\"}\n```" } ]
+  - content:
+      - tool_use: { name: read, input: { path: src/calc.sh } }
+  - content:
+      - tool_use:
+          name: edit
+          input:
+            path: src/calc.sh
+            old_string: "sub() { echo $(( $1 - $2 )); }"
+            new_string: "sub() { echo $(( $1 - $2 )); }\ndouble() { echo $(( $1 * 2 )); }"
+  - content: [ { text: "Implemented the plan." } ]

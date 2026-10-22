@@ -1,0 +1,1818 @@
+//! The chat screen: every chat component composed and wired to input.
+//!
+//! ```text
+//! ┌ transcript (virtualized) ─────────────────────── toasts ┐
+//! │ …                                                        │
+//! │ ⠹ thinking 3.1s · turn 4 · 12.3s · … · ctrl+c to interrupt  ← activity line
+//! │ ╭ ⏸ approve bash  $ git push origin main ───────── … ╮     ← inline approvals
+//! │ /review [branch]  Review the diff           project      ← slash completion
+//! │ › draft                                                  ← input
+//! │ ~/CODE/harness  main │ sonnet · auto-edit │ ctx … │ $0.84  ← status line
+//! └──────────────────────────────────────────────────────────┘
+//!   palette / notification history: modal overlays
+//! ```
+//!
+//! [`ChatView`] owns its focus model (an [`Interaction`]) and turns terminal
+//! events into [`ChatOutput`]s for the app and the core. Key routing: global
+//! keys (quit, interrupt, palette) first, then an open modal (palette,
+//! history), then a pending approval (`y` `s` `a` `n` `Y` `N` Esc, Up/Down),
+//! then a focused transcript element (Tab/arrows move, Enter toggles, Esc
+//! returns to the input), then the input.
+//!
+//! Copy: the `copy` key copies the focused element (or the last assistant
+//! message), the `select` key starts keyboard selection (see
+//! [`super::copy`]), and copy buttons in the transcript are clickable. Every
+//! copy leaves the chat as a [`ChatOutput::Copy`]; the app writes it to the
+//! clipboard and confirms with a toast. Bracketed pastes go to the palette
+//! filter or argument prompt when the palette is open, else to the input
+//! (never to approval keys or keybindings).
+
+use std::time::{Duration, Instant};
+
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind,
+};
+use harness_config::ini::config::{Config, ShowThinking};
+use harness_events::schema::{NodeId, RunEvent};
+use harness_policy::approvals::{ModeState, PromptEnvelope};
+use harness_policy::rules::{Action as PolicyAction, Mode};
+use ratatui::Frame;
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::widgets::{Block, Paragraph};
+use time::{OffsetDateTime, UtcOffset};
+
+use super::copy::{self as copy_ui, SelectAction, ids as copy_ids};
+use super::timefmt::{TimeFormat, Timestamps};
+use super::transcript::{self, CopyTarget, Transcript, TranscriptAction, ViewSettings};
+use crate::app::{AppCommand, View};
+use crate::approval::{ApprovalAction, ApprovalOutcome, ApprovalQueue};
+use crate::cards::{ApprovalNote, CardCopy};
+use crate::indicators::{Activity, Spinner, TerminalTitle};
+use crate::input::{INPUT_ID, Input, InputAction, InputOutcome, SlashCommand};
+use crate::interaction::{Dispatch, ElementId, Interaction, PaneId};
+use crate::keys::{Action, Keymap};
+use crate::notify::{Level, Notifications, NotifyAction};
+use crate::palette::{
+    Invocation, Palette, PaletteAction, PaletteEntry, PaletteOutcome, builtin_entries, ids,
+};
+use crate::status::StatusLine;
+use crate::theme::Theme;
+
+/// Scroll pane id of the transcript.
+pub const CHAT_PANE: &str = "chat";
+
+/// Every clickable element of the chat screen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatAction {
+    /// A transcript element.
+    Transcript(TranscriptAction),
+    /// The input or its popups.
+    Input(InputAction),
+    /// A palette row.
+    Palette(PaletteAction),
+    /// An approval button.
+    Approval(ApprovalAction),
+    /// A toast or history element.
+    Notify(NotifyAction),
+    /// A selection-mode bar button.
+    Select(SelectAction),
+}
+
+/// What the chat screen asks the app or core to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatOutput {
+    /// Send this message to the agent.
+    Submit(String),
+    /// Interrupt the running agent.
+    Interrupt,
+    /// Esc with nothing to back out of.
+    Cancel,
+    /// Quit.
+    Quit,
+    /// An app command (mouse, help, view).
+    Command(AppCommand),
+    /// A palette entry the chat does not handle itself (workflow, skill,
+    /// agent, run, remote).
+    Run(Invocation),
+    /// Open a node in the map / node detail.
+    OpenNode(NodeId),
+    /// The session autonomy mode changed (from the palette).
+    ModeChanged(Mode),
+    /// Write this OSC sequence to set the terminal title.
+    SetTitle(String),
+    /// Revert this memory commit (the "updated memory" card's undo).
+    UndoMemory(String),
+    /// Copy `text` to the clipboard; `what` names it for the toast
+    /// (`message`, `code block`, `tool output`, `diff`, `selection`).
+    Copy {
+        /// What is copied.
+        what: String,
+        /// The text.
+        text: String,
+    },
+}
+
+/// The built-in palette entries plus the copy actions.
+fn chat_entries(keymap: &Keymap) -> Vec<PaletteEntry> {
+    let mut v = builtin_entries(keymap);
+    v.extend(copy_ui::palette_entries(keymap));
+    v
+}
+
+/// Chat settings.
+#[derive(Debug, Clone)]
+pub struct ChatConfig {
+    /// Colours.
+    pub theme: Theme,
+    /// Key bindings.
+    pub keymap: Keymap,
+    /// Transcript settings.
+    pub settings: ViewSettings,
+    /// `[ui] stall_after`.
+    pub stall_after: Duration,
+    /// `[ui] animations`.
+    pub animations: bool,
+    /// `[ui] terminal_title`.
+    pub terminal_title: bool,
+    /// `[general] mode`.
+    pub mode: Mode,
+}
+
+impl Default for ChatConfig {
+    fn default() -> Self {
+        ChatConfig {
+            theme: Theme::default(),
+            keymap: Keymap::defaults(),
+            settings: ViewSettings::default(),
+            stall_after: Duration::from_secs(20),
+            animations: true,
+            terminal_title: false,
+            mode: Mode::AutoEdit,
+        }
+    }
+}
+
+impl ChatConfig {
+    /// Settings from `harness.ini` plus the already resolved theme and keys.
+    pub fn from_config(
+        cfg: &Config,
+        theme: Theme,
+        keymap: Keymap,
+        offset: UtcOffset,
+    ) -> ChatConfig {
+        ChatConfig {
+            theme,
+            keymap,
+            settings: ViewSettings::from_config(cfg, offset),
+            stall_after: cfg.ui.stall_after,
+            animations: cfg.ui.animations,
+            terminal_title: cfg.ui.terminal_title,
+            mode: cfg.general.mode.into(),
+        }
+    }
+}
+
+/// The composed chat screen.
+#[derive(Debug)]
+pub struct ChatView {
+    cfg: ChatConfig,
+    transcript: Transcript,
+    activity: Activity,
+    status: StatusLine,
+    input: Input,
+    palette: Palette,
+    extra_entries: Vec<PaletteEntry>,
+    approvals: ApprovalQueue,
+    notify: Notifications,
+    spinner: Spinner,
+    title: TerminalTitle,
+    interaction: Interaction<ChatAction>,
+    mode: ModeState,
+    width: u16,
+    wall: OffsetDateTime,
+    /// Focus when the palette opened (palette copy actions act on it).
+    palette_focus: Option<ElementId>,
+    /// The transcript area of the last frame.
+    body: Rect,
+    /// A screen (node detail, diff) is shown over the chat: "Copy focused"
+    /// and "Copy diff" go to it.
+    screen_open: bool,
+    /// Toasts drawn over another view or screen ([`ChatView::render_toast_overlay`]).
+    overlay_toasts: Vec<(Rect, NotifyAction)>,
+}
+
+impl ChatView {
+    /// A chat screen. `status` carries cwd and branch.
+    pub fn new(cfg: ChatConfig, mut status: StatusLine, now: Instant) -> ChatView {
+        let mut interaction = Interaction::new();
+        interaction.set_focus(INPUT_ID);
+        status.set_mode(cfg.mode);
+        let palette = Palette::new(chat_entries(&cfg.keymap));
+        ChatView {
+            transcript: Transcript::new(cfg.settings),
+            activity: Activity::new(now),
+            status,
+            input: Input::new(),
+            palette,
+            extra_entries: Vec::new(),
+            approvals: ApprovalQueue::new(),
+            notify: Notifications::new(),
+            spinner: Spinner::new(cfg.animations),
+            title: TerminalTitle::new(cfg.terminal_title),
+            interaction,
+            mode: ModeState::new(cfg.mode),
+            width: 80,
+            wall: OffsetDateTime::UNIX_EPOCH,
+            palette_focus: None,
+            body: Rect::default(),
+            screen_open: false,
+            overlay_toasts: Vec::new(),
+            cfg,
+        }
+    }
+
+    /// The transcript.
+    pub fn transcript(&self) -> &Transcript {
+        &self.transcript
+    }
+
+    /// The transcript, for direct updates (tool output streaming, retries).
+    pub fn transcript_mut(&mut self) -> &mut Transcript {
+        &mut self.transcript
+    }
+
+    /// The activity tracker (for phases not in the event log: compacting,
+    /// syncing, provider retries).
+    pub fn activity_mut(&mut self) -> &mut Activity {
+        &mut self.activity
+    }
+
+    /// The status line (model, branch, context window).
+    pub fn status_mut(&mut self) -> &mut StatusLine {
+        &mut self.status
+    }
+
+    /// The input editor.
+    pub fn input(&self) -> &Input {
+        &self.input
+    }
+
+    /// The input editor, for direct updates.
+    pub fn input_mut(&mut self) -> &mut Input {
+        &mut self.input
+    }
+
+    /// The palette.
+    pub fn palette(&self) -> &Palette {
+        &self.palette
+    }
+
+    /// The notifications.
+    pub fn notifications_mut(&mut self) -> &mut Notifications {
+        &mut self.notify
+    }
+
+    /// Pending approvals.
+    pub fn approvals(&self) -> &ApprovalQueue {
+        &self.approvals
+    }
+
+    /// The effective session mode.
+    pub fn mode(&self) -> Mode {
+        self.mode.session()
+    }
+
+    /// The focused element.
+    pub fn focused(&self) -> Option<&ElementId> {
+        self.interaction.focused()
+    }
+
+    /// Adds palette entries (catalog, runs, remotes) after the built-ins.
+    pub fn set_palette_entries(&mut self, extra: Vec<PaletteEntry>) {
+        self.extra_entries = extra;
+        let mut all = chat_entries(&self.cfg.keymap);
+        all.extend(self.extra_entries.iter().cloned());
+        self.palette.set_entries(all);
+    }
+
+    /// Tells the chat whether a screen is shown over it; then the "Copy
+    /// focused" and "Copy diff" palette entries are left to the app
+    /// ([`ChatOutput::Run`]).
+    pub fn set_screen_open(&mut self, open: bool) {
+        self.screen_open = open;
+    }
+
+    /// Draws the toasts alone over `area` (when the map or a screen is
+    /// shown), so copy results and other notifications stay visible.
+    pub fn render_toast_overlay(&mut self, frame: &mut Frame<'_>, area: Rect) {
+        let theme = self.cfg.theme.clone();
+        let mut hits: crate::interaction::HitMap<NotifyAction> = crate::interaction::HitMap::new();
+        self.notify
+            .render_toasts(frame, area, &theme, &mut hits, &|a| a);
+        self.overlay_toasts = hits.focusable().map(|r| (r.rect, r.action)).collect();
+    }
+
+    /// A click at `(x, y)` on a toast drawn by
+    /// [`ChatView::render_toast_overlay`] dismisses it. Returns whether it
+    /// hit one.
+    pub fn click_overlay_toast(&mut self, x: u16, y: u16) -> bool {
+        let p = ratatui::layout::Position::new(x, y);
+        match self.overlay_toasts.iter().find(|(r, _)| r.contains(p)) {
+            Some((_, a)) => {
+                let a = *a;
+                self.notify.activate(a);
+                self.overlay_toasts.clear();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Opens the palette asking for `entry`'s arguments.
+    pub fn prompt_args(&mut self, entry: PaletteEntry) {
+        self.notify.close_history();
+        self.palette.prompt_entry(entry);
+    }
+
+    /// Sets the slash commands offered by input completion.
+    pub fn set_slash_commands(&mut self, commands: Vec<SlashCommand>) {
+        self.input.set_commands(commands);
+    }
+
+    /// Shows a notification.
+    pub fn notify(&mut self, level: Level, title: &str, body: Option<String>, now: Instant) {
+        self.notify.push(level, title, body, self.wall, now);
+    }
+
+    /// Folds a run event into every component.
+    pub fn apply_run_event(&mut self, ev: &RunEvent, now: Instant) {
+        self.wall = self.wall.max(ev.ts);
+        if let harness_events::schema::EventKind::ToolOutput { text, .. } = &ev.kind {
+            self.activity.tool_output(text.lines().count().max(1), now);
+        }
+        self.transcript.apply(ev);
+        self.activity.apply(ev, now);
+        self.status.apply(ev);
+        self.notify.push_event(ev, now);
+    }
+
+    /// Queues an approval prompt from `ChannelUi`. Its cards turn into
+    /// approval cards until answered.
+    pub fn push_approval(&mut self, env: PromptEnvelope) {
+        for r in &env.prompt.requests {
+            let rule = &r.verdict.rule;
+            self.transcript.set_card_approval(
+                &r.call_id,
+                Some(ApprovalNote {
+                    rule: if rule.rule.is_empty() {
+                        rule.origin.clone()
+                    } else {
+                        rule.rule.clone()
+                    },
+                    reason: if r.verdict.outward {
+                        "outward action".into()
+                    } else {
+                        rule.reason.clone()
+                    },
+                }),
+            );
+        }
+        let action = env
+            .prompt
+            .requests
+            .first()
+            .map(|r| match &r.action {
+                PolicyAction::Bash { command } => {
+                    r.verdict.command.clone().unwrap_or_else(|| command.clone())
+                }
+                other => other.summary(),
+            })
+            .unwrap_or_default();
+        self.activity.set_phase(
+            crate::indicators::Phase::WaitingApproval { action },
+            Instant::now(),
+        );
+        self.approvals.push_envelope(env);
+    }
+
+    fn approvals_answered(&mut self, out: &ApprovalOutcome, now: Instant) {
+        if let ApprovalOutcome::Answered { .. } = out {
+            // Clear approval tint on every card that is still waiting.
+            let ids: Vec<String> = self
+                .transcript
+                .entries()
+                .iter()
+                .filter_map(|e| match &e.kind {
+                    transcript::EntryKind::Tools { group, .. } => Some(group),
+                    _ => None,
+                })
+                .flat_map(|g| g.cards.iter())
+                .filter(|c| c.status == crate::cards::CardStatus::Approval)
+                .map(|c| c.call_id.clone())
+                .collect();
+            let still: Vec<String> = self
+                .approvals
+                .current()
+                .map(|p| {
+                    p.prompt()
+                        .requests
+                        .iter()
+                        .map(|r| r.call_id.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            for id in ids.into_iter().filter(|i| !still.contains(i)) {
+                self.transcript.set_card_approval(&id, None);
+            }
+            if self.approvals.is_empty()
+                && matches!(
+                    self.activity.phase(),
+                    crate::indicators::Phase::WaitingApproval { .. }
+                )
+            {
+                self.activity
+                    .set_phase(crate::indicators::Phase::Sending, now);
+            }
+        }
+    }
+
+    /// Whether the chat wants animation ticks. `visible` is whether the chat
+    /// is on screen.
+    pub fn needs_tick(&self, visible: bool) -> bool {
+        let running = self.activity.is_active()
+            || self
+                .transcript
+                .entries()
+                .iter()
+                .rev()
+                .take(32)
+                .any(|e| match &e.kind {
+                    transcript::EntryKind::Tools { group, .. } => group
+                        .cards
+                        .iter()
+                        .any(|c| c.status == crate::cards::CardStatus::Running),
+                    transcript::EntryKind::Subagent(s) => !s.status.is_terminal(),
+                    _ => false,
+                });
+        self.spinner.needs_tick(running, visible) || self.notify.next_expiry().is_some()
+    }
+
+    /// One animation tick: advances the spinner, expires toasts and updates
+    /// the terminal title. Returns outputs (title changes).
+    pub fn tick(&mut self, now: Instant) -> Vec<ChatOutput> {
+        self.spinner.tick();
+        self.notify.expire(now);
+        self.title_output(now).into_iter().collect()
+    }
+
+    fn title_output(&mut self, now: Instant) -> Option<ChatOutput> {
+        let text = self
+            .activity
+            .title(now, &self.spinner, self.cfg.stall_after);
+        self.title.update(&text).map(ChatOutput::SetTitle)
+    }
+
+    fn frame_ctx(&self) -> (Theme, OffsetDateTime, Spinner, Option<String>) {
+        (
+            self.cfg.theme.clone(),
+            self.wall,
+            self.spinner,
+            self.interaction.focused().map(|f| f.0.clone()),
+        )
+    }
+
+    fn scroll(&mut self, lines: i32) {
+        let (theme, now, spinner, focus) = self.frame_ctx();
+        let f = transcript::Frame {
+            theme: &theme,
+            now,
+            spinner,
+            focus: focus.as_deref(),
+        };
+        self.transcript.scroll(lines, self.width as usize, &f);
+    }
+
+    /// Handles a terminal event. `wall` is the current wall-clock time
+    /// (used for user messages, which are not in the event log yet).
+    pub fn handle(&mut self, ev: &Event, now: Instant, wall: OffsetDateTime) -> Vec<ChatOutput> {
+        self.wall = self.wall.max(wall);
+        let mut out = Vec::new();
+        match ev {
+            Event::Key(k) => self.handle_key(k, now, &mut out),
+            Event::Mouse(m) => self.handle_mouse(m, now, &mut out),
+            Event::Paste(text) => {
+                if self.palette.is_open() {
+                    self.palette.paste(text);
+                } else {
+                    self.transcript.select_stop();
+                    self.interaction.set_focus(INPUT_ID);
+                    self.input.paste(text);
+                }
+            }
+            _ => {}
+        }
+        if let Some(t) = self.title_output(now) {
+            out.push(t);
+        }
+        out
+    }
+
+    fn handle_key(&mut self, k: &KeyEvent, now: Instant, out: &mut Vec<ChatOutput>) {
+        if k.kind == KeyEventKind::Release {
+            return;
+        }
+        let action = self.cfg.keymap.lookup(k);
+        match action {
+            Some(Action::Quit) => return out.push(ChatOutput::Quit),
+            Some(Action::Interrupt) => return out.push(ChatOutput::Interrupt),
+            Some(Action::Palette) => {
+                if self.palette.is_open() {
+                    self.palette.close();
+                } else {
+                    self.palette_focus = self.interaction.focused().cloned();
+                    self.notify.close_history();
+                    self.palette.open();
+                }
+                return;
+            }
+            _ => {}
+        }
+        if self.notify.is_history_open() {
+            if !self.notify.handle_key(k)
+                && let Some(d) = self.interaction.handle_key(k)
+            {
+                self.dispatch(d, now, out);
+            }
+            return;
+        }
+        if self.palette.is_open() {
+            let o = self.palette.handle_key(k);
+            self.palette_outcome(o, now, out);
+            return;
+        }
+        if self.transcript.selection().is_some() {
+            return self.selection_key(k, action, now, out);
+        }
+        match action {
+            Some(Action::Copy) => {
+                let focus = self.interaction.focused().cloned();
+                return self.copy_focused(focus, now, out);
+            }
+            Some(Action::Select) => return self.start_selection(now),
+            _ => {}
+        }
+        if !self.approvals.is_empty() {
+            let o = self.approvals.handle_key(k);
+            if o != ApprovalOutcome::Ignored {
+                self.approvals_answered(&o, now);
+                return;
+            }
+        }
+        let input_focused = self.interaction.focused().is_none_or(|f| f.0 == INPUT_ID);
+        if !input_focused {
+            if let Some(d) = self.interaction.handle_key(k) {
+                return self.dispatch(d, now, out);
+            }
+            // Typing while a card is focused goes back to the input.
+            self.interaction.set_focus(INPUT_ID);
+        }
+        match self.input.handle_key(k, action) {
+            InputOutcome::Submit(text) => self.submit(text, now, out),
+            InputOutcome::Changed => {}
+            InputOutcome::Ignored => {
+                if k.code == KeyCode::Esc || action == Some(Action::Cancel) {
+                    return out.push(ChatOutput::Cancel);
+                }
+                // Like the app: the switch-view key (Tab) switches view from
+                // the input; Shift+Tab and paging reach the focus layer.
+                if action == Some(Action::SwitchView) {
+                    return out.push(ChatOutput::Command(AppCommand::SwitchView(View::Map)));
+                }
+                if let Some(d) = self.interaction.handle_key(k)
+                    && !matches!(d, Dispatch::Back | Dispatch::Activate(_))
+                {
+                    self.dispatch(d, now, out);
+                }
+            }
+        }
+    }
+
+    fn submit(&mut self, text: String, now: Instant, out: &mut Vec<ChatOutput>) {
+        self.transcript.push_user(&text, self.wall);
+        self.transcript.follow();
+        // Slash commands may never reach the model; a turn they do start
+        // (skills, workflows) enters an active phase through its events.
+        if !text.trim_start().starts_with('/') {
+            self.activity.start_turn(now);
+        }
+        out.push(ChatOutput::Submit(text));
+    }
+
+    fn handle_mouse(&mut self, m: &MouseEvent, now: Instant, out: &mut Vec<ChatOutput>) {
+        let b = self.body;
+        if self.transcript.selection().is_some()
+            && !self.palette.is_open()
+            && m.kind == MouseEventKind::Down(MouseButton::Left)
+            && m.column >= b.x
+            && m.column < b.right()
+            && m.row >= b.y
+            && m.row < b.bottom()
+        {
+            let (theme, wall, spinner, focus) = self.frame_ctx();
+            let f = transcript::Frame {
+                theme: &theme,
+                now: wall,
+                spinner,
+                focus: focus.as_deref(),
+            };
+            self.transcript.select_row((m.row - b.y) as usize, &f);
+            return;
+        }
+        if let Some(d) = self.interaction.handle_mouse(m) {
+            self.dispatch(d, now, out);
+        }
+    }
+
+    fn dispatch(&mut self, d: Dispatch<ChatAction>, now: Instant, out: &mut Vec<ChatOutput>) {
+        match d {
+            Dispatch::Activate(a) => self.activate(a, now, out),
+            Dispatch::Scroll { pane, lines } => {
+                if pane == PaneId::from(CHAT_PANE) {
+                    self.scroll(lines);
+                }
+            }
+            Dispatch::Back => {
+                if self.palette.is_open() {
+                    let o = self.palette.back();
+                    self.palette_outcome(o, now, out);
+                } else if self.notify.is_history_open() {
+                    self.notify.close_history();
+                } else {
+                    self.interaction.set_focus(INPUT_ID);
+                }
+            }
+            Dispatch::Focus(_) => {}
+        }
+    }
+
+    fn activate(&mut self, a: ChatAction, now: Instant, out: &mut Vec<ChatOutput>) {
+        match a {
+            ChatAction::Transcript(t) => match self.transcript.activate(&t) {
+                Some(transcript::TranscriptOutput::OpenNode(node)) => {
+                    out.push(ChatOutput::OpenNode(node))
+                }
+                Some(transcript::TranscriptOutput::UndoMemory(commit)) => {
+                    out.push(ChatOutput::UndoMemory(commit))
+                }
+                Some(transcript::TranscriptOutput::Copy { what, text }) => {
+                    out.push(ChatOutput::Copy { what, text })
+                }
+                None => {}
+            },
+            ChatAction::Input(i) => {
+                self.input.activate(&i);
+                self.interaction.set_focus(INPUT_ID);
+            }
+            ChatAction::Palette(p) => {
+                let o = self.palette.activate(&p);
+                self.palette_outcome(o, now, out);
+            }
+            ChatAction::Approval(b) => {
+                let o = self.approvals.activate(b);
+                self.approvals_answered(&o, now);
+                self.interaction.set_focus(INPUT_ID);
+            }
+            ChatAction::Notify(n) => {
+                self.notify.activate(n);
+            }
+            ChatAction::Select(a) => match a {
+                SelectAction::Copy => self.copy_selection(now, out),
+                SelectAction::Mark => self.transcript.select_mark(),
+                SelectAction::Done => self.stop_selection(),
+            },
+        }
+    }
+
+    // ---- copy ----
+
+    /// Emits the copy of `target`, or warns when there is nothing.
+    fn emit_copy(&mut self, target: Option<CopyTarget>, now: Instant, out: &mut Vec<ChatOutput>) {
+        match target.and_then(|t| self.transcript.copy_text(&t)) {
+            Some((what, text)) => out.push(ChatOutput::Copy { what, text }),
+            None => self.notify(Level::Warning, "nothing to copy", None, now),
+        }
+    }
+
+    /// Copies what `focus` points at, else the last assistant message.
+    fn copy_focused(&mut self, focus: Option<ElementId>, now: Instant, out: &mut Vec<ChatOutput>) {
+        let target = focus
+            .and_then(|f| self.transcript.target_for(&f.0))
+            .or_else(|| self.transcript.last_message());
+        self.emit_copy(target, now, out);
+    }
+
+    /// The tool call behind a focused card or card button.
+    fn focused_call(focus: Option<&ElementId>) -> Option<String> {
+        let id = &focus?.0;
+        ["card.", "copy.out.", "copy.diff."]
+            .iter()
+            .find_map(|p| id.strip_prefix(p))
+            .map(str::to_owned)
+    }
+
+    /// Runs a copy palette entry. Returns false for other ids.
+    fn copy_palette(
+        &mut self,
+        id: &str,
+        focus: Option<ElementId>,
+        now: Instant,
+        out: &mut Vec<ChatOutput>,
+    ) -> bool {
+        if self.screen_open && matches!(id, copy_ids::FOCUSED | copy_ids::DIFF) {
+            return false;
+        }
+        let call = Self::focused_call(focus.as_ref());
+        let card = |kind| {
+            call.clone()
+                .map(|call_id| CopyTarget::Card { call_id, kind })
+        };
+        let target = match id {
+            copy_ids::FOCUSED => {
+                self.copy_focused(focus, now, out);
+                return true;
+            }
+            copy_ids::SELECT => {
+                self.start_selection(now);
+                return true;
+            }
+            copy_ids::MESSAGE => self.transcript.last_message(),
+            copy_ids::CODE => focus
+                .and_then(|f| self.transcript.target_for(&f.0))
+                .filter(|t| matches!(t, CopyTarget::Code { .. }))
+                .or_else(|| self.transcript.last_code()),
+            copy_ids::OUTPUT => {
+                card(CardCopy::Output).or_else(|| self.transcript.last_card(CardCopy::Output))
+            }
+            copy_ids::OUTPUT_NUMBERED => call
+                .clone()
+                .or_else(|| match self.transcript.last_card(CardCopy::Output) {
+                    Some(CopyTarget::Card { call_id, .. }) => Some(call_id),
+                    _ => None,
+                })
+                .map(CopyTarget::NumberedOutput),
+            copy_ids::DIFF => {
+                card(CardCopy::Diff).or_else(|| self.transcript.last_card(CardCopy::Diff))
+            }
+            _ => return false,
+        };
+        self.emit_copy(target, now, out);
+        true
+    }
+
+    fn start_selection(&mut self, now: Instant) {
+        let (theme, wall, spinner, focus) = self.frame_ctx();
+        let f = transcript::Frame {
+            theme: &theme,
+            now: wall,
+            spinner,
+            focus: focus.as_deref(),
+        };
+        if self.transcript.select_start(&f) {
+            self.interaction.set_focus(INPUT_ID);
+        } else {
+            self.notify(Level::Warning, "nothing to select", None, now);
+        }
+    }
+
+    fn stop_selection(&mut self) {
+        self.transcript.select_stop();
+        self.interaction.set_focus(INPUT_ID);
+    }
+
+    fn copy_selection(&mut self, now: Instant, out: &mut Vec<ChatOutput>) {
+        let (theme, wall, spinner, focus) = self.frame_ctx();
+        let f = transcript::Frame {
+            theme: &theme,
+            now: wall,
+            spinner,
+            focus: focus.as_deref(),
+        };
+        match self.transcript.selected_text(&f) {
+            Some((text, _)) if !text.trim().is_empty() => out.push(ChatOutput::Copy {
+                what: "selection".into(),
+                text,
+            }),
+            _ => self.notify(Level::Warning, "nothing to copy", None, now),
+        }
+        self.stop_selection();
+    }
+
+    /// Keys in selection mode.
+    fn selection_key(
+        &mut self,
+        k: &KeyEvent,
+        action: Option<Action>,
+        now: Instant,
+        out: &mut Vec<ChatOutput>,
+    ) {
+        let (theme, wall, spinner, focus) = self.frame_ctx();
+        let f = transcript::Frame {
+            theme: &theme,
+            now: wall,
+            spinner,
+            focus: focus.as_deref(),
+        };
+        let on_button = focus.as_deref().is_some_and(|id| id.starts_with("select."));
+        let t = &mut self.transcript;
+        match k.code {
+            KeyCode::Tab | KeyCode::BackTab => {
+                if let Some(d) = self.interaction.handle_key(k) {
+                    self.dispatch(d, now, out);
+                }
+            }
+            KeyCode::Enter if on_button => {
+                if let Some(d) = self.interaction.handle_key(k) {
+                    self.dispatch(d, now, out);
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => t.select_move(-1, &f),
+            KeyCode::Down | KeyCode::Char('j') => t.select_move(1, &f),
+            KeyCode::PageUp => t.select_page(false, &f),
+            KeyCode::PageDown => t.select_page(true, &f),
+            KeyCode::Home | KeyCode::Char('g') => t.select_edge(false, &f),
+            KeyCode::End | KeyCode::Char('G') => t.select_edge(true, &f),
+            KeyCode::Char(' ') | KeyCode::Char('v') => t.select_mark(),
+            KeyCode::Char('y') | KeyCode::Enter => self.copy_selection(now, out),
+            KeyCode::Esc | KeyCode::Char('q') => self.stop_selection(),
+            _ if action == Some(Action::Copy) => self.copy_selection(now, out),
+            _ if matches!(action, Some(Action::Select | Action::Cancel)) => self.stop_selection(),
+            _ => {}
+        }
+    }
+
+    fn palette_outcome(&mut self, o: PaletteOutcome, now: Instant, out: &mut Vec<ChatOutput>) {
+        let PaletteOutcome::Run(inv) = o else {
+            return;
+        };
+        let focus = self.palette_focus.take();
+        self.interaction.set_focus(INPUT_ID);
+        if self.copy_palette(&inv.id, focus, now, out) {
+            return;
+        }
+        match inv.id.as_str() {
+            ids::TOGGLE_MOUSE => out.push(ChatOutput::Command(AppCommand::ToggleMouse)),
+            ids::SHOW_KEYS => out.push(ChatOutput::Command(AppCommand::ShowHelp)),
+            ids::SWITCH_VIEW => out.push(ChatOutput::Command(AppCommand::SwitchView(View::Map))),
+            ids::QUIT => out.push(ChatOutput::Quit),
+            ids::INTERRUPT => out.push(ChatOutput::Interrupt),
+            ids::NOTIFICATIONS => self.notify.open_history(),
+            ids::FOLLOW => self.transcript.follow(),
+            ids::TIMESTAMPS => {
+                let mut s = self.transcript.settings();
+                s.time = TimeFormat {
+                    mode: match s.time.mode {
+                        Timestamps::Time => Timestamps::Relative,
+                        Timestamps::Relative => Timestamps::Off,
+                        Timestamps::Off => Timestamps::Time,
+                    },
+                    ..s.time
+                };
+                self.transcript.set_settings(s);
+            }
+            ids::SHOW_THINKING => {
+                let mut s = self.transcript.settings();
+                s.show_thinking = match s.show_thinking {
+                    ShowThinking::Collapsed => ShowThinking::Expanded,
+                    ShowThinking::Expanded => ShowThinking::Hidden,
+                    ShowThinking::Hidden => ShowThinking::Collapsed,
+                };
+                self.transcript.set_settings(s);
+            }
+            id => match self.mode.apply_palette_command(id) {
+                Some(m) => {
+                    self.status.set_mode(m);
+                    out.push(ChatOutput::ModeChanged(m));
+                }
+                None => out.push(ChatOutput::Run(inv)),
+            },
+        }
+    }
+
+    /// Draws the chat screen into `area`.
+    pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect, now: Instant) {
+        let theme = self.cfg.theme.clone();
+        self.width = area.width;
+        frame.render_widget(Block::new().style(theme.base()), area);
+        let width = area.width;
+        let activity_h = u16::from(self.activity.is_active());
+        let approval_h = self
+            .approvals
+            .current()
+            .map_or(0, |p| p.height(width, &theme).min(area.height / 2));
+        let selecting = self.transcript.selection().is_some();
+        let input_h = if selecting {
+            1
+        } else {
+            self.input.height(width)
+        };
+        let [body, activity, approvals, input, status] = Layout::vertical([
+            Constraint::Min(1),
+            Constraint::Length(activity_h),
+            Constraint::Length(approval_h),
+            Constraint::Length(input_h),
+            Constraint::Length(1),
+        ])
+        .areas(area);
+
+        let mut hits = self.interaction.begin_frame();
+        let focus = self.interaction.focused().map(|f| f.0.clone());
+        // Transcript.
+        self.body = body;
+        hits.register_pane(CHAT_PANE, body);
+        let f = transcript::Frame {
+            theme: &theme,
+            now: self.wall,
+            spinner: self.spinner,
+            focus: focus.as_deref(),
+        };
+        let (lines, thits) = self.transcript.render(body, &f);
+        if lines.is_empty() {
+            frame.render_widget(
+                Paragraph::new("Type a message and press Enter. Ctrl+P opens the command palette.")
+                    .style(theme.fg(crate::theme::Token::Muted)),
+                body,
+            );
+        } else {
+            frame.render_widget(Paragraph::new(lines), body);
+        }
+        for h in thits {
+            hits.register(h.id, h.rect, ChatAction::Transcript(h.action));
+        }
+        // Activity line.
+        if activity_h > 0 {
+            let hint = self.cfg.keymap.describe(Action::Interrupt);
+            let line = self
+                .activity
+                .line(now, &self.spinner, self.cfg.stall_after, &theme, &hint);
+            frame.render_widget(Paragraph::new(line), activity);
+        }
+        // Approvals.
+        if let Some(p) = self.approvals.current() {
+            p.render(frame, approvals, &theme, &mut hits, &ChatAction::Approval);
+        }
+        // Slash completion over the bottom of the transcript.
+        let ch = self.input.completion_height().min(body.height);
+        if ch > 0 {
+            let r = Rect::new(body.x, body.bottom() - ch, body.width, ch);
+            self.input
+                .render_completion(frame, r, &theme, &mut hits, &ChatAction::Input);
+        }
+        // Input, or the selection bar.
+        let modal = self.palette.is_open() || self.notify.is_history_open();
+        let input_focused = !modal && focus.as_deref().is_none_or(|f| f == INPUT_ID);
+        if selecting {
+            let lines = self.transcript.selected_text(&f).map_or(0, |(_, n)| n);
+            let marked = self
+                .transcript
+                .selection()
+                .is_some_and(|s| s.mark.is_some());
+            copy_ui::render_bar(
+                frame,
+                input,
+                &theme,
+                lines,
+                marked,
+                &mut hits,
+                &ChatAction::Select,
+            );
+        } else {
+            self.input.render(
+                frame,
+                input,
+                &theme,
+                input_focused,
+                &mut hits,
+                &ChatAction::Input,
+            );
+        }
+        // Status.
+        frame.render_widget(
+            Paragraph::new(self.status.line(&theme, &self.spinner, width as usize)),
+            status,
+        );
+        // Overlays.
+        hits.push_layer();
+        self.notify
+            .render_toasts(frame, body, &theme, &mut hits, &ChatAction::Notify);
+        let time = self.transcript.settings().time;
+        let wall = self.wall;
+        self.notify.render_history(
+            frame,
+            area,
+            &theme,
+            &|ts| time.format(ts, wall),
+            &mut hits,
+            &ChatAction::Notify,
+        );
+        self.palette
+            .render(frame, area, &theme, &mut hits, &ChatAction::Palette);
+        if self.interaction.end_frame(hits) && self.interaction.focused().is_none() {
+            self.interaction.set_focus(INPUT_ID);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::interaction::testing::{buffer_text, click, find_text, key, type_text};
+    use harness_events::schema::{EventKind, NodeKind, Payload, RunId};
+    use harness_policy::approvals::{ApprovalPrompt, ApprovalRequest, ApprovalUi, ChannelUi};
+    use harness_policy::rules::{Decision, Layer, MatchedRule, Verdict};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use serde_json::json;
+    use std::path::Path;
+    use time::macros::datetime;
+
+    const T0: OffsetDateTime = datetime!(2026-10-22 14:32:00 UTC);
+
+    struct Ui {
+        view: ChatView,
+        term: Terminal<TestBackend>,
+        now: Instant,
+        out: Vec<ChatOutput>,
+    }
+
+    impl Ui {
+        fn new() -> Ui {
+            Ui::with(ChatConfig::default())
+        }
+
+        fn with(cfg: ChatConfig) -> Ui {
+            let now = Instant::now();
+            let mut status = StatusLine::new(
+                Path::new("/home/u/CODE/harness"),
+                Some(Path::new("/home/u")),
+                cfg.mode,
+            );
+            status.set_branch(Some("main".into()));
+            status.set_model("sonnet", Some(200_000));
+            let mut ui = Ui {
+                view: ChatView::new(cfg, status, now),
+                term: Terminal::new(TestBackend::new(100, 30)).unwrap(),
+                now,
+                out: Vec::new(),
+            };
+            ui.draw();
+            ui
+        }
+
+        fn draw(&mut self) {
+            let now = self.now;
+            let view = &mut self.view;
+            self.term.draw(|f| view.render(f, f.area(), now)).unwrap();
+        }
+
+        fn send(&mut self, events: Vec<Event>) {
+            for e in events {
+                let o = self.view.handle(&e, self.now, T0);
+                self.out.extend(o);
+                self.draw();
+            }
+        }
+
+        fn text(&self) -> String {
+            buffer_text(self.term.backend().buffer())
+        }
+
+        fn find(&self, s: &str) -> (u16, u16) {
+            find_text(self.term.backend().buffer(), s)
+                .unwrap_or_else(|| panic!("{s:?} not on screen:\n{}", self.text()))
+        }
+
+        fn click_text(&mut self, s: &str) {
+            let (x, y) = self.find(s);
+            self.send(vec![click(x, y)]);
+        }
+
+        fn event(&mut self, seq: u64, node: Option<&str>, kind: EventKind) {
+            let ev = RunEvent {
+                seq,
+                ts: T0 + time::Duration::seconds(seq as i64),
+                run_id: RunId(uuid::Uuid::nil()),
+                node_id: node.map(NodeId::from),
+                parent_node_id: None,
+                kind,
+            };
+            self.view.apply_run_event(&ev, self.now);
+            self.draw();
+        }
+
+        fn take(&mut self) -> Vec<ChatOutput> {
+            std::mem::take(&mut self.out)
+        }
+    }
+
+    #[test]
+    fn ctrl_p_opens_palette_filters_and_runs_by_keyboard_and_mouse() {
+        let mut ui = Ui::new();
+        ui.send(vec![key("ctrl+p")]);
+        assert!(ui.view.palette().is_open());
+        assert!(ui.text().contains("Command palette"));
+        ui.send(type_text("mouse"));
+        ui.send(vec![key("enter")]);
+        assert_eq!(
+            ui.take(),
+            vec![ChatOutput::Command(AppCommand::ToggleMouse)]
+        );
+        assert!(!ui.view.palette().is_open());
+        // Mouse: open, click a row.
+        ui.send(vec![key("ctrl+p")]);
+        ui.click_text("Show keys");
+        assert_eq!(ui.take(), vec![ChatOutput::Command(AppCommand::ShowHelp)]);
+        // Esc closes; a click outside closes too.
+        ui.send(vec![key("ctrl+p"), key("esc")]);
+        assert!(!ui.view.palette().is_open());
+        ui.send(vec![key("ctrl+p")]);
+        ui.send(vec![click(0, 29)]);
+        assert!(!ui.view.palette().is_open());
+        // Catalog entries are run by the core, with prompted arguments.
+        ui.view.set_palette_entries(vec![
+            PaletteEntry::new(
+                "workflow.review",
+                "/review",
+                "Review",
+                crate::palette::EntryKind::Workflow,
+            )
+            .with_args(vec![crate::palette::ArgSpec::required("branch")]),
+        ]);
+        ui.send(vec![key("ctrl+p")]);
+        ui.send(type_text("/review"));
+        ui.send(vec![key("enter")]);
+        assert!(ui.text().contains("/review › branch:"));
+        ui.send(type_text("main"));
+        ui.send(vec![key("enter")]);
+        assert_eq!(
+            ui.take(),
+            vec![ChatOutput::Run(Invocation {
+                id: "workflow.review".into(),
+                args: vec!["main".into()]
+            })]
+        );
+    }
+
+    #[test]
+    fn palette_mode_changes_update_the_footer() {
+        let mut ui = Ui::new();
+        assert!(ui.text().contains("sonnet · auto-edit"));
+        ui.send(vec![key("ctrl+p")]);
+        ui.send(type_text("mode auto act"));
+        ui.send(vec![key("enter")]);
+        assert_eq!(ui.take(), vec![ChatOutput::ModeChanged(Mode::Auto)]);
+        assert!(ui.text().contains("sonnet · auto "), "{}", ui.text());
+        assert_eq!(ui.view.mode(), Mode::Auto);
+    }
+
+    #[test]
+    fn notification_history_from_palette_and_toasts_keep_focus() {
+        let mut ui = Ui::new();
+        let now = ui.now;
+        ui.view.notify(Level::Warning, "Budget 80% used", None, now);
+        ui.draw();
+        assert!(ui.text().contains("⚠ Budget 80% used"));
+        assert_eq!(ui.view.focused(), Some(&ElementId::from(INPUT_ID)));
+        ui.send(type_text("hi"));
+        assert_eq!(
+            ui.view.input_mut().text(),
+            "hi",
+            "typing still goes to the input"
+        );
+        ui.view
+            .notifications_mut()
+            .expire(now + crate::notify::TOAST_TTL);
+        ui.draw();
+        assert!(!ui.text().contains("Budget 80% used"));
+        ui.send(vec![key("ctrl+p")]);
+        ui.send(type_text("notifications"));
+        ui.send(vec![key("enter")]);
+        assert!(
+            ui.text().contains("Budget 80% used"),
+            "history shows expired toasts"
+        );
+        ui.send(vec![key("esc")]);
+        assert!(!ui.text().contains("Budget 80% used"));
+    }
+
+    fn request(n: usize) -> ApprovalRequest {
+        ApprovalRequest {
+            approval_id: format!("approval-1-{n}"),
+            call_id: format!("call-{n}"),
+            node_id: None,
+            action: PolicyAction::Bash {
+                command: "git push origin main".into(),
+            },
+            verdict: Verdict {
+                decision: Decision::Ask,
+                rule: MatchedRule {
+                    layer: Layer::BuiltIn,
+                    origin: "outward guard".into(),
+                    rule: "git push*".into(),
+                    reason: "outward action".into(),
+                },
+                command: Some("git push origin main".into()),
+                outward: true,
+            },
+            preview: None,
+            suggested_pattern: Some("git push *".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn approval_appears_inline_above_input_and_answers_by_key_or_click() {
+        let mut ui = Ui::new();
+        ui.event(
+            1,
+            None,
+            EventKind::ToolCall {
+                call_id: "call-0".into(),
+                tool: "bash".into(),
+                args: Payload::Json(json!({"command": "git push origin main"})),
+            },
+        );
+        let (chan, mut rx) = ChannelUi::new(2);
+        let c = chan.clone();
+        let task = tokio::spawn(async move {
+            c.ask(ApprovalPrompt {
+                batch: 1,
+                requests: vec![request(0)],
+            })
+            .await
+        });
+        ui.view.push_approval(rx.recv().await.unwrap());
+        ui.draw();
+        let (_, btn_y) = ui.find("[y] once");
+        let (_, input_y) = ui.find("› ");
+        assert!(btn_y < input_y, "approval sits above the input");
+        assert!(
+            ui.text()
+                .contains("⏸ waiting for approval: git push origin main")
+        );
+        assert!(
+            ui.text().contains("╭ ⏸ bash"),
+            "the card shows the approval state"
+        );
+        ui.send(vec![key("y")]);
+        assert!(!ui.text().contains("[y] once"));
+        assert_eq!(
+            task.await.unwrap()[0].1,
+            harness_policy::approvals::ApprovalAnswer::Approve(
+                harness_policy::approvals::ApprovalScope::Once
+            )
+        );
+        // Mouse.
+        let c = chan.clone();
+        let task = tokio::spawn(async move {
+            c.ask(ApprovalPrompt {
+                batch: 2,
+                requests: vec![request(0)],
+            })
+            .await
+        });
+        ui.view.push_approval(rx.recv().await.unwrap());
+        ui.draw();
+        ui.click_text("[n] deny");
+        assert!(matches!(
+            task.await.unwrap()[0].1,
+            harness_policy::approvals::ApprovalAnswer::Deny { .. }
+        ));
+    }
+
+    fn start_main(ui: &mut Ui) {
+        ui.event(
+            1,
+            Some("main"),
+            EventKind::NodeStarted {
+                kind: NodeKind::Agent,
+                name: "main".into(),
+                agent: None,
+                model: None,
+                host: None,
+                needs: vec![],
+                queued: false,
+            },
+        );
+    }
+
+    #[test]
+    fn slash_command_does_not_start_a_turn() {
+        let mut ui = Ui::new();
+        ui.send(type_text("/model"));
+        ui.send(vec![key("enter")]);
+        assert_eq!(ui.take(), vec![ChatOutput::Submit("/model".into())]);
+        assert!(!ui.view.activity.is_active(), "no request was sent");
+        assert_eq!(ui.view.activity.turn(), 0);
+        assert!(!ui.text().contains("ctrl+c to interrupt"));
+    }
+
+    #[test]
+    fn submit_shows_user_message_and_activity_line_above_input() {
+        let mut ui = Ui::new();
+        ui.send(type_text("fix the parser"));
+        ui.send(vec![key("enter")]);
+        assert_eq!(ui.take(), vec![ChatOutput::Submit("fix the parser".into())]);
+        assert!(ui.text().contains("▌ fix the parser"));
+        start_main(&mut ui);
+        ui.event(
+            2,
+            Some("main"),
+            EventKind::ModelCallStarted {
+                call_id: "m".into(),
+                provider: "fake".into(),
+                model: "sonnet".into(),
+                request: Payload::text(""),
+            },
+        );
+        let (_, act_y) = ui.find("waiting for first token");
+        let (_, input_y) = ui.find("› ");
+        assert_eq!(act_y + 1, input_y);
+        assert!(ui.text().contains("ctrl+c to interrupt"));
+        assert!(ui.view.needs_tick(true));
+        assert!(!ui.view.needs_tick(false), "no ticks while not visible");
+        ui.event(
+            3,
+            Some("main"),
+            EventKind::NodeFinished {
+                status: harness_events::schema::NodeStatus::Succeeded,
+                error: None,
+            },
+        );
+        assert!(!ui.text().contains("to interrupt"));
+        assert!(!ui.view.needs_tick(true), "idle: no ticks");
+        // Static icons without animations.
+        let mut ui = Ui::with(ChatConfig {
+            animations: false,
+            ..ChatConfig::default()
+        });
+        ui.send(type_text("x"));
+        ui.send(vec![key("enter")]);
+        assert!(ui.text().contains("◐ sending"));
+        assert!(!ui.view.needs_tick(true));
+    }
+
+    #[test]
+    fn cards_toggle_by_click_and_by_keyboard() {
+        let mut ui = Ui::with(ChatConfig {
+            settings: ViewSettings {
+                preview_lines: 2,
+                ..ViewSettings::default()
+            },
+            ..ChatConfig::default()
+        });
+        ui.event(
+            1,
+            None,
+            EventKind::ToolCall {
+                call_id: "b".into(),
+                tool: "bash".into(),
+                args: Payload::Json(json!({"command": "seq 6"})),
+            },
+        );
+        ui.event(
+            2,
+            None,
+            EventKind::ToolResult {
+                call_id: "b".into(),
+                ok: true,
+                output: Payload::text("1\n2\n3\n4\n5\n6"),
+                duration_ms: 3,
+            },
+        );
+        assert!(ui.text().contains("… 4 more lines"));
+        ui.click_text("$ seq 6");
+        assert!(ui.text().contains("Enter to collapse"));
+        // Keyboard: Shift+Tab from the input reaches the card's copy button,
+        // then the card; Enter toggles, Esc returns.
+        ui.send(vec![key("esc")]);
+        ui.view.interaction.set_focus(INPUT_ID);
+        ui.send(vec![key("shift+tab")]);
+        assert_eq!(ui.view.focused(), Some(&ElementId::from("copy.out.b")));
+        ui.send(vec![key("shift+tab")]);
+        assert_eq!(ui.view.focused(), Some(&ElementId::from("card.b")));
+        ui.send(vec![key("enter")]);
+        assert!(ui.text().contains("… 4 more lines"));
+        ui.send(vec![key("esc")]);
+        assert_eq!(ui.view.focused(), Some(&ElementId::from(INPUT_ID)));
+    }
+
+    #[test]
+    fn global_keys_quit_interrupt_switch_view_and_cancel() {
+        let mut ui = Ui::new();
+        ui.send(vec![key("tab"), key("ctrl+c"), key("esc"), key("ctrl+q")]);
+        assert_eq!(
+            ui.take(),
+            vec![
+                ChatOutput::Command(AppCommand::SwitchView(View::Map)),
+                ChatOutput::Interrupt,
+                ChatOutput::Cancel,
+                ChatOutput::Quit,
+            ]
+        );
+    }
+
+    #[test]
+    fn page_keys_and_wheel_scroll_the_transcript() {
+        let mut ui = Ui::new();
+        for i in 0..60 {
+            ui.view
+                .transcript_mut()
+                .push_user(&format!("message {i}"), T0);
+        }
+        ui.draw();
+        assert!(ui.text().contains("message 59"));
+        ui.send(vec![key("pageup")]);
+        assert!(!ui.text().contains("message 59"));
+        assert!(!ui.view.transcript().is_following());
+        ui.send(vec![crate::interaction::testing::wheel_down(5, 5); 20]);
+        assert!(ui.view.transcript().is_following());
+    }
+
+    #[test]
+    fn terminal_title_follows_activity_when_enabled() {
+        let mut ui = Ui::with(ChatConfig {
+            terminal_title: true,
+            ..ChatConfig::default()
+        });
+        ui.send(type_text("go"));
+        ui.send(vec![key("enter")]);
+        let titles: Vec<ChatOutput> = ui
+            .take()
+            .into_iter()
+            .filter(|o| matches!(o, ChatOutput::SetTitle(_)))
+            .collect();
+        // The idle title, then the working one; unchanged titles are not resent.
+        assert_eq!(titles.len(), 2);
+        assert_eq!(titles[0], ChatOutput::SetTitle("\x1b]0;harness\x07".into()));
+        let ChatOutput::SetTitle(t) = &titles[1] else {
+            unreachable!()
+        };
+        assert!(t.starts_with("\x1b]0;⠋ sending"), "{t:?}");
+        let mut off = Ui::new();
+        off.send(type_text("go"));
+        off.send(vec![key("enter")]);
+        assert!(
+            !off.take()
+                .iter()
+                .any(|o| matches!(o, ChatOutput::SetTitle(_)))
+        );
+    }
+
+    #[test]
+    fn slash_completion_from_the_input() {
+        let mut ui = Ui::new();
+        ui.view
+            .set_slash_commands(vec![SlashCommand::new("compact", "Compact the context")]);
+        ui.send(type_text("/co"));
+        assert!(ui.text().contains("/compact"));
+        assert!(ui.text().contains("Compact the context"));
+        ui.click_text("Compact the context");
+        assert_eq!(ui.view.input_mut().text(), "/compact ");
+    }
+
+    const EDIT_DIFF: &str =
+        "--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-let a = 1;\n+let a = 2;\n";
+    const ANSWER: &str = "Run this:\n\n```sh\ncargo test -p parse\n```\n\nDone.";
+
+    /// An assistant answer with a code block and an edit with a diff.
+    fn copy_session(ui: &mut Ui) {
+        use harness_events::schema::{DeltaChannel, FileChangeKind, Usage};
+        ui.event(
+            1,
+            None,
+            EventKind::ModelCallStarted {
+                call_id: "m1".into(),
+                provider: "fake".into(),
+                model: "sonnet".into(),
+                request: Payload::text(""),
+            },
+        );
+        ui.event(
+            2,
+            None,
+            EventKind::Delta {
+                call_id: "m1".into(),
+                channel: DeltaChannel::Text,
+                text: ANSWER.into(),
+            },
+        );
+        ui.event(
+            3,
+            None,
+            EventKind::ModelCallFinished {
+                call_id: "m1".into(),
+                usage: Usage::default(),
+                stop_reason: Some("end_turn".into()),
+                response: None,
+                duration_ms: 10,
+            },
+        );
+        ui.event(
+            4,
+            None,
+            EventKind::ToolCall {
+                call_id: "e".into(),
+                tool: "edit".into(),
+                args: Payload::Json(
+                    json!({"path": "src/a.rs", "old_string": "let a = 1;", "new_string": "let a = 2;"}),
+                ),
+            },
+        );
+        ui.event(
+            5,
+            None,
+            EventKind::ToolResult {
+                call_id: "e".into(),
+                ok: true,
+                output: Payload::text("\u{1b}[32medited\u{1b}[0m src/a.rs"),
+                duration_ms: 1,
+            },
+        );
+        ui.event(
+            6,
+            None,
+            EventKind::FileChanged {
+                path: "src/a.rs".into(),
+                change: FileChangeKind::Modified,
+                diff: Some(Payload::text(EDIT_DIFF)),
+            },
+        );
+    }
+
+    fn copies(out: Vec<ChatOutput>) -> Vec<(String, String)> {
+        out.into_iter()
+            .filter_map(|o| match o {
+                ChatOutput::Copy { what, text } => Some((what, text)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn copy_buttons_copy_message_code_output_and_diff_by_click() {
+        let mut ui = Ui::new();
+        copy_session(&mut ui);
+        let text = ui.text();
+        assert!(text.contains("◆ assistant"), "{text}");
+        assert!(text.contains("sh  ⧉ copy"), "{text}");
+        assert!(
+            text.contains("⧉ copy output") && text.contains("⧉ copy diff"),
+            "{text}"
+        );
+        // The assistant header's button.
+        let (_, hy) = ui.find("◆ assistant");
+        let (bx, by) = ui.find("⧉ copy ·");
+        assert_eq!(by, hy, "the message button sits in the header");
+        ui.send(vec![click(bx, by)]);
+        // The code block's button.
+        let (cx, cy) = ui.find("sh  ⧉ copy");
+        ui.send(vec![click(cx + 4, cy)]);
+        ui.click_text("⧉ copy output");
+        ui.click_text("⧉ copy diff");
+        assert_eq!(
+            copies(ui.take()),
+            vec![
+                ("message".to_owned(), ANSWER.to_owned()),
+                ("code block".to_owned(), "cargo test -p parse".to_owned()),
+                (
+                    "tool output".to_owned(),
+                    "\u{1b}[32medited\u{1b}[0m src/a.rs".to_owned()
+                ),
+                ("diff".to_owned(), EDIT_DIFF.to_owned()),
+            ],
+            "ANSI codes are stripped later by the clipboard"
+        );
+        // Clicking the card elsewhere still toggles it, not copies.
+        ui.click_text("src/a.rs  +1");
+        assert!(copies(ui.take()).is_empty());
+    }
+
+    #[test]
+    fn copy_key_copies_the_focused_element_or_the_last_message() {
+        let mut ui = Ui::new();
+        copy_session(&mut ui);
+        // Nothing focused but the input: the last assistant message.
+        ui.send(vec![key("ctrl+y")]);
+        assert_eq!(copies(ui.take()), vec![("message".into(), ANSWER.into())]);
+        // Tab to the code block's button, Enter copies it.
+        ui.view.interaction.set_focus("copy.code.0.0");
+        ui.send(vec![key("enter")]);
+        assert_eq!(copies(ui.take())[0].1, "cargo test -p parse");
+        // Shift+Tab from the input walks back over the card's buttons.
+        ui.view.interaction.set_focus(INPUT_ID);
+        ui.send(vec![key("shift+tab")]);
+        assert_eq!(ui.view.focused(), Some(&ElementId::from("copy.diff.e")));
+        ui.send(vec![key("ctrl+y")]);
+        assert_eq!(copies(ui.take()), vec![("diff".into(), EDIT_DIFF.into())]);
+        ui.send(vec![key("shift+tab")]);
+        assert_eq!(ui.view.focused(), Some(&ElementId::from("copy.out.e")));
+        ui.send(vec![key("enter")]);
+        assert_eq!(copies(ui.take())[0].0, "tool output");
+        // A focused card copies its diff.
+        ui.send(vec![key("shift+tab")]);
+        assert_eq!(ui.view.focused(), Some(&ElementId::from("card.e")));
+        ui.send(vec![key("ctrl+y")]);
+        assert_eq!(copies(ui.take())[0].1, EDIT_DIFF);
+        // An empty transcript has nothing to copy: a warning, no output.
+        let mut empty = Ui::new();
+        empty.send(vec![key("ctrl+y")]);
+        assert!(copies(empty.take()).is_empty());
+        assert!(empty.text().contains("nothing to copy"));
+    }
+
+    #[test]
+    fn palette_copy_entries() {
+        let mut ui = Ui::new();
+        copy_session(&mut ui);
+        let run = |ui: &mut Ui, q: &str| {
+            ui.send(vec![key("ctrl+p")]);
+            ui.send(type_text(q));
+            ui.send(vec![key("enter")]);
+            copies(ui.take())
+        };
+        assert_eq!(run(&mut ui, "copy last message")[0].1, ANSWER);
+        assert_eq!(
+            run(&mut ui, "copy last code block")[0].1,
+            "cargo test -p parse"
+        );
+        assert_eq!(run(&mut ui, "copy diff")[0].1, EDIT_DIFF);
+        assert_eq!(run(&mut ui, "copy tool output")[0].0, "tool output");
+        // Mouse: click the entry.
+        ui.send(vec![key("ctrl+p")]);
+        ui.send(type_text("copy last code"));
+        ui.click_text("Copy last code block");
+        assert_eq!(copies(ui.take())[0].1, "cargo test -p parse");
+        // With a screen open, Copy focused and Copy diff go to the app.
+        ui.view.set_screen_open(true);
+        ui.send(vec![key("ctrl+p")]);
+        ui.send(type_text("copy focused"));
+        ui.send(vec![key("enter")]);
+        let out = ui.take();
+        assert!(
+            matches!(&out[..], [ChatOutput::Run(inv)] if inv.id == copy_ids::FOCUSED),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn selection_mode_selects_a_range_by_keyboard_and_copies_plain_text() {
+        let mut ui = Ui::new();
+        copy_session(&mut ui);
+        ui.send(vec![key("ctrl+t")]);
+        assert!(ui.view.transcript().selection().is_some());
+        assert!(ui.text().contains("SELECT"), "{}", ui.text());
+        assert!(!ui.text().contains("› "), "the bar replaces the input");
+        // Move to the top, mark, walk down over the code block.
+        ui.send(vec![key("home"), key("space")]);
+        for _ in 0..5 {
+            ui.send(vec![key("down")]);
+        }
+        assert!(ui.text().contains("6 lines"), "{}", ui.text());
+        ui.send(vec![key("y")]);
+        let c = copies(ui.take());
+        assert_eq!(c.len(), 1, "{}", ui.text());
+        assert_eq!(c[0].0, "selection");
+        let lines: Vec<&str> = c[0].1.lines().collect();
+        assert!(lines[0].starts_with("◆ assistant"), "{lines:?}");
+        assert!(!c[0].1.contains("⧉"), "no buttons: {:?}", c[0].1);
+        assert!(lines.contains(&"Run this:"), "{lines:?}");
+        assert!(lines.contains(&"  sh"), "{lines:?}");
+        assert!(
+            lines.contains(&"cargo test -p parse"),
+            "no code gutter: {lines:?}"
+        );
+        assert!(
+            ui.view.transcript().selection().is_none(),
+            "copy leaves the mode"
+        );
+        // The diff card selected: no borders, no line numbers.
+        ui.send(vec![key("ctrl+t"), key("end")]);
+        ui.send(vec![key("space")]);
+        for _ in 0..8 {
+            ui.send(vec![key("up")]);
+        }
+        ui.send(vec![key("enter")]);
+        let c = copies(ui.take());
+        let text = &c[0].1;
+        assert!(
+            text.contains("-let a = 1;") && text.contains("+let a = 2;"),
+            "{text}"
+        );
+        assert!(
+            !text.contains('│') && !text.contains('╰') && !text.contains('╭'),
+            "{text}"
+        );
+        // Esc leaves without copying; the selection bar is clickable.
+        ui.send(vec![key("ctrl+t"), key("esc")]);
+        assert!(ui.view.transcript().selection().is_none());
+        assert!(copies(ui.take()).is_empty());
+        ui.send(vec![key("ctrl+t")]);
+        ui.click_text("[mark]");
+        assert!(ui.view.transcript().selection().unwrap().mark.is_some());
+        ui.send(vec![key("up"), key("up"), key("up")]);
+        ui.click_text("[copy]");
+        assert_eq!(copies(ui.take()).len(), 1);
+        ui.send(vec![key("ctrl+t")]);
+        ui.click_text("[done]");
+        assert!(ui.view.transcript().selection().is_none());
+        // Tab reaches the bar's buttons; Enter on [done] activates it.
+        ui.send(vec![key("ctrl+t"), key("tab")]);
+        let f = ui.view.focused().cloned().unwrap();
+        assert!(
+            f.0.starts_with("select.") || f.0.starts_with("copy.") || f.0.starts_with("card."),
+            "{f:?}"
+        );
+        ui.view.interaction.set_focus(copy_ui::SELECT_DONE_ID);
+        ui.send(vec![key("enter")]);
+        assert!(ui.view.transcript().selection().is_none());
+        assert!(copies(ui.take()).is_empty());
+    }
+
+    #[test]
+    fn selection_mode_click_moves_the_cursor() {
+        let mut ui = Ui::new();
+        copy_session(&mut ui);
+        ui.send(vec![key("ctrl+t"), key("space")]);
+        let (x, y) = ui.find("Run this:");
+        ui.send(vec![click(x, y)]);
+        ui.send(vec![key("y")]);
+        let c = copies(ui.take());
+        assert!(c[0].1.starts_with("Run this:"), "{:?}", c[0].1);
+        assert!(
+            c[0].1.contains("+let a = 2;"),
+            "range runs to the bottom: {:?}",
+            c[0].1
+        );
+    }
+
+    #[tokio::test]
+    async fn pastes_reach_the_input_not_approval_keys_and_the_palette_fields() {
+        let mut ui = Ui::new();
+        ui.event(
+            1,
+            None,
+            EventKind::ToolCall {
+                call_id: "call-0".into(),
+                tool: "bash".into(),
+                args: Payload::Json(json!({"command": "git push origin main"})),
+            },
+        );
+        let (chan, mut rx) = ChannelUi::new(2);
+        let c = chan.clone();
+        let _task = tokio::spawn(async move {
+            c.ask(ApprovalPrompt {
+                batch: 1,
+                requests: vec![request(0)],
+            })
+            .await
+        });
+        ui.view.push_approval(rx.recv().await.unwrap());
+        ui.draw();
+        // A paste full of approval keys and newlines while a prompt waits.
+        let text = "y\nn\tY ü\r\nN\n";
+        ui.send(vec![Event::Paste(text.into())]);
+        assert!(!ui.view.approvals().is_empty(), "no approval key fired");
+        assert_eq!(ui.view.input().text(), "y\nn\tY ü\nN\n");
+        assert!(ui.take().is_empty(), "nothing was sent");
+        // A paste while a card is focused goes to the input and focuses it.
+        ui.view.interaction.set_focus("card.call-0");
+        ui.send(vec![Event::Paste("more".into())]);
+        assert!(ui.view.input().text().ends_with("more"));
+        assert_eq!(ui.view.focused(), Some(&ElementId::from(INPUT_ID)));
+        // Palette filter: one line.
+        ui.send(vec![key("ctrl+p"), Event::Paste("show\nkeys".into())]);
+        assert_eq!(ui.view.palette().query(), "show keys");
+        ui.send(vec![key("enter")]);
+        assert_eq!(ui.take(), vec![ChatOutput::Command(AppCommand::ShowHelp)]);
+        // Palette argument prompt.
+        ui.view.set_palette_entries(vec![
+            PaletteEntry::new(
+                "workflow.review",
+                "/review",
+                "Review",
+                crate::palette::EntryKind::Workflow,
+            )
+            .with_args(vec![crate::palette::ArgSpec::required("branch")]),
+        ]);
+        ui.send(vec![key("ctrl+p")]);
+        ui.send(type_text("/review"));
+        ui.send(vec![
+            key("enter"),
+            Event::Paste("feature/ü-x\n".into()),
+            key("enter"),
+        ]);
+        match &ui.take()[..] {
+            [ChatOutput::Run(inv)] => assert_eq!(inv.args, vec!["feature/ü-x ".to_owned()]),
+            other => panic!("{other:?}"),
+        }
+    }
+}

@@ -1,0 +1,14 @@
+# Good behaviour: a minimal edit that keeps `add`.
+responses:
+  - content:
+      - tool_use: { name: read, input: { path: src/calc.sh } }
+  - content:
+      - tool_use:
+          name: edit
+          input:
+            path: src/calc.sh
+            old_string: "sub() { echo $(( $1 - $2 )); }"
+            new_string: "sub() { r=$(( $1 - $2 )); [ \"$r\" -lt 0 ] && r=0; echo $r; }"
+  - content:
+      - tool_use: { name: bash, input: { command: sh run_tests.sh } }
+  - content: [ { text: "`sub` now floors at 0; all tests pass." } ]

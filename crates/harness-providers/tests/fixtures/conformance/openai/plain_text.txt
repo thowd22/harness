@@ -1,0 +1,21 @@
+# OpenAI Responses API: plain text answer.
+# Format: each reply starts with '--- <status>[; header: value]...'.
+--- 200
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_conf","model":"gpt-5","status":"in_progress"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_0","role":"assistant","content":[]}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"Hel"}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"lo!"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg_0","role":"assistant","content":[{"type":"output_text","text":"Hello!"}]}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_conf","model":"gpt-5","status":"completed","usage":{"input_tokens":12,"input_tokens_details":{"cached_tokens":0},"output_tokens":8,"output_tokens_details":{"reasoning_tokens":0}}}}
+

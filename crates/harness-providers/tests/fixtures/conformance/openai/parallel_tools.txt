@@ -1,0 +1,27 @@
+# Two parallel tool calls.
+# Format: each reply starts with '--- <status>[; header: value]...'.
+--- 200
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_conf","model":"gpt-5","status":"in_progress"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_0","call_id":"call_01","name":"read","arguments":""}}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"path\": \"a.rs\"}"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_0","call_id":"call_01","name":"read","arguments":"{\"path\": \"a.rs\"}"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc_1","call_id":"call_02","name":"read","arguments":""}}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","output_index":1,"delta":"{\"path\": \"b.rs\"}"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":1,"item":{"type":"function_call","id":"fc_1","call_id":"call_02","name":"read","arguments":"{\"path\": \"b.rs\"}"}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_conf","model":"gpt-5","status":"completed","usage":{"input_tokens":12,"input_tokens_details":{"cached_tokens":0},"output_tokens":8,"output_tokens_details":{"reasoning_tokens":0}}}}
+

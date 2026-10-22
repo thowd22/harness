@@ -1,0 +1,827 @@
+{
+ "data": [
+  {
+   "id": "anthropic/claude-sonnet-5.5",
+   "canonical_slug": "anthropic/claude-sonnet-5.5-20260928",
+   "hugging_face_id": null,
+   "name": "Anthropic: Claude Sonnet 5.5",
+   "created": 1790618686,
+   "description": "Claude Sonnet 5.5 is Anthropic's Sonnet-class model for well-scoped everyday wor",
+   "context_length": 1000000,
+   "architecture": {
+    "modality": "text+image+file->text",
+    "input_modalities": [
+     "text",
+     "image",
+     "file"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "Claude",
+    "instruct_type": null
+   },
+   "pricing": {
+    "prompt": "0.000002",
+    "completion": "0.00001",
+    "web_search": "0.01",
+    "input_cache_read": "0.0000001",
+    "input_cache_write": "0.0000025",
+    "input_cache_write_1h": "0.000004"
+   },
+   "top_provider": {
+    "context_length": 1000000,
+    "max_completion_tokens": 128000,
+    "is_moderated": false
+   },
+   "per_request_limits": null,
+   "supported_parameters": [
+    "include_reasoning",
+    "max_completion_tokens",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "stop",
+    "structured_outputs",
+    "tool_choice",
+    "tools",
+    "verbosity"
+   ],
+   "default_parameters": {},
+   "supported_voices": null,
+   "knowledge_cutoff": null,
+   "expiration_date": null,
+   "links": {
+    "details": "/api/v1/models/anthropic/claude-sonnet-5.5-20260928/endpoints"
+   },
+   "benchmarks": {
+    "design_arena": [
+     {
+      "arena": "agents",
+      "category": "mobileapps",
+      "elo": 1262,
+      "win_rate": 57,
+      "rank": 6
+     },
+     {
+      "arena": "agents",
+      "category": "spreadsheet",
+      "elo": 1268,
+      "win_rate": 52.9,
+      "rank": 7
+     },
+     {
+      "arena": "agents",
+      "category": "webapps",
+      "elo": 1306,
+      "win_rate": 60.5,
+      "rank": 3
+     },
+     {
+      "arena": "models",
+      "category": "3d",
+      "elo": 1445,
+      "win_rate": 68.3,
+      "rank": 3
+     },
+     {
+      "arena": "models",
+      "category": "codecategories",
+      "elo": 1365,
+      "win_rate": 60.9,
+      "rank": 3
+     },
+     {
+      "arena": "models",
+      "category": "dataviz",
+      "elo": 1392,
+      "win_rate": 67.8,
+      "rank": 2
+     },
+     {
+      "arena": "models",
+      "category": "gamedev",
+      "elo": 1470,
+      "win_rate": 72.5,
+      "rank": 1
+     },
+     {
+      "arena": "models",
+      "category": "uicomponent",
+      "elo": 1369,
+      "win_rate": 62.4,
+      "rank": 3
+     },
+     {
+      "arena": "models",
+      "category": "website",
+      "elo": 1327,
+      "win_rate": 56.2,
+      "rank": 5
+     }
+    ],
+    "artificial_analysis": {
+     "intelligence_index": 56,
+     "coding_index": null,
+     "agentic_index": null
+    }
+   },
+   "reasoning": {
+    "mandatory": true,
+    "supported_efforts": [
+     "max",
+     "xhigh",
+     "high",
+     "medium",
+     "low"
+    ],
+    "default_effort": "high"
+   }
+  },
+  {
+   "id": "anthropic/claude-opus-5.5",
+   "canonical_slug": "anthropic/claude-opus-5.5-20260921",
+   "hugging_face_id": null,
+   "name": "Anthropic: Claude Opus 5.5",
+   "created": 1790094732,
+   "description": "Claude Opus 5.5 is Anthropic's flagship model for demanding reasoning, coding, a",
+   "context_length": 1000000,
+   "architecture": {
+    "modality": "text+image+file->text",
+    "input_modalities": [
+     "text",
+     "image",
+     "file"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "Claude",
+    "instruct_type": null
+   },
+   "pricing": {
+    "prompt": "0.000004",
+    "completion": "0.00002",
+    "web_search": "0.01",
+    "input_cache_read": "0.0000002",
+    "input_cache_write": "0.000005",
+    "input_cache_write_1h": "0.000008"
+   },
+   "top_provider": {
+    "context_length": 1000000,
+    "max_completion_tokens": 128000,
+    "is_moderated": true
+   },
+   "per_request_limits": null,
+   "supported_parameters": [
+    "include_reasoning",
+    "max_completion_tokens",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "stop",
+    "structured_outputs",
+    "tool_choice",
+    "tools",
+    "verbosity"
+   ],
+   "default_parameters": {},
+   "supported_voices": null,
+   "knowledge_cutoff": null,
+   "expiration_date": null,
+   "links": {
+    "details": "/api/v1/models/anthropic/claude-opus-5.5-20260921/endpoints"
+   },
+   "benchmarks": {
+    "design_arena": [
+     {
+      "arena": "agents",
+      "category": "mobileapps",
+      "elo": 1308,
+      "win_rate": 62,
+      "rank": 2
+     },
+     {
+      "arena": "agents",
+      "category": "spreadsheet",
+      "elo": 1381,
+      "win_rate": 69.9,
+      "rank": 2
+     },
+     {
+      "arena": "agents",
+      "category": "webapps",
+      "elo": 1317,
+      "win_rate": 60.7,
+      "rank": 2
+     },
+     {
+      "arena": "models",
+      "category": "3d",
+      "elo": 1476,
+      "win_rate": 72,
+      "rank": 1
+     },
+     {
+      "arena": "models",
+      "category": "codecategories",
+      "elo": 1389,
+      "win_rate": 63.8,
+      "rank": 1
+     },
+     {
+      "arena": "models",
+      "category": "dataviz",
+      "elo": 1397,
+      "win_rate": 64.7,
+      "rank": 1
+     },
+     {
+      "arena": "models",
+      "category": "gamedev",
+      "elo": 1458,
+      "win_rate": 71.8,
+      "rank": 2
+     },
+     {
+      "arena": "models",
+      "category": "svg",
+      "elo": 1329,
+      "win_rate": 51.8,
+      "rank": 1
+     },
+     {
+      "arena": "models",
+      "category": "uicomponent",
+      "elo": 1386,
+      "win_rate": 64.2,
+      "rank": 1
+     },
+     {
+      "arena": "models",
+      "category": "website",
+      "elo": 1335,
+      "win_rate": 57.6,
+      "rank": 3
+     }
+    ],
+    "artificial_analysis": {
+     "intelligence_index": 57.6,
+     "coding_index": null,
+     "agentic_index": null
+    }
+   },
+   "reasoning": {
+    "mandatory": true,
+    "supported_efforts": [
+     "max",
+     "xhigh",
+     "high",
+     "medium",
+     "low"
+    ],
+    "default_effort": "high"
+   }
+  },
+  {
+   "id": "openai/gpt-5.5",
+   "canonical_slug": "openai/gpt-5.5-20260423",
+   "hugging_face_id": "",
+   "name": "OpenAI: GPT-5.5",
+   "created": 1777051893,
+   "description": "GPT-5.5 is OpenAI\u2019s frontier model designed for complex professional workloads, ",
+   "context_length": 1050000,
+   "architecture": {
+    "modality": "text+image+file->text",
+    "input_modalities": [
+     "file",
+     "image",
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "GPT",
+    "instruct_type": null
+   },
+   "pricing": {
+    "prompt": "0.000005",
+    "completion": "0.00003",
+    "web_search": "0.01",
+    "input_cache_read": "0.0000005",
+    "overrides": [
+     {
+      "min_prompt_tokens": 272000,
+      "prompt": "0.00001",
+      "completion": "0.000045",
+      "input_cache_read": "0.000001"
+     }
+    ]
+   },
+   "top_provider": {
+    "context_length": 1050000,
+    "max_completion_tokens": 128000,
+    "is_moderated": true
+   },
+   "per_request_limits": null,
+   "supported_parameters": [
+    "include_reasoning",
+    "max_completion_tokens",
+    "max_tokens",
+    "reasoning",
+    "reasoning_effort",
+    "response_format",
+    "seed",
+    "structured_outputs",
+    "tool_choice",
+    "tools",
+    "verbosity"
+   ],
+   "default_parameters": {
+    "temperature": null,
+    "top_p": null,
+    "top_k": null,
+    "frequency_penalty": null,
+    "presence_penalty": null,
+    "repetition_penalty": null
+   },
+   "supported_voices": null,
+   "knowledge_cutoff": "2025-12-01",
+   "expiration_date": null,
+   "links": {
+    "details": "/api/v1/models/openai/gpt-5.5-20260423/endpoints"
+   },
+   "benchmarks": {
+    "design_arena": [
+     {
+      "arena": "agents",
+      "category": "agenticgamedev",
+      "elo": 1179,
+      "win_rate": 52.4,
+      "rank": 14
+     },
+     {
+      "arena": "agents",
+      "category": "agentichtmlslides",
+      "elo": 1084,
+      "win_rate": 34.2,
+      "rank": 8
+     },
+     {
+      "arena": "agents",
+      "category": "agenticslides",
+      "elo": 1150,
+      "win_rate": 43.5,
+      "rank": 6
+     },
+     {
+      "arena": "agents",
+      "category": "agenticslides(html)",
+      "elo": 1077,
+      "win_rate": 33.2,
+      "rank": 8
+     },
+     {
+      "arena": "agents",
+      "category": "agenticslides(python-pptx)",
+      "elo": 1155,
+      "win_rate": 45.2,
+      "rank": 6
+     },
+     {
+      "arena": "agents",
+      "category": "androidnative",
+      "elo": 1163,
+      "win_rate": 50.9,
+      "rank": 21
+     },
+     {
+      "arena": "agents",
+      "category": "fullstack",
+      "elo": 1089,
+      "win_rate": 43,
+      "rank": 29
+     },
+     {
+      "arena": "agents",
+      "category": "godotgamedev",
+      "elo": 1173,
+      "win_rate": 52.3,
+      "rank": 18
+     },
+     {
+      "arena": "agents",
+      "category": "htmlslides",
+      "elo": 1017,
+      "win_rate": 35.6,
+      "rank": 22
+     },
+     {
+      "arena": "agents",
+      "category": "mobileapps",
+      "elo": 1142,
+      "win_rate": 50.4,
+      "rank": 32
+     },
+     {
+      "arena": "agents",
+      "category": "pptxslides",
+      "elo": 1157,
+      "win_rate": 45.3,
+      "rank": 6
+     },
+     {
+      "arena": "agents",
+      "category": "python-pptxslides",
+      "elo": 1152,
+      "win_rate": 43.3,
+      "rank": 21
+     },
+     {
+      "arena": "agents",
+      "category": "webapps",
+      "elo": 1117,
+      "win_rate": 42.6,
+      "rank": 36
+     },
+     {
+      "arena": "models",
+      "category": "3d",
+      "elo": 1197,
+      "win_rate": 49.3,
+      "rank": 50
+     },
+     {
+      "arena": "models",
+      "category": "asciiart",
+      "elo": 1255,
+      "win_rate": 58.2,
+      "rank": 16
+     },
+     {
+      "arena": "models",
+      "category": "codecategories",
+      "elo": 1260,
+      "win_rate": 53,
+      "rank": 36
+     },
+     {
+      "arena": "models",
+      "category": "dataviz",
+      "elo": 1264,
+      "win_rate": 55.5,
+      "rank": 30
+     },
+     {
+      "arena": "models",
+      "category": "gamedev",
+      "elo": 1293,
+      "win_rate": 56.8,
+      "rank": 21
+     },
+     {
+      "arena": "models",
+      "category": "svg",
+      "elo": 1234,
+      "win_rate": 55.1,
+      "rank": 16
+     },
+     {
+      "arena": "models",
+      "category": "uicomponent",
+      "elo": 1257,
+      "win_rate": 53.3,
+      "rank": 37
+     },
+     {
+      "arena": "models",
+      "category": "website",
+      "elo": 1256,
+      "win_rate": 52.2,
+      "rank": 41
+     }
+    ],
+    "artificial_analysis": {
+     "intelligence_index": 38.4,
+     "coding_index": 74.9,
+     "agentic_index": 36.4
+    }
+   },
+   "reasoning": {
+    "mandatory": false,
+    "default_enabled": true,
+    "supported_efforts": [
+     "xhigh",
+     "high",
+     "medium",
+     "low",
+     "none"
+    ],
+    "default_effort": "medium"
+   }
+  },
+  {
+   "id": "google/gemini-2.5-pro",
+   "canonical_slug": "google/gemini-2.5-pro",
+   "hugging_face_id": "",
+   "name": "Google: Gemini 2.5 Pro",
+   "created": 1750169544,
+   "description": "Gemini 2.5 Pro is Google\u2019s state-of-the-art AI model designed for advanced reaso",
+   "context_length": 1048576,
+   "architecture": {
+    "modality": "text+image+file+audio+video->text",
+    "input_modalities": [
+     "text",
+     "image",
+     "file",
+     "audio",
+     "video"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "Gemini",
+    "instruct_type": null
+   },
+   "pricing": {
+    "prompt": "0.00000125",
+    "completion": "0.00001",
+    "image": "0.00000125",
+    "audio": "0.00000125",
+    "input_audio_cache": "0.000000125",
+    "web_search": "0.014",
+    "internal_reasoning": "0.00001",
+    "input_cache_read": "0.000000125",
+    "input_cache_write": "0.000000375",
+    "overrides": [
+     {
+      "min_prompt_tokens": 200000,
+      "prompt": "0.0000025",
+      "completion": "0.000015",
+      "audio": "0.0000025",
+      "input_audio_cache": "0.00000025",
+      "input_cache_read": "0.00000025"
+     }
+    ]
+   },
+   "top_provider": {
+    "context_length": 1048576,
+    "max_completion_tokens": 65536,
+    "is_moderated": false
+   },
+   "per_request_limits": null,
+   "supported_parameters": [
+    "include_reasoning",
+    "max_tokens",
+    "reasoning",
+    "response_format",
+    "seed",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_p"
+   ],
+   "default_parameters": {
+    "temperature": null,
+    "top_p": null,
+    "frequency_penalty": null
+   },
+   "supported_voices": null,
+   "knowledge_cutoff": "2025-01-31",
+   "expiration_date": null,
+   "links": {
+    "details": "/api/v1/models/google/gemini-2.5-pro/endpoints"
+   },
+   "benchmarks": {
+    "design_arena": [
+     {
+      "arena": "models",
+      "category": "3d",
+      "elo": 1081,
+      "win_rate": 50.6,
+      "rank": 94
+     },
+     {
+      "arena": "models",
+      "category": "codecategories",
+      "elo": 1152,
+      "win_rate": 57.5,
+      "rank": 84
+     },
+     {
+      "arena": "models",
+      "category": "dataviz",
+      "elo": 1222,
+      "win_rate": 68.2,
+      "rank": 50
+     },
+     {
+      "arena": "models",
+      "category": "gamedev",
+      "elo": 1111,
+      "win_rate": 54.2,
+      "rank": 92
+     },
+     {
+      "arena": "models",
+      "category": "uicomponent",
+      "elo": 1137,
+      "win_rate": 57.5,
+      "rank": 82
+     },
+     {
+      "arena": "models",
+      "category": "website",
+      "elo": 1167,
+      "win_rate": 58.4,
+      "rank": 83
+     }
+    ],
+    "artificial_analysis": {
+     "intelligence_index": 16.1,
+     "coding_index": 33.3,
+     "agentic_index": 1.6
+    }
+   },
+   "reasoning": {
+    "mandatory": true
+   }
+  },
+  {
+   "id": "moondream/moondream3-preview",
+   "canonical_slug": "moondream/moondream3-preview-20261013",
+   "hugging_face_id": "moondream/moondream3-preview",
+   "name": "Moondream: Moondream 3 Preview",
+   "created": 1792102385,
+   "description": "Moondream 3 Preview is a vision-language model from Moondream with 9B total para",
+   "context_length": 32000,
+   "architecture": {
+    "modality": "text+image->text",
+    "input_modalities": [
+     "text",
+     "image"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "Other",
+    "instruct_type": null
+   },
+   "pricing": {
+    "prompt": "0.0000003",
+    "completion": "0.0000025"
+   },
+   "top_provider": {
+    "context_length": 32000,
+    "max_completion_tokens": 4096,
+    "is_moderated": false
+   },
+   "per_request_limits": null,
+   "supported_parameters": [
+    "include_reasoning",
+    "max_completion_tokens",
+    "max_tokens",
+    "reasoning",
+    "temperature",
+    "top_p"
+   ],
+   "default_parameters": {
+    "temperature": 0.2,
+    "top_p": 0.9
+   },
+   "supported_voices": null,
+   "knowledge_cutoff": null,
+   "expiration_date": null,
+   "links": {
+    "details": "/api/v1/models/moondream/moondream3-preview-20261013/endpoints"
+   },
+   "reasoning": {
+    "mandatory": false,
+    "default_enabled": false
+   }
+  },
+  {
+   "id": "recursive/flint-v1.0:free",
+   "canonical_slug": "recursive/flint-v1.0-20261021",
+   "hugging_face_id": "RecursiveSI/flint",
+   "name": "Recursive: Flint (free)",
+   "created": 1792622765,
+   "description": "Flint is an open-weight mixture-of-experts model from Recursive, with about 2.5B",
+   "context_length": 262144,
+   "architecture": {
+    "modality": "text->text",
+    "input_modalities": [
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "Other",
+    "instruct_type": null
+   },
+   "pricing": {
+    "prompt": "0",
+    "completion": "0"
+   },
+   "top_provider": {
+    "context_length": 262144,
+    "max_completion_tokens": 235929,
+    "is_moderated": false
+   },
+   "per_request_limits": null,
+   "supported_parameters": [
+    "include_reasoning",
+    "logprobs",
+    "max_tokens",
+    "reasoning",
+    "response_format",
+    "seed",
+    "stop",
+    "temperature",
+    "tools",
+    "top_logprobs",
+    "top_p"
+   ],
+   "default_parameters": {},
+   "supported_voices": null,
+   "knowledge_cutoff": null,
+   "expiration_date": null,
+   "links": {
+    "details": "/api/v1/models/recursive/flint-v1.0-20261021/endpoints"
+   },
+   "reasoning": {
+    "mandatory": true
+   }
+  },
+  {
+   "id": "typesafe/jev-router",
+   "canonical_slug": "typesafe/jev-router",
+   "hugging_face_id": null,
+   "name": "TypeSafe: Jev Router",
+   "created": 1790363560,
+   "description": "Jev Router picks the best model and reasoning effort for each request, balancing",
+   "context_length": 1000000,
+   "architecture": {
+    "modality": "text+image+file+audio+video->text",
+    "input_modalities": [
+     "audio",
+     "file",
+     "image",
+     "text",
+     "video"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "Router",
+    "instruct_type": null
+   },
+   "pricing": {
+    "prompt": "-1",
+    "completion": "-1"
+   },
+   "top_provider": {
+    "context_length": null,
+    "max_completion_tokens": 65536,
+    "is_moderated": false
+   },
+   "per_request_limits": null,
+   "supported_parameters": [
+    "frequency_penalty",
+    "include_reasoning",
+    "logit_bias",
+    "logprobs",
+    "max_completion_tokens",
+    "max_tokens",
+    "min_p",
+    "parallel_tool_calls",
+    "presence_penalty",
+    "reasoning",
+    "reasoning_effort",
+    "repetition_penalty",
+    "response_format",
+    "seed",
+    "stop",
+    "structured_outputs",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_a",
+    "top_k",
+    "top_logprobs",
+    "top_p",
+    "verbosity"
+   ],
+   "default_parameters": {},
+   "supported_voices": null,
+   "knowledge_cutoff": null,
+   "expiration_date": null,
+   "links": {
+    "details": "/api/v1/models/typesafe/jev-router/endpoints"
+   }
+  }
+ ]
+}

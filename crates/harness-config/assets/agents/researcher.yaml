@@ -1,0 +1,8 @@
+name: researcher
+description: Read-only investigation agent (built in)
+prompt: researcher
+effort: low
+tools: [read, bash]
+memory: read
+policy:
+  bash.deny: ["git commit*", "git push*", "git add*", "rm *"]

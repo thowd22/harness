@@ -1,0 +1,54 @@
+name: fix-bug
+description: Reproduce a bug with a failing test, fix it, and prove the fix (fails before, passes after)
+command: fix
+inputs:
+  issue: { type: string, required: true, positional: 0, description: "The bug to fix" }
+  scope: { type: list, default: ["src/**", "tests/**"], description: "Files the fix may change" }
+budget: { usd: 5 }
+goal: "Fix: {{ inputs.issue }}"
+tasks:
+  - { id: repro, title: "Reproduce with a failing test", step: repro }
+  - { id: fix, title: "Fix the bug", step: fix }
+  - { id: proof, title: "Bug-fix proof", step: proof }
+  - { id: review, title: "Independent review", step: review }
+steps:
+  - id: repro
+    agent: coder
+    prompt: |
+      Write a test that reproduces this bug: {{ inputs.issue }}
+      Add only the test; leave the code unchanged so the test fails.
+      Set `test_command` to a shell command that runs just this test.
+    scope: ["tests/**"]
+    outputs: [test_command]
+
+  - id: prove-fail
+    needs: [repro]
+    verify: { command: "{{ steps.repro.outputs.test_command }}", expect: fail }
+
+  - id: fix
+    needs: [prove-fail]
+    agent: coder
+    scope: "{{ inputs.scope }}"
+    prompt: |
+      Make `{{ steps.repro.outputs.test_command }}` pass with a minimal change to the code. The test is correct.
+      {%- if steps.review is defined %}
+
+      A reviewer asked for changes to your previous fix:
+      {{ steps.review.outputs.summary }}
+      {%- endif %}
+    retries: 1
+
+  - id: proof
+    needs: [fix]
+    type: bugfix-proof
+    test: "{{ steps.repro.outputs.test_command }}"
+
+  - id: review
+    needs: [proof]
+    agent: reviewer
+    prompt: |
+      Review the fix for: {{ inputs.issue }}
+      The test `{{ steps.repro.outputs.test_command }}` failed before the fix and passes after it.
+      Set `verdict` to "approve" or "request_changes", and explain what to change in your reply.
+    outputs: [verdict]
+    loop: { until: "{{ steps.review.outputs.verdict == 'approve' }}", max_iterations: 3, retry_step: fix }

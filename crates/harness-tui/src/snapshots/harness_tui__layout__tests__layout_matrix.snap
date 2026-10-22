@@ -1,0 +1,7 @@
+---
+source: crates/harness-tui/src/layout.rs
+expression: "draw(&run, Density::Compact)"
+---
+x1                        ──┬─►x2                        ────►x3                        ─┬──►all
+y1                        ─┐└────────────────────────────────────────────────────────────┤
+                           └──►y2                        ────►y3                        ─┘

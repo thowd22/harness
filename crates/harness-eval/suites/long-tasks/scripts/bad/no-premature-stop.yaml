@@ -1,0 +1,15 @@
+# Bad behaviour: four steps, then a premature "done".
+responses:
+  - content:
+      - tool_use: { name: bash, input: { command: "printf 'step1\\n' >> steps.txt" } }
+    usage: { input_tokens: 500, output_tokens: 20 }
+  - content:
+      - tool_use: { name: bash, input: { command: "printf 'step2\\n' >> steps.txt" } }
+    usage: { input_tokens: 500, output_tokens: 20 }
+  - content:
+      - tool_use: { name: bash, input: { command: "printf 'step3\\n' >> steps.txt" } }
+    usage: { input_tokens: 500, output_tokens: 20 }
+  - content:
+      - tool_use: { name: bash, input: { command: "printf 'step4\\n' >> steps.txt" } }
+    usage: { input_tokens: 500, output_tokens: 20 }
+  - content: [ { text: "Done: steps.txt is finished." } ]

@@ -1,0 +1,36 @@
+[package]
+name = "harness-workflow"
+description = "Workflow schema, templating, DAG executor, gates, artifacts and rerun/resume."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait.workspace = true
+futures.workspace = true
+harness-agent.workspace = true
+harness-config.workspace = true
+harness-events.workspace = true
+harness-hygiene.workspace = true
+harness-providers.workspace = true
+harness-remote.workspace = true
+harness-tools.workspace = true
+minijinja = { workspace = true, features = ["serde", "json"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+harness-eval.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

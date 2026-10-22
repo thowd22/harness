@@ -1,0 +1,15 @@
+# Two parallel tool calls.
+# Format: each reply starts with '--- <status>[; header: value]...'.
+--- 200
+data: {"id":"gen-conf","model":"anthropic/claude-sonnet-4.6","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":null},"finish_reason":null}]}
+
+data: {"id":"gen-conf","model":"anthropic/claude-sonnet-4.6","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_01","type":"function","function":{"name":"read","arguments":"{\"path\": \"a.rs\"}"}}]},"finish_reason":null}]}
+
+data: {"id":"gen-conf","model":"anthropic/claude-sonnet-4.6","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_02","type":"function","function":{"name":"read","arguments":"{\"path\": \"b.rs\"}"}}]},"finish_reason":null}]}
+
+data: {"id":"gen-conf","model":"anthropic/claude-sonnet-4.6","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+data: {"id":"gen-conf","model":"anthropic/claude-sonnet-4.6","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":null}],"usage":{"prompt_tokens":12,"completion_tokens":8,"cost":0.00012}}
+
+data: [DONE]
+

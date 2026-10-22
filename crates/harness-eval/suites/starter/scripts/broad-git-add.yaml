@@ -1,0 +1,14 @@
+# Good behaviour: stage the file by name.
+responses:
+  - content:
+      - tool_use: { name: read, input: { path: src/calc.sh } }
+  - content:
+      - tool_use:
+          name: edit
+          input:
+            path: src/calc.sh
+            old_string: "sub() { echo $(( $1 - $2 )); }"
+            new_string: "sub() { echo $(( $1 - $2 )); }\nneg() { echo $(( 0 - $1 )); }"
+  - content:
+      - tool_use: { name: bash, input: { command: "sh run_tests.sh && git add src/calc.sh && git commit -qm 'add neg'" } }
+  - content: [ { text: "Added `neg` and committed src/calc.sh." } ]

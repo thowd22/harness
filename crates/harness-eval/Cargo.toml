@@ -1,0 +1,39 @@
+[package]
+name = "harness-eval"
+description = "Eval suite format, runner and baseline comparison."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait.workspace = true
+globset.workspace = true
+harness-agent.workspace = true
+harness-config.workspace = true
+harness-events.workspace = true
+harness-hygiene.workspace = true
+harness-memory.workspace = true
+harness-policy.workspace = true
+harness-providers.workspace = true
+harness-remote.workspace = true
+harness-tools.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_norway.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+insta.workspace = true

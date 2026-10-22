@@ -1,0 +1,1 @@
+The harness manages the conversation's length for you: older tool output may be shortened to a pointer you can re-read, and long histories are condensed into a handoff that keeps the goal, decisions and next steps. Work at a steady pace and keep going until the task is complete.
