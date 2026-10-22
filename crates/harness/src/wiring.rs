@@ -579,9 +579,13 @@ mod chatgpt_tests {
         assert!(!openai_uses_chatgpt(&explicit));
         let chat = cfg("auth = chatgpt\n", tmp.path());
         assert!(openai_uses_chatgpt(&chat));
-        // This test process is not interactive, so the default refuses.
+        // This test process is not interactive, so the default refuses. The
+        // reason follows the real environment: CI runners set CI, which is
+        // checked first.
         let err = provider_sync(&chat, &registry, &resolved).err().unwrap();
-        assert!(err.contains("headless"), "{err}");
+        let in_ci = std::env::var("CI").is_ok_and(|v| !matches!(v.trim(), "" | "0" | "false"));
+        let expected = if in_ci { "not used in CI" } else { "headless" };
+        assert!(err.contains(expected), "{err}");
     }
 
     #[test]
