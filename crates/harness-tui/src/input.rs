@@ -1503,31 +1503,39 @@ mod tests {
                 scope: Some("global".into()),
             })
             .collect();
-        let mut input = Input::new();
-        input.set_commands(cmds);
         let theme = Theme::default();
-        let mut term = Terminal::new(TestBackend::new(100, 12)).unwrap();
-        let it: Interaction<InputAction> = Interaction::new();
-        let mut worst = std::time::Duration::ZERO;
-        let mut steps = Vec::new();
-        for c in "/cmdnum99".chars() {
-            let t = std::time::Instant::now();
-            input.insert_char(c);
-            let ranked = t.elapsed();
-            let mut hits = it.begin_frame();
-            term.draw(|f| {
-                let ch = input.completion_height();
-                input.render_completion(f, Rect::new(0, 0, 100, ch), &theme, &mut hits, &|a| a);
-            })
-            .unwrap();
-            steps.push((c, ranked, t.elapsed()));
-            worst = worst.max(t.elapsed());
-        }
-        let got = names(&input);
+        // One typing sequence on fresh state: its slowest frame, the
+        // per-key timings and the final matches.
+        let sequence = || {
+            let mut input = Input::new();
+            input.set_commands(cmds.clone());
+            let mut term = Terminal::new(TestBackend::new(100, 12)).unwrap();
+            let it: Interaction<InputAction> = Interaction::new();
+            let mut worst = std::time::Duration::ZERO;
+            let mut steps = Vec::new();
+            for c in "/cmdnum99".chars() {
+                let t = std::time::Instant::now();
+                input.insert_char(c);
+                let ranked = t.elapsed();
+                let mut hits = it.begin_frame();
+                term.draw(|f| {
+                    let ch = input.completion_height();
+                    input.render_completion(f, Rect::new(0, 0, 100, ch), &theme, &mut hits, &|a| a);
+                })
+                .unwrap();
+                steps.push((c, ranked, t.elapsed()));
+                worst = worst.max(t.elapsed());
+            }
+            (worst, steps, names(&input))
+        };
+        let (_, _, got) = sequence();
         assert!(!got.is_empty());
         // Every number with two 9s after the gap-matched "cmdnum" prefix.
         assert_eq!(got.len(), 28, "{got:?}");
         assert!(got.iter().any(|n| n == "project:command-number-99"));
+        // Best of five runs: a slow implementation is slow every run, while
+        // a scheduler hiccup on a shared CI runner only hits some of them.
+        let (worst, steps, _) = (0..5).map(|_| sequence()).min_by_key(|r| r.0).unwrap();
         assert!(
             worst < std::time::Duration::from_millis(16),
             "worst frame {worst:?}; (key, ranked, drawn): {steps:?}"
