@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-23 04:24'
-updated_date: '2026-10-23 05:47'
+updated_date: '2026-10-23 06:44'
 labels:
   - tui
   - visibility
@@ -45,7 +45,7 @@ Limit how many times you test and fix. If the same test, build or check still fa
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Tests: automated tests cover every acceptance criterion (unit and/or integration as appropriate) and pass locally and in CI; no existing test is deleted, skipped, ignored or weakened to get a green run
+- [x] #1 Tests: automated tests cover every acceptance criterion (unit and/or integration as appropriate) and pass locally and in CI; no existing test is deleted, skipped, ignored or weakened to get a green run
 - [x] #2 Docs: user-facing behaviour is documented (docs/ and, if the design changed, the relevant backlog doc), public APIs have rustdoc, and any new config keys appear in the harness.ini reference
 - [x] #3 Loop guard respected: no more than 3 fix attempts per failing test or check; if still failing, stop, record attempts, output and hypothesis in implementation notes, and ask the user instead of looping
 - [x] #4 UI interaction: if this task makes anything visible in the TUI, every visible interactive element is clickable with the mouse and fully operable with the keyboard (arrows/Tab to focus, Enter to activate, Esc to back out), with tests for both input paths; tasks with no visible UI mark this N/A
@@ -87,6 +87,8 @@ Docs (tui-views.md, guide/palette.md) and CHANGELOG updated. Validation: cargo n
 Integration (2026-10-23): workspace green locally after all three lanes merged in the tree: cargo fmt --all --check clean; cargo clippy --workspace --all-targets --locked -D warnings clean; cargo nextest run --workspace --locked --profile ci 1538 passed, 8 skipped (pre-existing gated tests); cargo test --doc ok; cargo deny check ok; tests/install-test.sh ok; shellcheck on install.sh, scripts/*.sh, tests/*.sh clean. The earlier history.rs/palette.rs failures are green. No tests removed (55 #[test] added, 0 removed). DoD #1 left unchecked until CI passes on the pushed commit.
 
 Open follow-up (not done here, needs a decision): palette::catalog_entries is only called by its own unit tests; either wire it into the app or remove it together with those tests.
+
+Green in CI on ubuntu and macos (https://github.com/thowd22/harness/actions/runs/39911543976) and in the v0.2.0 release gate (https://github.com/thowd22/harness/actions/runs/39911979325); shipped in https://github.com/thowd22/harness/releases/tag/v0.2.0 and verified with the installed binary.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
