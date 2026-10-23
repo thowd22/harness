@@ -234,15 +234,25 @@ impl Executor for ProcessExecutor {
 /// Kills the child's whole process group (it was started as a group leader).
 async fn kill_group(pid: Option<u32>, child: &mut tokio::process::Child) {
     #[cfg(unix)]
-    if let Some(pid) = pid {
-        let _ = tokio::process::Command::new("kill")
-            .args(["-KILL", &format!("-{pid}")])
-            .status()
-            .await;
+    if let Some(pgid) = group_id(pid) {
+        // A direct killpg(2), not `kill -KILL -<pgid>`: procps-ng `kill`
+        // parses a short negative id such as `-169` as `-1` and SIGKILLs
+        // every process the user owns.
+        let _ = nix::sys::signal::killpg(
+            nix::unistd::Pid::from_raw(pgid),
+            nix::sys::signal::Signal::SIGKILL,
+        );
     }
     #[cfg(not(unix))]
     let _ = pid;
     let _ = child.kill().await;
+}
+
+/// The process group to signal for a child started as a group leader.
+/// `None` for ids that would address more than one group: 0 is the caller's
+/// own group and 1 (as `-1`) is every process the user may signal.
+fn group_id(pid: Option<u32>) -> Option<i32> {
+    pid.and_then(|p| i32::try_from(p).ok()).filter(|&p| p > 1)
 }
 
 /// Denies every approval (headless evals never ask a human). The request
@@ -568,6 +578,41 @@ mod tests {
             .unwrap();
         assert!(out.timed_out);
         assert_eq!(out.exit_code, None);
+    }
+
+    #[test]
+    fn group_ids_that_address_several_groups_are_never_signalled() {
+        assert_eq!(group_id(None), None);
+        assert_eq!(group_id(Some(0)), None, "0 is the caller's own group");
+        assert_eq!(group_id(Some(1)), None, "-1 is every process of the user");
+        assert_eq!(group_id(Some(u32::MAX)), None);
+        assert_eq!(group_id(Some(169)), Some(169));
+    }
+
+    /// Regression: `kill -KILL -<pgid>` with procps-ng could become
+    /// kill(-1, SIGKILL). A timeout must only kill the task's own group.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeout_kills_only_the_task_group() {
+        use std::os::unix::process::CommandExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mut bystander = std::process::Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let stub = write_stub(dir.path(), "#!/bin/sh\nsleep 10 &\nsleep 10\n");
+        let mut t = task();
+        t.timeout_secs = 0;
+        let out = ProcessExecutor::new(&stub)
+            .execute(&t, dir.path(), &CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(out.timed_out);
+        let alive = bystander.try_wait().unwrap().is_none();
+        let _ = bystander.kill();
+        let _ = bystander.wait();
+        assert!(alive, "a process outside the task's group was killed");
     }
 
     #[test]

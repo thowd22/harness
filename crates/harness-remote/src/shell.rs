@@ -473,6 +473,10 @@ impl ShellExec {
 }
 
 fn kill_group_script(pgid: u32) -> String {
+    // -0 is the killing shell's own group and -1 every process of the user.
+    if pgid <= 1 {
+        return "true".into();
+    }
     format!(
         "kill -TERM -- -{pgid} 2>/dev/null; i=0; while kill -0 -- -{pgid} 2>/dev/null && [ $i -lt 20 ]; do sleep 0.1; i=$((i+1)); done; kill -KILL -- -{pgid} 2>/dev/null; true"
     )
@@ -560,6 +564,15 @@ mod tests {
 
     fn ws(dir: &Path) -> ShellWorkspace {
         ShellWorkspace::new(Arc::new(LocalShell::default()), dir)
+    }
+
+    #[test]
+    fn kill_script_never_targets_group_0_or_1() {
+        assert_eq!(kill_group_script(0), "true");
+        assert_eq!(kill_group_script(1), "true");
+        let s = kill_group_script(169);
+        assert!(s.starts_with("kill -TERM -- -169 "), "{s}");
+        assert!(s.contains("kill -KILL -- -169 "), "{s}");
     }
 
     #[tokio::test]

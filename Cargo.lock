@@ -982,6 +982,7 @@ dependencies = [
  "harness-tools",
  "hex",
  "insta",
+ "nix 0.31.3",
  "serde",
  "serde_json",
  "serde_norway",
