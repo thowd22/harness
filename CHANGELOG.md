@@ -11,6 +11,8 @@ to built-in prompts, agents, workflows and `harness.ini` defaults.
 
 ## Unreleased
 
+## [0.2.0] - 2026-10-23
+
 ### Changed
 
 - The chat transcript is bottom-anchored like a chat app: the newest
