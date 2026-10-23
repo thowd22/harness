@@ -11,6 +11,8 @@ to built-in prompts, agents, workflows and `harness.ini` defaults.
 
 ## Unreleased
 
+## [0.1.0] - 2026-10-23
+
 ### Added
 
 - Built-in identity prompt layer: every built-in agent's system prompt
