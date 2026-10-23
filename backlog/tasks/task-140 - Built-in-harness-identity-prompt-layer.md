@@ -1,11 +1,11 @@
 ---
 id: TASK-140
 title: Built-in harness identity prompt layer
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-23 02:30'
-updated_date: '2026-10-23 03:24'
+updated_date: '2026-10-23 04:08'
 labels:
   - prompts
   - problem-2
@@ -48,7 +48,7 @@ Limit how many times you test and fix. If the same test, build or check still fa
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Tests: automated tests cover every acceptance criterion (unit and/or integration as appropriate) and pass locally and in CI; no existing test is deleted, skipped, ignored or weakened to get a green run
+- [x] #1 Tests: automated tests cover every acceptance criterion (unit and/or integration as appropriate) and pass locally and in CI; no existing test is deleted, skipped, ignored or weakened to get a green run
 - [x] #2 Docs: user-facing behaviour is documented (docs/ and, if the design changed, the relevant backlog doc), public APIs have rustdoc, and any new config keys appear in the harness.ini reference
 - [x] #3 Loop guard respected: no more than 3 fix attempts per failing test or check; if still failing, stop, record attempts, output and hypothesis in implementation notes, and ask the user instead of looping
 - [x] #4 UI interaction: if this task makes anything visible in the TUI, every visible interactive element is clickable with the mouse and fully operable with the keyboard (arrows/Tab to focus, Enter to activate, Esc to back out), with tests for both input paths; tasks with no visible UI mark this N/A
@@ -74,6 +74,8 @@ Snapshots: cargo-insta is not installed, so the review was done by hand: INSTA_F
 Validation: cargo nextest run --workspace 1439 passed; clippy -D warnings clean for harness-config, harness-eval, harness-tui, harness; cargo fmt --all --check clean; defaults_changelog passes with fingerprint 95e10042f5f1. Note: cargo fmt -p harness-tui/-p harness may have reformatted other lanes' files in those crates (formatting only).
 
 Integration audit (2026-10-23): every AC is backed by local evidence: full workspace `cargo nextest run --workspace --locked --profile ci` 1452 passed / 8 skipped with all lanes merged, plus clippy --workspace --all-targets -D warnings, fmt --check, doc tests and cargo deny all clean. DoD#1 also requires the tests to pass in CI, and nothing containing this change has run on GitHub yet (it is uncommitted), so DoD#1 is unchecked and the task is back In Progress. After the push, check DoD#1 once CI is green and set Done; TASK-142 is waiting on the same thing.
+
+Verified in CI on GitHub: green on ubuntu-latest and macos-latest at c3a4fa8 (https://github.com/thowd22/harness/actions/runs/39896376900) and 84d24e7 (https://github.com/thowd22/harness/actions/runs/39897339759); also green inside the v0.1.0 release gate (https://github.com/thowd22/harness/actions/runs/39896827525).
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

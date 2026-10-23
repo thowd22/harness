@@ -1,11 +1,11 @@
 ---
 id: TASK-136
 title: Copy and paste in the TUI
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-22 19:52'
-updated_date: '2026-10-22 21:03'
+updated_date: '2026-10-23 04:08'
 labels:
   - tui
   - interaction
@@ -44,7 +44,7 @@ Limit how many times you test and fix. If the same test, build or check still fa
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Tests: automated tests cover every acceptance criterion (unit and/or integration as appropriate) and pass locally and in CI; no existing test is deleted, skipped, ignored or weakened to get a green run
+- [x] #1 Tests: automated tests cover every acceptance criterion (unit and/or integration as appropriate) and pass locally and in CI; no existing test is deleted, skipped, ignored or weakened to get a green run
 - [x] #2 Docs: user-facing behaviour is documented (docs/ and, if the design changed, the relevant backlog doc), public APIs have rustdoc, and any new config keys appear in the harness.ini reference
 - [x] #3 Loop guard respected: no more than 3 fix attempts per failing test or check; if still failing, stop, record attempts, output and hypothesis in implementation notes, and ask the user instead of looping
 - [x] #4 UI interaction: if this task makes anything visible in the TUI, every visible interactive element is clickable with the mouse and fully operable with the keyboard (arrows/Tab to focus, Enter to activate, Esc to back out), with tests for both input paths; tasks with no visible UI mark this N/A
@@ -75,6 +75,8 @@ Validation after: cargo test -p harness-tui (262 lib + integration ok), cargo te
 DoD #1 left unchecked: tests pass locally; the CI run awaits the push.
 
 Review follow-up (2026-10-22): both findings are only that DoD #1 waits for CI. That is correct, and DoD #1 stays unchecked until the first CI run after the push. Re-verified locally: cargo test -p harness-tui (262 lib tests plus integration tests, all passing), cargo test -p harness --test tui_pty (2/2), clippy -D warnings clean for harness-tui and harness with all targets (the earlier harness unused-fn warnings from the other run are gone). cargo fmt --all --check fails only in harness-config/src/ini/config.rs (compression_below_mbps) and harness-remote link.rs/sync.rs. Those belong to the concurrent remote run and have no TASK-136 files, so I left them for that run to format. No code changes were needed.
+
+Verified in CI on GitHub: green on ubuntu-latest and macos-latest at c3a4fa8 (https://github.com/thowd22/harness/actions/runs/39896376900) and 84d24e7 (https://github.com/thowd22/harness/actions/runs/39897339759); also green inside the v0.1.0 release gate (https://github.com/thowd22/harness/actions/runs/39896827525).
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

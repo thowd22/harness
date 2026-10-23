@@ -1,11 +1,11 @@
 ---
 id: TASK-137
 title: Run CI on GitHub Actions and keep it green
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-22 19:52'
-updated_date: '2026-10-23 03:25'
+updated_date: '2026-10-23 04:13'
 labels:
   - infra
   - testing
@@ -32,14 +32,14 @@ Limit how many times you test and fix. If the same test, build or check still fa
 <!-- AC:BEGIN -->
 - [x] #1 ci.yml runs fmt, clippy with warnings denied, the full test suite and cargo-deny on push and pull request, on ubuntu-latest and macos-latest
 - [x] #2 Tests that depend on host features (Landlock, bwrap, sshd, a TTY) detect their absence and are skipped with a logged reason, never silently passing a weakened assertion
-- [ ] #3 Caching keeps a no-change CI run under 10 minutes
-- [ ] #4 The first CI run on GitHub is green, with a link to the passing run recorded in the task notes
+- [x] #3 Caching keeps a no-change CI run under 10 minutes
+- [x] #4 The first CI run on GitHub is green, with a link to the passing run recorded in the task notes
 - [x] #5 README shows a CI status badge
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Tests: automated tests cover every acceptance criterion (unit and/or integration as appropriate) and pass locally and in CI; no existing test is deleted, skipped, ignored or weakened to get a green run
+- [x] #1 Tests: automated tests cover every acceptance criterion (unit and/or integration as appropriate) and pass locally and in CI; no existing test is deleted, skipped, ignored or weakened to get a green run
 - [x] #2 Docs: user-facing behaviour is documented (docs/ and, if the design changed, the relevant backlog doc), public APIs have rustdoc, and any new config keys appear in the harness.ini reference
 - [x] #3 Loop guard respected: no more than 3 fix attempts per failing test or check; if still failing, stop, record attempts, output and hypothesis in implementation notes, and ask the user instead of looping
 - [x] #4 UI interaction: if this task makes anything visible in the TUI, every visible interactive element is clickable with the mouse and fully operable with the keyboard (arrows/Tab to focus, Enter to activate, Esc to back out), with tests for both input paths; tasks with no visible UI mark this N/A
@@ -79,4 +79,12 @@ CI-hazard audit (2026-10-23), each finding verified before it was fixed, and eac
 6. [fixed] The fake ssh (ssh.rs) and fake gh (tests/release.rs) are now created with `install -m 755` from a child process, like write_stub.
 7. [fixed] build-remote-helpers.sh sources release-common.sh and uses write_sha256. verify-remote-helpers.sh uses sha256_of, says it is Linux-only, and dies early when readelf or timeout is missing. Also quoted $runner (SC2086) and added a shellcheck shell directive to release-common.sh. Tests: remote_helper_scripts_use_portable_checksums, verify_remote_helpers_checks_the_sidecar.
 Integration checks: cargo fmt --all --check clean; cargo clippy --workspace --all-targets --locked -D warnings clean; cargo nextest run --workspace --locked --profile ci 1452 passed / 8 skipped; cargo test --workspace --locked --doc ok; cargo deny check ok; bash tests/install-test.sh passed; shellcheck -x on scripts/*.sh, tests/*.sh, install.sh and the fixtures clean; actionlint reports only the valid macos-15-intel label.
+
+First green CI run on GitHub: https://github.com/thowd22/harness/actions/runs/39896376900 (c3a4fa8, both OSes). Warm-cache no-change run (workflow_dispatch on main): https://github.com/thowd22/harness/actions/runs/39898722189, 4m21s wall clock (slowest job test (macos-latest) 4m15s), under the 10-minute target. Earlier Ubuntu freezes were caused by procps kill -KILL -PGID becoming kill(-1), fixed in 9e6b32e; nextest per-test kill and a step timeout now guard against hangs.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+CI on GitHub Actions for ubuntu and macos (fmt, clippy, nextest, doctests, sandbox, cargo-deny) is green; no-change run takes about 4 minutes.
+<!-- SECTION:FINAL_SUMMARY:END -->

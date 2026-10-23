@@ -1,11 +1,11 @@
 ---
 id: TASK-142
 title: 'Apply open Dependabot updates (actions, zstd, base64)'
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-23 02:40'
-updated_date: '2026-10-23 03:25'
+updated_date: '2026-10-23 04:08'
 labels:
   - infra
   - deps
@@ -33,7 +33,7 @@ Dependabot opened PR #1 (GitHub Actions group: checkout 4->7, dtolnay/rust-toolc
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Tests: automated tests cover every acceptance criterion (unit and/or integration as appropriate) and pass locally and in CI; no existing test is deleted, skipped, ignored or weakened to get a green run
+- [x] #1 Tests: automated tests cover every acceptance criterion (unit and/or integration as appropriate) and pass locally and in CI; no existing test is deleted, skipped, ignored or weakened to get a green run
 - [x] #2 Docs: user-facing behaviour is documented (docs/ and, if the design changed, the relevant backlog doc), public APIs have rustdoc, and any new config keys appear in the harness.ini reference
 - [x] #3 Loop guard respected: no more than 3 fix attempts per failing test or check; if still failing, stop, record attempts, output and hypothesis in implementation notes, and ask the user instead of looping
 - [x] #4 UI interaction: if this task makes anything visible in the TUI, every visible interactive element is clickable with the mouse and fully operable with the keyboard (arrows/Tab to focus, Enter to activate, Esc to back out), with tests for both input paths; tasks with no visible UI mark this N/A
@@ -64,4 +64,6 @@ Decisions and verification:
 - Pending: DoD#1 'pass in CI' after the orchestrator pushes.
 
 Integration (2026-10-23): with every lane merged, the full workspace is green locally (nextest ci profile 1452 passed; clippy, fmt, doc tests, cargo deny, install-test, shellcheck clean). The earlier failures in other lanes (golden_requests, defaults_changelog, the fuzzy frame-budget test, fmt diffs) no longer reproduce. DoD#1 still waits for CI after the push.
+
+Verified in CI on GitHub: green on ubuntu-latest and macos-latest at c3a4fa8 (https://github.com/thowd22/harness/actions/runs/39896376900) and 84d24e7 (https://github.com/thowd22/harness/actions/runs/39897339759); also green inside the v0.1.0 release gate (https://github.com/thowd22/harness/actions/runs/39896827525).
 <!-- SECTION:NOTES:END -->

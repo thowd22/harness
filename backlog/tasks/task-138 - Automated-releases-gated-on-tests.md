@@ -1,11 +1,11 @@
 ---
 id: TASK-138
 title: Automated releases gated on tests
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-22 19:52'
-updated_date: '2026-10-22 20:23'
+updated_date: '2026-10-23 04:09'
 labels:
   - infra
   - release
@@ -30,17 +30,17 @@ Limit how many times you test and fix. If the same test, build or check still fa
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Pushing a v* tag runs the full CI first; the release is created only if every CI job passes
-- [ ] #2 A workflow_dispatch Cut release workflow takes a version, checks CI is green on that commit, bumps the workspace version and CHANGELOG, tags and triggers the release
-- [ ] #3 Release artifacts: harness binaries for linux x86_64 and aarch64 (musl, static) and macOS arm64 and x86_64, plus the remote helper builds, each with a sha256 file
+- [x] #1 Pushing a v* tag runs the full CI first; the release is created only if every CI job passes
+- [x] #2 A workflow_dispatch Cut release workflow takes a version, checks CI is green on that commit, bumps the workspace version and CHANGELOG, tags and triggers the release
+- [x] #3 Release artifacts: harness binaries for linux x86_64 and aarch64 (musl, static) and macOS arm64 and x86_64, plus the remote helper builds, each with a sha256 file
 - [x] #4 Release notes come from the CHANGELOG section for that version
 - [x] #5 harness --version reports the released version and git commit
-- [ ] #6 A first release (v0.1.0 or the next version) is cut successfully on GitHub and its artifacts download and run, with the link recorded in the task notes
+- [x] #6 A first release (v0.1.0 or the next version) is cut successfully on GitHub and its artifacts download and run, with the link recorded in the task notes
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Tests: automated tests cover every acceptance criterion (unit and/or integration as appropriate) and pass locally and in CI; no existing test is deleted, skipped, ignored or weakened to get a green run
+- [x] #1 Tests: automated tests cover every acceptance criterion (unit and/or integration as appropriate) and pass locally and in CI; no existing test is deleted, skipped, ignored or weakened to get a green run
 - [x] #2 Docs: user-facing behaviour is documented (docs/ and, if the design changed, the relevant backlog doc), public APIs have rustdoc, and any new config keys appear in the harness.ini reference
 - [x] #3 Loop guard respected: no more than 3 fix attempts per failing test or check; if still failing, stop, record attempts, output and hypothesis in implementation notes, and ask the user instead of looping
 - [x] #4 UI interaction: if this task makes anything visible in the TUI, every visible interactive element is clickable with the mouse and fully operable with the keyboard (arrows/Tab to focus, Enter to activate, Esc to back out), with tests for both input paths; tasks with no visible UI mark this N/A
@@ -74,4 +74,12 @@ Awaiting push: AC1, AC2, AC3 (workflow behaviour on GitHub, macOS builds) and AC
 Not mine, seen while testing: harness-eval defaults_changelog fails (fingerprint 9615b4d09acd) from another agent's defaults change; harness workspace.rs ci_runs_fmt_clippy_test_and_deny_on_push fails against TASK-137's in-progress ci.yml (clippy line now has --locked).
 
 Review fix (cut-release leading v): confirmed. The workflow built the tag name from the raw input, so version=v0.1.0 would have pushed tag vv0.1.0 and a release commit before release-harness.yml's meta job rejected it. Fixed: a new first step after checkout, 'Normalise and validate the version', strips one leading v, checks valid_version from scripts/release-common.sh, and writes the normalised VERSION to GITHUB_ENV. It runs before the tag-existence check, so every later step (tag check, bump, notes, tag, push, dispatch) uses the clean value. Input description and docs/releasing.md updated. Tests: cut_release_gates_on_ci_then_bumps_tags_and_triggers_the_release now asserts the step order validate < tag check < ci gate < bump < tag/push < dispatch and that no later step reads inputs.version. The new cut_release_normalises_a_leading_v_and_rejects_bad_versions runs the step's script with bash: v0.1.0, 0.1.0 and v1.2.3-rc.1 are accepted and normalised; vv0.1.0, empty, 0.1, 01.2.3, a trailing space and x1.2.3 are rejected and GITHUB_ENV is left untouched. Validation: cargo test -p harness --test release passes 12/12, and clippy -p harness --test release -D warnings is clean. Both ran in a scratch snapshot because the live tree does not compile: another agent's crates/harness/src/workflow.rs has secrets used after a move (E0382); the snapshot patches it with secrets.clone(). actionlint 1.7.12 with shellcheck 0.10.0 is clean on cut-release.yml and release-harness.yml. Still awaiting a live GitHub run: AC1, AC2, AC3, AC6 and DoD1.
+
+Live: Cut release (https://github.com/thowd22/harness/actions/runs/39896796175) checked CI on main, bumped CHANGELOG to [0.1.0], committed Release v0.1.0 and pushed tag v0.1.0. Release workflow (https://github.com/thowd22/harness/actions/runs/39896827525): first attempt failed one flaky macOS timing test in its CI gate and skipped build and publish (gate works); the test was made robust in 84d24e7 and the failed job re-run passed. Published https://github.com/thowd22/harness/releases/tag/v0.1.0 with harness for linux x86_64/aarch64 musl (static) and macOS arm64/x86_64, plus both remote helpers, each with .sha256. Downloaded via the installer: sha256 verified, statically linked, runs and answered a real OpenRouter request.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Tag-triggered release gated on full CI plus a Cut release workflow; v0.1.0 cut and published (https://github.com/thowd22/harness/releases/tag/v0.1.0), artifacts verified by download, checksum and a real run.
+<!-- SECTION:FINAL_SUMMARY:END -->
