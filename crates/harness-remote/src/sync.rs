@@ -615,27 +615,24 @@ pub fn rsync_args(
     let mut args: Vec<String> = vec!["--archive".to_string()];
     args.extend(compress.args());
     args.extend(
-        [
-            "--mkpath",
-            "--from0",
-            "--files-from=-",
-            "--no-specials",
-            "--no-devices",
-        ]
-        .iter()
-        .map(|s| s.to_string()),
+        ["--from0", "--files-from=-", "--no-specials", "--no-devices"]
+            .iter()
+            .map(|s| s.to_string()),
     );
     let src = format!("{}/", local_root.display());
     match ssh {
         Some(t) => {
             args.push("-e".into());
             args.push(t.rsync_shell());
-            args.push(src);
             // rsync passes the remote path through the remote shell.
             let path = match dest.strip_prefix("~/") {
                 Some(rest) => format!("~/{}", shell_quote(rest)),
                 None => shell_quote(dest),
             };
+            // Create the destination first. `--mkpath` would do it, but it
+            // needs rsync 3.2.3+, and macOS ships an older rsync.
+            args.push(format!("--rsync-path=mkdir -p {path} && rsync"));
+            args.push(src);
             args.push(format!("{}:{}/", t.host, path));
         }
         None => {
@@ -680,6 +677,10 @@ pub async fn rsync_push(
     ssh: Option<&SshTarget>,
 ) -> io::Result<()> {
     use tokio::io::AsyncWriteExt;
+    if ssh.is_none() {
+        // A remote destination is created through `--rsync-path`.
+        tokio::fs::create_dir_all(dest).await?;
+    }
     let compress = rsync_compression(ssh).await;
     let mut child = tokio::process::Command::new("rsync")
         .args(rsync_args(local_root, dest, ssh, compress))
@@ -1187,6 +1188,13 @@ mod tests {
         assert!(a.contains(&"--files-from=-".to_string()));
         assert!(a.contains(&"/p/".to_string()));
         assert_eq!(a.last().unwrap(), "gpu.example:~/.cache/harness/work/k/r1/");
+        // Works with rsync older than 3.2.3 (macOS): no --mkpath, the remote
+        // shell creates the destination instead.
+        assert!(!a.iter().any(|x| x == "--mkpath"), "{a:?}");
+        assert!(
+            a.contains(&"--rsync-path=mkdir -p ~/.cache/harness/work/k/r1 && rsync".to_string()),
+            "{a:?}"
+        );
         let e = &a[a.iter().position(|x| x == "-e").unwrap() + 1];
         assert!(e.starts_with("ssh "));
         assert!(e.contains("StrictHostKeyChecking=yes"));

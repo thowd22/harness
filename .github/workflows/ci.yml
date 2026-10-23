@@ -90,6 +90,9 @@ jobs:
       # nextest kills a test after 5 min (.config/nextest.toml), so a hang
       # fails with the test's name instead of hitting the job timeout.
       - name: Test
+        # A step timeout keeps the log (a job timeout discards it), and the
+        # SLOW lines nextest prints every 60 s name whatever is still running.
+        timeout-minutes: 15
         run: cargo nextest run --workspace --locked --profile ci
       - name: Doctests
         run: cargo test --workspace --locked --doc

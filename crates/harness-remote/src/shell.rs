@@ -323,7 +323,7 @@ mv -f -- "$t" "$p""#;
     async fn set_mode(&self, path: &Path, mode: u32) -> WsResult<()> {
         let p = self.resolve(path);
         let body = format!(
-            r#"[ -e "$p" ] || exit 2; chmod {:o} -- "$p""#,
+            r#"[ -e "$p" ] || exit 2; chmod -- {:o} "$p""#,
             mode & 0o7777
         );
         self.script(&p, &body, b"").await.map(|_| ())
