@@ -80,6 +80,7 @@ fn every_builtin_has_a_description_and_argument_help() {
             "help",
             "new",
             "resume",
+            "rename",
             "model",
             "mode",
             "agents",
@@ -222,12 +223,32 @@ fn registry_holds_workflows_skills_and_agents_with_argument_specs() {
 
     let agent = reg.get("reviewer").unwrap();
     assert_eq!(agent.kind, CommandKind::Agent);
-    assert_eq!(
-        agent.description,
-        "Switch to the reviewer agent: Reviews diffs"
-    );
+    assert_eq!(agent.description, "Switch to Reviewer: Reviews diffs");
     let names: Vec<&str> = reg.completions("re").into_iter().map(|(n, _)| n).collect();
-    assert_eq!(names, ["release-notes", "remote", "resume", "reviewer"]);
+    assert_eq!(
+        names,
+        ["release-notes", "remote", "rename", "resume", "reviewer"]
+    );
+}
+
+#[test]
+fn agent_commands_describe_agents_by_display_name() {
+    let d = Dirs::new();
+    write(
+        &d.project.join("agents/deep-research.yaml"),
+        "name: deep-research\ndisplay_name: Deep Diver\ndescription: |\n  Reads widely\n  and long\nprompt_text: read\n",
+    );
+    write(
+        &d.project.join("agents/fixer.yaml"),
+        "name: fixer\nprompt_text: fix\n",
+    );
+    let catalog = Catalog::load(&d.roots());
+    assert!(catalog.errors().is_empty(), "{:?}", catalog.errors());
+    let reg = CommandRegistry::from_catalog(&catalog);
+    let deep = reg.get("deep-research").unwrap();
+    assert_eq!(deep.usage(), "/deep-research", "the command keeps its name");
+    assert_eq!(deep.description, "Switch to Deep Diver: Reads widely");
+    assert_eq!(reg.get("fixer").unwrap().description, "Switch to Fixer");
 }
 
 #[test]

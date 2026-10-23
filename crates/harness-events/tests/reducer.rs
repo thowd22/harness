@@ -101,6 +101,8 @@ async fn live_fold_equals_replay_fold() {
         name: "r".into(),
         workflow: None,
         host: None,
+        title: None,
+        agent_names: Default::default(),
     }));
     emit(EventDraft::node(
         "a",

@@ -26,6 +26,7 @@ pub mod model_picker;
 pub mod notify;
 pub mod palette;
 pub mod panel;
+pub mod session_picker;
 pub mod status;
 pub mod terminal;
 pub mod theme;

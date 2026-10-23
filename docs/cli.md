@@ -2,7 +2,7 @@
 
 | Command | What it does | Exit codes |
 |---|---|---|
-| `harness [--resume ID\|last] [--agent NAME] [--model REF] [--mode M] [--cwd DIR]` | the interactive TUI in the project | 0, 1 on startup errors |
+| `harness [--resume SESSION] [--agent NAME] [--model REF] [--mode M] [--cwd DIR]` | the interactive TUI in the project | 0, 1 on startup errors |
 | `harness run [OPTIONS] PROMPT` | one headless agent run ([headless.md](headless.md)) | 0 ok, 1 error, 2 usage, 3 verify failed, 4 budget, 5 max turns, 130 cancelled |
 | `harness wf list` | every workflow with its slash command | 0 |
 | `harness wf help NAME` | a workflow's inputs and steps | 0, 1 unknown |
@@ -17,8 +17,8 @@
 | `harness config check [PATH]` | validate harness.ini | 0, 1 |
 | `harness config show [PATH]` | the effective, redacted config with the source of each value ([effective-config.md](effective-config.md)) | 0, 1 |
 | `harness schema [prompt\|agent\|workflow]` | JSON Schema of the YAML files | 0, 2 unknown kind |
-| `harness runs show ID\|PREFIX\|last [--json]` | a run as a tree, or its reducer state as JSON | 0, 1, 2 usage |
-| `harness sessions` | saved sessions, newest first | 0 |
+| `harness runs show ID\|PREFIX\|last\|#TAG [--json]` | a run as a tree (title, agents by display name, then `id <full id> (#tag)`), or its reducer state as JSON | 0, 1, 2 usage |
+| `harness sessions` | saved sessions by name, most recently active first ([sessions](sessions.md)) | 0 |
 | `harness ui-demo [--gallery\|--print]` | a scripted session without a model (below) | 0, 1 |
 | `harness remote-agent --stdio` | the remote helper, started over SSH ([remote.md](remote.md)) | |
 | `harness --version` | version and git commit, e.g. `harness 0.1.0 (1a2b3c4d5e6f)` ([releasing.md](releasing.md#version-and-commit)) | 0 |

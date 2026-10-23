@@ -79,6 +79,12 @@ or labels in `runs_on`, and agent budgets above `[budget] run_usd`.
 
 ## Agents
 
+- `display_name:` is optional: the name people see in the palette, map,
+  history, goal bar, subagent cards and `harness runs show`. Without it the
+  agent shows as its name with `-`/`_` as spaces and a capital first letter
+  (`bugfix-proof` → `Bugfix proof`). An empty value is an error.
+- `description:` is one line shown in the palette and to parents choosing a
+  subagent. Without it the palette says `Run the <display name> agent`.
 - Set exactly one of `prompt:` (the name of a prompt) or `prompt_text:`
   (inline text, not templated).
 - `model:` is optional. Without it the agent uses `[general] default_model`.

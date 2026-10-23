@@ -44,6 +44,7 @@ limits in `scope:` or `policy:`, which are enforced in code).
 
 ```yaml agent
 name: fixer
+display_name: Test Fixer      # optional; shown in the palette, map and history
 description: Fixes failing tests in src/
 prompt: terse
 model: sonnet

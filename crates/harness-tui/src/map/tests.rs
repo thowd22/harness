@@ -78,7 +78,7 @@ fn nodes_show_status_name_agent_model_host_duration_cost_retries_and_tokens() {
     let text = h.draw();
     assert!(text.contains("fix-bug"), "{text}");
     assert!(text.contains("✔ repro"), "{text}");
-    assert!(text.contains("implementer · sonnet"), "{text}");
+    assert!(text.contains("Implementer · sonnet"), "{text}");
     assert!(text.contains("⧉gpu-box"), "{text}");
     assert!(text.contains("41.0s $0.080"), "{text}");
     assert!(text.contains("$0.31 ↻1"), "{text}");
@@ -351,4 +351,62 @@ fn running_nodes_and_goal_bar_tasks_spin() {
         crate::indicators::node_glyph(NodeStatus::Running, &spinner)
     );
     assert_eq!(glyph, SPINNER_FRAMES[0]);
+}
+
+#[test]
+fn header_and_nodes_use_run_titles_and_agent_display_names() {
+    let mut h = H::new(100, 12);
+    let mut b = EventBuilder::new();
+    b.push(
+        None,
+        None,
+        harness_events::schema::EventKind::RunStarted {
+            name: "coder".into(),
+            workflow: None,
+            host: None,
+            title: None,
+            agent_names: [("coder".to_owned(), "Code Smith".to_owned())].into(),
+        },
+    );
+    b.start(NodeSpec::step("coder").agent("coder").model("sonnet"));
+    b.user_message("coder", "Fix the header parser\nplease");
+    // A node with a raw UUID id that is only referenced so far.
+    b.start(
+        NodeSpec::subagent("0199f1a2-3b4c-7d5e-8f60-123456abcdef", "coder")
+            .name("0199f1a2-3b4c-7d5e-8f60-123456abcdef"),
+    );
+    h.feed(b.events());
+    let text = h.draw();
+    assert!(
+        text.contains(" Code Smith · Fix the header parser "),
+        "{text}"
+    );
+    assert!(text.contains("Code Smith"), "{text}");
+    assert!(text.contains("#abcdef"), "{text}");
+    assert!(
+        harness_events::names::find_raw_id(&text).is_none(),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_long_title_is_cut_before_the_header_metrics_at_80_columns() {
+    let mut h = H::new(80, 12);
+    let mut b = EventBuilder::new();
+    b.run_started("coder", None);
+    b.start(NodeSpec::step("coder").agent("coder").model("sonnet"));
+    b.user_message(
+        "coder",
+        "Refactor the configuration loader so that every layer reports precise errors",
+    );
+    b.cost("coder", 0.42);
+    b.approval("coder", "approval-1-1", "git push origin main");
+    h.feed(b.events());
+    let text = h.draw();
+    let header = text.lines().next().unwrap();
+    assert!(header.starts_with(" Coder · Refa"), "{header}");
+    assert!(header.contains('…'), "the title is cut: {header}");
+    for needle in ["running", "$0.42", "⏸ 1 waiting"] {
+        assert!(header.contains(needle), "{needle} in {header}");
+    }
 }

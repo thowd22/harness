@@ -470,7 +470,7 @@ impl GoalBar {
             if let Some(n) = task.owner.as_ref().and_then(|o| run.node(o)) {
                 let mut parts: Vec<Span<'static>> = Vec::new();
                 let who: Vec<String> = [
-                    n.agent.clone().or_else(|| Some(n.name.clone())),
+                    run.node_agent(n).or_else(|| Some(run.node_label(n))),
                     n.model.clone(),
                 ]
                 .into_iter()
@@ -617,8 +617,8 @@ mod tests {
             "1/4",
             "✔ Reproduce with failing test",
             "◐ Fix parse_header",
-            "implementer · sonnet",
-            "researcher · haiku · ⧉gpu-box",
+            "Implementer · sonnet",
+            "Researcher · haiku · ⧉gpu-box",
             "○ Bug-fix proof",
         ] {
             assert!(text.contains(needle), "{needle}\n{text}");

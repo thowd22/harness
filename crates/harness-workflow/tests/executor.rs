@@ -570,7 +570,10 @@ async fn rerun_from_a_selected_step_reuses_upstream_and_links_runs() {
     let evs = events(&rec2).await;
     match &evs[0].kind {
         EventKind::RunStarted { name, .. } => assert!(
-            name.contains(&format!("re-run of {}", rec1.run_id().0)),
+            name.contains(&format!(
+                "re-run of {}",
+                harness_events::names::short_tag(&rec1.run_id().to_string())
+            )) && !name.contains(&rec1.run_id().to_string()),
             "{name}"
         ),
         other => panic!("{other:?}"),
@@ -1006,4 +1009,38 @@ fn workflows_can_cap_memory() {
     )
     .unwrap_err();
     assert!(e[0].to_string().contains("memory"), "{e:?}");
+}
+
+#[tokio::test]
+async fn runs_are_titled_from_inputs_and_record_agent_display_names() {
+    let env = Env::new().await;
+    let runners = env.runners(Agents::default(), headless_approve_all());
+    let w = common::wf(
+        "name: t\ninputs:\n  n: { type: number, default: 2 }\n  issue: { type: string, required: true }\nsteps:\n  - id: s\n    run: \"true\"\n",
+    );
+    let names = std::collections::BTreeMap::from([("coder".to_owned(), "Code Smith".to_owned())]);
+    let out = env
+        .executor(runners)
+        .with_agent_names(names.clone())
+        .run(
+            &w,
+            &inputs(json!({"issue": "Header parser drops values\nafter a colon"})),
+            None,
+            &CancellationToken::new(),
+        )
+        .await;
+    assert_eq!(out.status, WorkflowStatus::Succeeded, "{:?}", out.error);
+    let evs = events(&env.recorder).await;
+    match &evs[0].kind {
+        EventKind::RunStarted {
+            title, agent_names, ..
+        } => {
+            assert_eq!(title.as_deref(), Some("Header parser drops values"));
+            assert_eq!(agent_names, &names);
+        }
+        other => panic!("{other:?}"),
+    }
+    let s = RunState::from_events(&evs);
+    assert_eq!(s.label(), "t · Header parser drops values");
+    assert_eq!(s.agent_display("coder"), "Code Smith");
 }

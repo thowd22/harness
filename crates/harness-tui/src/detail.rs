@@ -1418,17 +1418,23 @@ impl DetailView {
         let muted = th.fg(Token::Muted);
         let num = th.fg(Token::Number);
         let Some(n) = self.run.node(&self.node) else {
-            return Line::from(Span::styled(format!(" {}", self.node), th.fg(Token::Agent)));
+            return Line::from(Span::styled(
+                format!(" {}", harness_events::names::scrub_ids(self.node.as_str())),
+                th.fg(Token::Agent),
+            ));
         };
         let (glyph, token) = node_glyph(n.status, &self.spinner);
         let mut spans = vec![
             Span::styled(format!(" {glyph} "), th.fg(token)),
             Span::styled(
-                n.name.clone(),
+                self.run.node_label(n),
                 th.fg(Token::Agent).add_modifier(Modifier::BOLD),
             ),
         ];
-        for part in [n.agent.clone(), n.model.clone()].into_iter().flatten() {
+        for part in [self.run.node_agent_detail(n), n.model.clone()]
+            .into_iter()
+            .flatten()
+        {
             spans.push(Span::styled(format!(" · {part}"), muted));
         }
         if let Some(h) = &n.host {

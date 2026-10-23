@@ -7,7 +7,7 @@
 //! per `needs` entry). Output order depends only on event order, never on hash
 //! iteration, so folding the same events always gives the same state.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::Serialize;
 use time::OffsetDateTime;
@@ -137,6 +137,14 @@ pub struct RunState {
     pub finished_at: Option<OffsetDateTime>,
     /// Run error message.
     pub error: Option<String>,
+    /// Short human-readable title: `run_started.title` (workflow inputs),
+    /// else the first prompt of an agent run (see
+    /// [`crate::names::title_from_text`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Agent display names recorded in `run_started.agent_names`.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub agent_names: BTreeMap<String, String>,
     /// Nodes in order of first appearance.
     pub nodes: Vec<NodeState>,
     /// Edges in order of creation.
@@ -167,6 +175,8 @@ impl Default for RunState {
             started_at: None,
             finished_at: None,
             error: None,
+            title: None,
+            agent_names: BTreeMap::new(),
             nodes: Vec::new(),
             edges: Vec::new(),
             tokens: Usage::default(),
@@ -271,12 +281,18 @@ impl RunState {
                     name,
                     workflow,
                     host,
+                    title,
+                    agent_names,
                 },
                 _,
             ) => {
                 self.name = Some(name.clone());
                 self.workflow.clone_from(workflow);
                 self.host.clone_from(host);
+                if let Some(t) = title.as_deref().and_then(crate::names::title_from_text) {
+                    self.title = Some(t);
+                }
+                self.agent_names.clone_from(agent_names);
                 self.status = RunStatus::Running;
                 self.started_at = Some(e.ts);
             }
@@ -395,7 +411,71 @@ impl RunState {
                 },
                 Some(i),
             ) => self.nodes[i].error = Some(message.clone()),
+            (EventKind::UserMessage { text }, _)
+                if self.title.is_none() && self.workflow.is_none() =>
+            {
+                self.title = crate::names::title_from_text(text);
+            }
             _ => {}
+        }
+    }
+
+    /// The display name of `agent` in this run (its YAML `display_name`
+    /// as recorded at the start, else the default).
+    pub fn agent_display(&self, agent: &str) -> String {
+        crate::names::agent_display_name(agent, &self.agent_names)
+    }
+
+    /// The display name of `n`'s agent, if it has one.
+    pub fn node_agent(&self, n: &NodeState) -> Option<String> {
+        n.agent.as_deref().map(|a| self.agent_display(a))
+    }
+
+    /// The name to show for `n`: the agent's display name when the node is
+    /// named after its agent, a short tag when the name is a raw id (a
+    /// node only referenced so far), else the node's own name (a step id).
+    pub fn node_label(&self, n: &NodeState) -> String {
+        if n.agent.as_deref() == Some(n.name.as_str()) {
+            return self.agent_display(&n.name);
+        }
+        if crate::names::find_raw_id(&n.name).is_some() {
+            return crate::names::scrub_ids(&n.name);
+        }
+        n.name.clone()
+    }
+
+    /// The agent detail to show next to [`RunState::node_label`]: the
+    /// agent's display name when it differs from the label.
+    pub fn node_agent_detail(&self, n: &NodeState) -> Option<String> {
+        let label = self.node_label(n);
+        self.node_agent(n).filter(|a| *a != label)
+    }
+
+    /// What ran: the workflow name, else the display name of the first
+    /// top-level agent, else of the agent the run is named after.
+    pub fn who(&self) -> String {
+        if let Some(w) = &self.workflow {
+            return w.clone();
+        }
+        if let Some(a) = self
+            .roots()
+            .find(|n| matches!(n.kind, Some(NodeKind::Agent)))
+            .and_then(|n| n.agent.clone().or_else(|| Some(n.name.clone())))
+        {
+            return self.agent_display(&a);
+        }
+        match &self.name {
+            Some(n) => self.agent_display(&crate::names::scrub_ids(n)),
+            None => "run".into(),
+        }
+    }
+
+    /// The header label: `who · title`, or just `who` before a title is
+    /// known.
+    pub fn label(&self) -> String {
+        match &self.title {
+            Some(t) => format!("{} · {t}", self.who()),
+            None => self.who(),
         }
     }
 }
@@ -464,6 +544,8 @@ mod tests {
             name: "coder".into(),
             workflow: workflow.map(Into::into),
             host: None,
+            title: None,
+            agent_names: BTreeMap::new(),
         };
         // Interactive session before the first prompt: open, no node.
         let mut s = RunState::new();
@@ -567,5 +649,83 @@ mod tests {
         assert_eq!(s.topology_version, v);
         s.apply(&ev(3, 0, Some("b"), started("b", &["a"])));
         assert!(s.topology_version > v);
+    }
+
+    fn run_started(workflow: Option<&str>, title: Option<&str>) -> EventKind {
+        EventKind::RunStarted {
+            name: "coder".into(),
+            workflow: workflow.map(Into::into),
+            host: None,
+            title: title.map(Into::into),
+            agent_names: BTreeMap::from([("coder".to_owned(), "Code Smith".to_owned())]),
+        }
+    }
+
+    fn prompt(text: &str) -> EventKind {
+        EventKind::UserMessage { text: text.into() }
+    }
+
+    #[test]
+    fn agent_runs_are_titled_after_their_first_prompt() {
+        let mut s = RunState::new();
+        s.apply(&ev(0, 0, None, run_started(None, None)));
+        assert_eq!(s.title, None);
+        assert_eq!(s.label(), "Code Smith");
+        s.apply(&ev(1, 1, Some("a"), started("coder", &[])));
+        s.apply(&ev(
+            2,
+            1,
+            Some("a"),
+            prompt("Fix the header parser.\nDetails..."),
+        ));
+        s.apply(&ev(3, 2, Some("a"), prompt("and the tests")));
+        assert_eq!(s.title.as_deref(), Some("Fix the header parser"));
+        assert_eq!(s.label(), "Code Smith · Fix the header parser");
+    }
+
+    #[test]
+    fn explicit_titles_win_and_workflow_briefs_are_not_titles() {
+        let mut s = RunState::new();
+        s.apply(&ev(
+            0,
+            0,
+            None,
+            run_started(Some("fix"), Some("header bug")),
+        ));
+        s.apply(&ev(1, 1, Some("a"), prompt("You are step one")));
+        assert_eq!(s.title.as_deref(), Some("header bug"));
+        assert_eq!(s.label(), "fix · header bug");
+        let mut w = RunState::new();
+        w.apply(&ev(0, 0, None, run_started(Some("fix"), None)));
+        w.apply(&ev(1, 1, Some("a"), prompt("You are step one")));
+        assert_eq!(w.title, None);
+        assert_eq!(w.label(), "fix");
+    }
+
+    #[test]
+    fn nodes_are_labelled_with_agent_display_names() {
+        let mut s = RunState::new();
+        s.apply(&ev(0, 0, None, run_started(None, None)));
+        let agent_node = |name: &str, agent: &str| EventKind::NodeStarted {
+            kind: NodeKind::Agent,
+            name: name.into(),
+            agent: Some(agent.into()),
+            model: None,
+            host: None,
+            needs: Vec::new(),
+            queued: false,
+        };
+        s.apply(&ev(1, 0, Some("a"), agent_node("coder", "coder")));
+        s.apply(&ev(2, 0, Some("b"), agent_node("build", "reviewer")));
+        let a = s.node(&"a".into()).unwrap();
+        let b = s.node(&"b".into()).unwrap();
+        assert_eq!(s.node_label(a), "Code Smith");
+        assert_eq!(s.node_agent_detail(a), None);
+        assert_eq!(s.node_label(b), "build");
+        assert_eq!(s.node_agent_detail(b).as_deref(), Some("Reviewer"));
+        let raw = "0199f1a2-3b4c-7d5e-8f60-123456abcdef";
+        s.apply(&ev(3, 0, Some(raw), EventKind::NodeRunning));
+        let r = s.node(&raw.into()).unwrap();
+        assert_eq!(s.node_label(r), "#abcdef");
     }
 }

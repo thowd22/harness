@@ -2,8 +2,8 @@
 //!
 //! [`Gallery`] has one page per component ([`Page`]): the chat (tool
 //! cards, working indicator, timestamps, subagent cards), the agent map,
-//! node detail, the goal bar, the command palette, approvals, the diff
-//! review and the request inspector. A tab row at the top switches pages
+//! node detail, the goal bar, the command palette (with past runs),
+//! approvals, the diff review, the request inspector and the run history. A tab row at the top switches pages
 //! by click; ←/→ or Tab/Enter on a tab do the same from the keyboard, and
 //! `q` / Esc quits. Each page has a styled snapshot test.
 
@@ -27,11 +27,12 @@ use crate::chat::view::{ChatConfig, ChatView};
 use crate::detail::DetailView;
 use crate::diff::DiffView;
 use crate::goalbar::{GoalBar, Goals};
+use crate::history::HistoryView;
 use crate::inspector::{Inspection, InspectorView};
 use crate::interaction::{Dispatch, ElementId, HitMap, Interaction};
 use crate::keys::Keymap;
 use crate::map::{MapConfig, MapView};
-use crate::palette::{Palette, builtin_entries};
+use crate::palette::{Palette, builtin_entries, run_entries};
 use crate::status::StatusLine;
 use crate::theme::{Theme, Token};
 
@@ -54,11 +55,13 @@ pub enum Page {
     Diff,
     /// Request inspector.
     Inspector,
+    /// Run history.
+    History,
 }
 
 impl Page {
     /// Every page, in tab order.
-    pub const ALL: [Page; 8] = [
+    pub const ALL: [Page; 9] = [
         Page::Chat,
         Page::Map,
         Page::Detail,
@@ -67,6 +70,7 @@ impl Page {
         Page::Approvals,
         Page::Diff,
         Page::Inspector,
+        Page::History,
     ];
 
     /// Tab label.
@@ -80,6 +84,7 @@ impl Page {
             Page::Approvals => "approvals",
             Page::Diff => "diff",
             Page::Inspector => "inspector",
+            Page::History => "history",
         }
     }
 }
@@ -228,6 +233,7 @@ pub struct Gallery {
     approval: ApprovalPanel,
     diff: DiffView,
     inspector: InspectorView,
+    history: HistoryView,
     now: Instant,
     interaction: Interaction<Page>,
 }
@@ -291,8 +297,14 @@ impl Gallery {
         for e in gb.events() {
             map.apply_run_event(e);
         }
-        let mut palette = Palette::new(builtin_entries(&Keymap::defaults()));
+        let runs = super::history_runs();
+        let wall = T0 + time::Duration::minutes(5);
+        // Past runs first, so the palette page shows how they read.
+        let mut entries = run_entries(&runs, time::UtcOffset::UTC, wall);
+        entries.extend(builtin_entries(&Keymap::defaults()));
+        let mut palette = Palette::new(entries);
         palette.open();
+        let history = HistoryView::new(runs, theme.clone());
         let diff = DiffView::from_events("/w", &chat_ev, None, None, theme.clone());
         let insp = Inspection::from_events(&chat_ev, "c1", None).expect("scripted call c1");
         let inspector = InspectorView::new(insp, theme.clone(), std::env::temp_dir(), None);
@@ -313,6 +325,7 @@ impl Gallery {
             palette,
             diff,
             inspector,
+            history,
             now,
             interaction: Interaction::new(),
         }
@@ -424,6 +437,9 @@ impl Gallery {
             }
             Page::Diff => self.diff.render(frame, body),
             Page::Inspector => self.inspector.render(frame, body),
+            Page::History => self
+                .history
+                .render(frame, body, T0 + time::Duration::minutes(5)),
         }
     }
 }
@@ -484,6 +500,100 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_history() {
+        insta::assert_snapshot!("gallery_history", snap(Page::History));
+    }
+
+    /// No raw UUID or hash shows on any page of the gallery, at any size:
+    /// runs, agents and nodes are named, and ids appear only as short
+    /// `#tags` where two titles collide.
+    #[test]
+    fn no_page_shows_a_raw_id() {
+        let mut g = Gallery::new(Theme::default());
+        for (w, h) in [(80, 24), (120, 32), (200, 50)] {
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            for p in Page::ALL {
+                g.show(p);
+                term.draw(|f| g.render(f, f.area())).unwrap();
+                let text = buffer_text(term.backend().buffer());
+                if let Some(id) = harness_events::names::find_raw_id(&text) {
+                    panic!(
+                        "raw id `{id}` on the {} page at {w}x{h}:\n{text}",
+                        p.label()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn past_runs_read_as_agent_title_time_and_status() {
+        let mut g = Gallery::new(Theme::default());
+        let mut term = Terminal::new(TestBackend::new(120, 32)).unwrap();
+        g.show(Page::Palette);
+        term.draw(|f| g.render(f, f.area())).unwrap();
+        let palette = buffer_text(term.backend().buffer());
+        for needle in [
+            "Coder · Fix the header parser · 14:02 Oct 22 · ✔",
+            "Succeeded in 2m14s · $0.12",
+            "Researcher · Survey how the net… · 14:32 Oct 22 · ◐",
+            "fix-bug · Header parser drops… · 13:02 Oct 22 · ✗",
+            "Coder · Update the changelog #7a2b02 · 13:32 Oct 22 · ✔",
+            "Coder · Update the changelog #7a2b03 · 13:32 Oct 22 · ✔",
+        ] {
+            assert!(palette.contains(needle), "{needle}\n{palette}");
+        }
+        assert!(!palette.contains("Run agent"), "{palette}");
+        assert!(!palette.contains("Open run"), "{palette}");
+        g.show(Page::History);
+        term.draw(|f| g.render(f, f.area())).unwrap();
+        let history = buffer_text(term.backend().buffer());
+        for needle in [
+            "◐ Researcher · Survey how the net module",
+            "✗ fix-bug · Header parser drops values after",
+            "✔ Coder · Update the changelog #7a2b02",
+            "14:02 Oct 22",
+        ] {
+            assert!(history.contains(needle), "{needle}\n{history}");
+        }
+    }
+
+    #[test]
+    fn colliding_runs_stay_distinct_with_status_at_80_columns() {
+        let mut g = Gallery::new(Theme::default());
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        g.show(Page::Palette);
+        term.draw(|f| g.render(f, f.area())).unwrap();
+        let palette = buffer_text(term.backend().buffer());
+        for needle in [
+            "#7a2b02 · 13:32 Oct 22 · ✔",
+            "#7a2b03 · 13:32 Oct 22 · ✔",
+            "14:02 Oct 22 · ✔",
+            "14:32 Oct 22 · ◐",
+            "13:02 Oct 22 · ✗",
+        ] {
+            assert!(palette.contains(needle), "{needle}\n{palette}");
+        }
+        g.show(Page::History);
+        term.draw(|f| g.render(f, f.area())).unwrap();
+        let history = buffer_text(term.backend().buffer());
+        let rows: Vec<&str> = history
+            .lines()
+            .filter(|l| l.contains("Update the changelog"))
+            .collect();
+        assert_eq!(rows.len(), 2, "{history}");
+        assert_ne!(rows[0], rows[1], "{history}");
+        assert!(
+            rows[0].contains("#7a2b02") && rows[0].contains('✔'),
+            "{history}"
+        );
+        assert!(
+            rows[1].contains("#7a2b03") && rows[1].contains('✔'),
+            "{history}"
+        );
+    }
+
+    #[test]
     fn pages_show_their_components() {
         let mut g = Gallery::new(Theme::default());
         let mut term = Terminal::new(TestBackend::new(120, 32)).unwrap();
@@ -524,6 +634,20 @@ mod tests {
         g.handle(&key("enter"));
         assert_eq!(g.page(), Page::Detail);
         assert_eq!(g.handle(&key("q")), Some(GalleryOutput::Quit));
+    }
+
+    #[test]
+    fn history_tab_opens_by_click_and_keyboard() {
+        let mut g = Gallery::new(Theme::default());
+        let mut term = Terminal::new(TestBackend::new(120, 32)).unwrap();
+        term.draw(|f| g.render(f, f.area())).unwrap();
+        let (x, y) = find_text(term.backend().buffer(), " history ").unwrap();
+        g.handle(&click(x + 1, y));
+        assert_eq!(g.page(), Page::History);
+        g.handle(&key("right"));
+        assert_eq!(g.page(), Page::Chat);
+        g.handle(&key("left"));
+        assert_eq!(g.page(), Page::History);
     }
 
     #[test]

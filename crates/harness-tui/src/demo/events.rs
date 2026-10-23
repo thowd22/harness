@@ -169,6 +169,8 @@ impl EventBuilder {
                 name: name.to_owned(),
                 workflow: workflow.map(str::to_owned),
                 host: None,
+                title: None,
+                agent_names: Default::default(),
             },
         )
     }
@@ -314,6 +316,15 @@ impl EventBuilder {
                 response: response.map(Payload::Json),
                 duration_ms: ms,
             },
+        )
+    }
+
+    /// `user_message` on `node` (a prompt; the first one titles the run).
+    pub fn user_message(&mut self, node: &str, text: &str) -> &mut Self {
+        self.push(
+            Some(node),
+            None,
+            EventKind::UserMessage { text: text.into() },
         )
     }
 

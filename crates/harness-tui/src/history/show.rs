@@ -10,9 +10,10 @@
 use std::io::Write;
 use std::path::Path;
 
+use harness_events::names;
 use harness_events::reducer::{NodeState, RunState};
 use harness_events::schema::{NodeStatus, RunId, RunStatus};
-use time::OffsetDateTime;
+use time::{OffsetDateTime, UtcOffset};
 
 use crate::chat::text::{fmt_cost, fmt_ms, fmt_tokens};
 use crate::map::metrics::{critical_path, elapsed_ms, run_elapsed_ms};
@@ -28,9 +29,9 @@ fn icon(s: NodeStatus) -> char {
     }
 }
 
-fn node_line(n: &NodeState, now: OffsetDateTime) -> String {
-    let mut parts = vec![format!("{} {}", icon(n.status), n.name)];
-    let who: Vec<&str> = [n.agent.as_deref(), n.model.as_deref()]
+fn node_line(run: &RunState, n: &NodeState, now: OffsetDateTime) -> String {
+    let mut parts = vec![format!("{} {}", icon(n.status), run.node_label(n))];
+    let who: Vec<String> = [run.node_agent_detail(n), n.model.clone()]
         .into_iter()
         .flatten()
         .collect();
@@ -73,11 +74,7 @@ pub fn tree_text(run: &RunState, now: OffsetDateTime) -> String {
         RunStatus::Cancelled => "cancelled",
     };
     let mut out = String::new();
-    let id = run.run_id.map(|i| i.to_string()).unwrap_or_default();
-    out.push_str(&format!(
-        "{} ({id}) {status}",
-        run.name.as_deref().unwrap_or("run")
-    ));
+    out.push_str(&format!("{}  {status}", run.label()));
     if let Some(ms) = run_elapsed_ms(run, now) {
         out.push_str(&format!("  {}", fmt_ms(ms)));
     }
@@ -92,6 +89,17 @@ pub fn tree_text(run: &RunState, now: OffsetDateTime) -> String {
         out.push_str(&format!("  critical path {}", fmt_ms(cp)));
     }
     out.push('\n');
+    if let Some(id) = run.run_id.map(|i| i.to_string()) {
+        let tag = names::short_tag(&id);
+        out.push_str(&format!("id {id} ({tag})"));
+        if let Some(t) = run.started_at {
+            out.push_str(&format!(
+                "  started {}",
+                names::when_label(t, UtcOffset::UTC, now)
+            ));
+        }
+        out.push('\n');
+    }
     if let Some(e) = &run.error {
         out.push_str(&format!("error: {e}\n"));
     }
@@ -111,7 +119,7 @@ fn write_node(
     out: &mut String,
 ) {
     let branch = if last { "└─ " } else { "├─ " };
-    out.push_str(&format!("{prefix}{branch}{}", node_line(n, now)));
+    out.push_str(&format!("{prefix}{branch}{}", node_line(run, n, now)));
     let needs: Vec<&str> = run
         .edges
         .iter()
@@ -134,7 +142,8 @@ pub fn state_json(run: &RunState) -> serde_json::Value {
     serde_json::to_value(run).unwrap_or_default()
 }
 
-/// Resolves `id` (full id, unique prefix or `last`) under `data_dir`.
+/// Resolves `id` (full id, unique prefix, `last`, or the `#tag` shown
+/// next to colliding titles) under `data_dir`.
 pub fn resolve_run(data_dir: &Path, id: &str) -> Result<RunId, String> {
     let mut ids = harness_events::store::list_runs(data_dir).map_err(|e| e.to_string())?;
     if ids.is_empty() {
@@ -144,10 +153,17 @@ pub fn resolve_run(data_dir: &Path, id: &str) -> Result<RunId, String> {
         ids.sort_by_key(|r| r.0);
         return Ok(*ids.last().expect("non-empty"));
     }
-    let matches: Vec<RunId> = ids
-        .into_iter()
+    let mut matches: Vec<RunId> = ids
+        .iter()
+        .copied()
         .filter(|r| r.to_string().starts_with(id))
         .collect();
+    if matches.is_empty() {
+        matches = ids
+            .into_iter()
+            .filter(|r| names::matches_tag(&r.to_string(), id))
+            .collect();
+    }
     match matches.as_slice() {
         [one] => Ok(*one),
         [] => Err(format!("no run matches `{id}`")),
@@ -240,6 +256,42 @@ mod tests {
         assert_eq!(v, serde_json::to_value(&run).unwrap());
     }
 
+    #[test]
+    fn agent_runs_show_their_title_and_display_names() {
+        let mut b = EventBuilder::new();
+        b.run_started("coder", None);
+        b.start(NodeSpec::step("main").agent("coder").model("sonnet"));
+        b.user_message("main", "Fix the header parser");
+        b.start(
+            NodeSpec::subagent("r1", "main")
+                .name("researcher")
+                .agent("researcher")
+                .model("haiku"),
+        );
+        let run = RunState::from_events(b.events());
+        let text = tree_text(&run, b.now());
+        let mut lines = text.lines();
+        let head = lines.next().unwrap();
+        assert!(
+            head.starts_with("Coder · Fix the header parser  running"),
+            "{text}"
+        );
+        let id = lines.next().unwrap();
+        assert!(
+            id.starts_with("id 00000000-0000-0000-0000-000000000000 (#000000)"),
+            "{text}"
+        );
+        let rest: Vec<&str> = lines.collect();
+        assert!(rest[0].contains("◐ main  Coder · sonnet"), "{text}");
+        assert!(rest[1].contains("◐ Researcher  haiku"), "{text}");
+        // Only the id line carries the full id.
+        assert!(names::find_raw_id(head).is_none());
+        assert!(
+            rest.iter().all(|l| names::find_raw_id(l).is_none()),
+            "{text}"
+        );
+    }
+
     async fn record(
         dir: &Path,
         events: &[harness_events::schema::RunEvent],
@@ -312,6 +364,13 @@ mod tests {
         );
         let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(v["status"], "succeeded");
+
+        // The `#tag` shown on colliding titles works too, with or without `#`.
+        let tag = names::short_tag(&done.to_string());
+        for q in [tag.clone(), tag.trim_start_matches('#').to_owned()] {
+            assert_eq!(resolve_run(dir.path(), &q), Ok(done), "{q}");
+        }
+        assert_eq!(resolve_run(dir.path(), &done.to_string()), Ok(done));
 
         let (mut out, mut err) = (Vec::new(), Vec::new());
         assert_eq!(run_show(dir.path(), "zzzz", false, &mut out, &mut err), 1);

@@ -39,7 +39,8 @@ A layer is exactly one of `text:`, `file:` or `builtin:`. The only built-in laye
 
 ```yaml
 name: implementer
-description: Writes code for a scoped task
+display_name: Implementer     # optional: shown in the TUI and CLI (default: name with a capital first letter)
+description: Writes code for a scoped task   # one line: palette, and parents choosing a subagent
 model: sonnet                 # alias or provider/model — explicit, no hidden routing
 effort: medium                # provider-mapped reasoning effort
 prompt: coder                 # prompt name, or inline `prompt_text:`

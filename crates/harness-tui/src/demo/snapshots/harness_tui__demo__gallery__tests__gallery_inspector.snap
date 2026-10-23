@@ -2,7 +2,7 @@
 source: crates/harness-tui/src/demo/gallery.rs
 expression: "snap(Page::Inspector)"
 ---
- ui-demo  chat   map   detail   goal bar   palette   approvals   diff   inspector
+ ui-demo  chat   map   detail   goal bar   palette   approvals   diff   inspector   history
  c1 · anthropic · sonnet [Request] [Response] [Layers] [export]
 recorded request (as logged)
 {
@@ -51,7 +51,9 @@ full request (rebuilt from the log)
 0 64-69: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
 0 70-70: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 0 71-81: fg=Rgb(40, 42, 54) bg=Rgb(189, 147, 249)
-0 82-119: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
+0 82-82: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
+0 83-91: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
+0 92-119: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 1 0-24: fg=Rgb(189, 147, 249) bg=Rgb(40, 42, 54)
 1 25-33: fg=Rgb(189, 147, 249) bg=Rgb(40, 42, 54) mod=BOLD
 1 34-34: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)

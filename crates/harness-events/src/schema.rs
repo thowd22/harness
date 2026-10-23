@@ -8,6 +8,7 @@
 //! The JSON shape is part of the on-disk format. Changing it requires bumping
 //! [`SCHEMA_VERSION`] and adding an explicit step to [`migrate_event`].
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -394,6 +395,17 @@ pub enum EventKind {
         /// Host the run executes on (`None` = local).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         host: Option<String>,
+        /// Short human-readable title (a workflow run's inputs). When
+        /// absent, views title the run after its first prompt
+        /// (see [`crate::names`]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        /// Display names of the agents this run may use, by agent name
+        /// (each agent YAML's `display_name`), so every view names them the
+        /// same way. Agents missing here use
+        /// [`crate::names::default_display_name`].
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        agent_names: BTreeMap<String, String>,
     },
     /// The run ended.
     RunFinished {
@@ -720,6 +732,8 @@ mod tests {
                 name: "r".into(),
                 workflow: Some("w".into()),
                 host: None,
+                title: Some("fix the parser".into()),
+                agent_names: BTreeMap::from([("coder".into(), "Coder".into())]),
             },
             EventKind::RunFinished {
                 status: RunStatus::Succeeded,

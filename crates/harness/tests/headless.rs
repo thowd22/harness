@@ -394,3 +394,170 @@ fn memory_writes_are_recorded_with_their_commit() {
     let result = evs.iter().find(|e| e["type"] == "tool_result").unwrap();
     assert_eq!(result["ok"], true, "{result}");
 }
+
+/// The `harness sessions` line of the session named `name`.
+fn session_line(env: &Env, name: &str) -> String {
+    let list = stdout(&env.cmd(&["sessions"]).output().unwrap());
+    list.lines()
+        .find(|l| l.starts_with(name))
+        .unwrap_or_else(|| panic!("{name} not listed:\n{list}"))
+        .to_owned()
+}
+
+#[test]
+fn sessions_help_prints_usage_instead_of_listing() {
+    let env = Env::new("");
+    let s = env.script("a.yaml", "responses:\n  - content: [ { text: done } ]\n");
+    let o = env.run(&s, &["write", "the", "docs"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    for flag in ["--help", "-h"] {
+        let o = env.cmd(&["sessions", flag]).output().unwrap();
+        assert_eq!(o.status.code(), Some(0), "{flag}: {}", stderr(&o));
+        let out = stdout(&o);
+        assert!(out.starts_with("usage: harness sessions"), "{flag}:\n{out}");
+        assert!(
+            !out.contains("Write docs"),
+            "{flag} listed sessions:\n{out}"
+        );
+    }
+    let o = env.cmd(&["sessions", "--bogus"]).output().unwrap();
+    assert_eq!(o.status.code(), Some(2), "{}", stdout(&o));
+    assert!(
+        stderr(&o).contains("usage: harness sessions"),
+        "{}",
+        stderr(&o)
+    );
+}
+
+#[test]
+fn sessions_are_named_listed_by_activity_and_resumed_by_name_or_tag() {
+    let env = Env::new("");
+    let s = env.script("a.yaml", "responses:\n  - content: [ { text: done } ]\n");
+    let o = env.run(&s, &["please", "fix", "the", "header", "parser"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let o = env.run(&s, &["write", "the", "docs"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+
+    let list = stdout(&env.cmd(&["sessions"]).output().unwrap());
+    let lines: Vec<&str> = list.lines().collect();
+    assert_eq!(lines.len(), 2, "{list}");
+    assert!(lines[0].starts_with("Write docs"), "newest first:\n{list}");
+    assert!(lines[1].starts_with("Fix header parser"), "{list}");
+    let parser = session_line(&env, "Fix header parser");
+    for part in ["today", "fake/", "2 msgs", "please fix the header parser"] {
+        assert!(parser.contains(part), "{part:?} missing: {parser}");
+    }
+
+    // By name (any case): the conversation continues.
+    let o = env.run(
+        &s,
+        &["--json", "--resume", "FIX HEADER PARSER", "add", "tests"],
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let request = events(&o)
+        .into_iter()
+        .find(|e| e["type"] == "model_call_started")
+        .unwrap();
+    let messages = request["request"]["json"]["messages"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(messages.len(), 3, "{messages:?}");
+    assert!(
+        messages[0]
+            .to_string()
+            .contains("please fix the header parser")
+    );
+    let list = stdout(&env.cmd(&["sessions"]).output().unwrap());
+    assert!(
+        list.lines()
+            .next()
+            .unwrap()
+            .starts_with("Fix header parser"),
+        "the resumed session is now the most recent:\n{list}"
+    );
+    let parser = session_line(&env, "Fix header parser");
+    assert!(parser.contains("4 msgs"), "{parser}");
+    assert!(parser.contains("→ add tests"), "{parser}");
+
+    // By tag, as listed.
+    let tag = parser
+        .split_whitespace()
+        .find(|w| w.starts_with('#'))
+        .unwrap()
+        .to_owned();
+    let o = env.run(&s, &["--resume", &tag, "once", "more"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert!(session_line(&env, "Fix header parser").contains("6 msgs"));
+
+    // Unknown names fail with a clear message and start nothing.
+    let o = env.run(&s, &["--resume", "no such session", "hi"]);
+    assert_ne!(o.status.code(), Some(0));
+    assert!(stderr(&o).contains("no session matches"), "{}", stderr(&o));
+    assert_eq!(
+        stdout(&env.cmd(&["sessions"]).output().unwrap())
+            .lines()
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn the_optional_summary_model_names_and_describes_sessions() {
+    let env = Env::new("");
+    std::fs::write(
+        env.root.join("harness.ini"),
+        format!(
+            "[general]\ndata_dir = {}\nsession_summary_model = haiku\n\n[provider.anthropic]\napi_key = {SECRET}\n",
+            env.root.join("data").display()
+        ),
+    )
+    .unwrap();
+    let s = env.script(
+        "a.yaml",
+        "responses:\n  - content: [ { text: done } ]\n  - content: [ { text: \"name: Colon parsing\\ndescription: Fixed colons in the header parser\" } ]\n",
+    );
+    let o = env.run(&s, &["fix", "it"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let line = session_line(&env, "Colon parsing");
+    assert!(line.contains("Fixed colons in the header parser"), "{line}");
+
+    // The summary call is its own child node, so resuming rebuilds only
+    // the conversation (prompt and reply, then the new prompt).
+    let s = env.script(
+        "b.yaml",
+        "responses:\n  - content: [ { text: again } ]\n  - content: [ { text: \"name: Colon parsing\\ndescription: More colons\" } ]\n",
+    );
+    let o = env.run(&s, &["--json", "--resume", "last", "more"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let evs = events(&o);
+    let request = evs
+        .iter()
+        .find(|e| e["type"] == "model_call_started")
+        .unwrap();
+    let messages = request["request"]["json"]["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 3, "{messages:?}");
+    assert!(
+        evs.iter()
+            .any(|e| e["type"] == "node_started" && e["name"] == "session-summary"),
+        "the summary call is recorded as an event"
+    );
+}
+
+#[test]
+fn verifier_feedback_is_not_a_request_in_session_lists() {
+    // A failed check sends fix feedback to the model as a user message
+    // (inside a provenance marker); the session list must not show it as
+    // the latest request or count it as a message.
+    let env = Env::new("[verify]\ncommand = exit 7\nmax_fix_attempts = 1\n");
+    let fixes = format!("{TEXT}{}", TEXT.trim_start_matches("responses:\n"));
+    let s = env.script("s.yaml", &fixes);
+    let o = env.run(&s, &["fix", "the", "header", "parser"]);
+    assert_eq!(o.status.code(), Some(3), "{}", stderr(&o));
+    let line = session_line(&env, "Fix header parser");
+    assert!(line.contains("3 msgs"), "prompt and two replies: {line}");
+    assert!(line.ends_with("fix the header parser"), "{line}");
+    for markup in ["tool_result", "Verification failed", "→"] {
+        assert!(!line.contains(markup), "{markup:?} in {line}");
+    }
+}

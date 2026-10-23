@@ -66,6 +66,8 @@ async fn round_trip_with_sequence_and_parents() {
             name: "demo".into(),
             workflow: None,
             host: None,
+            title: None,
+            agent_names: Default::default(),
         }),
         EventDraft::node("root", node_started("main")),
         EventDraft::node("child", node_started("researcher")).with_parent("root"),

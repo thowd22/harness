@@ -19,6 +19,8 @@ use crate::context::reasoning::is_user_prompt;
 
 /// Name (and agent) of the child node recorded for each compaction.
 pub const COMPACTION_NODE: &str = "compaction";
+/// How a rendered handoff message starts ([`Handoff::render`]).
+pub const HANDOFF_OPEN: &str = "<handoff>";
 
 /// Handoff section headings, in order.
 pub const HANDOFF_SECTIONS: [&str; 6] = [
@@ -140,7 +142,7 @@ impl Handoff {
                 .join("\n")
         };
         format!(
-            "<handoff>\nThe harness condensed the earlier part of this conversation into \
+            "{HANDOFF_OPEN}\nThe harness condensed the earlier part of this conversation into \
              this handoff. Continue the task from here.\n\n\
              ## Goal\n{}\n\n## Decisions\n{}\n\n## Current state\n{}\n\n\
              ## Files touched\n{files}\n\n## Next steps\n{}\n\n## Open questions\n{}\n</handoff>",

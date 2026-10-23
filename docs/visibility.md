@@ -112,8 +112,21 @@ show the run as it was at that point. The bar under the map has
 scrubber; keys are ←/→ (event), `[` `]` (previous/next node start or
 finish), Home/End.
 
-`harness runs show <id|prefix|last> [--json]` prints the same run as a text
-tree, or the reducer state as JSON. It works on finished and live runs.
+`harness runs show <id|prefix|last|#tag> [--json]` prints the same run as a
+text tree, or the reducer state as JSON. It works on finished and live runs.
+
+### Run and agent names
+
+Runs and agents are shown by name, never by raw id. A run is titled after
+its first prompt (or a workflow's inputs) and listed as
+`Coder · fix the header parser · 14:32 Oct 23 · ✔`, with how it went
+(`Succeeded in 2m14s · $0.12 · 3 files changed`) beside it. Agents show
+their `display_name:` from their YAML (`Coder`, `Researcher`, `Reviewer`
+for the built-ins; other agents default to their name with a capital first
+letter). The palette, `/runs`, the history, the map header and nodes, node
+detail, the goal bar, subagent cards and `harness runs show` all use the
+same names. When two runs would read the same, each gets a short `#tag`
+(the end of its id), which `harness runs show` also accepts.
 
 ## Goal bar (`harness_tui::goalbar`)
 
@@ -153,11 +166,12 @@ selected file) restores a file from its checkpoint.
 
 `harness_tui::demo::gallery::Gallery` renders every component from
 scripted data: chat (cards, working indicator, timestamps, subagent
-cards), map, node detail, goal bar, palette, approvals, diff and the
-request inspector. Click a tab or use ←/→; `q` quits.
+cards), map, node detail, goal bar, palette (with past runs), approvals,
+diff, the request inspector and the run history. Click a tab or use ←/→; `q` quits.
 `demo::gallery::FAKE_SCRIPT` is the fake-provider script that plays the
 same session through the real agent loop. Every page has a styled
-snapshot test.
+snapshot test, and an audit test fails if any page shows a raw UUID or
+hash.
 
 ## Performance budget
 

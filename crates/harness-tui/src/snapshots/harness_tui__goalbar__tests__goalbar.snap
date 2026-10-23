@@ -6,11 +6,11 @@ expression: styled_snapshot(buf)
                                                                                     │Fix header parsing bug (#142)     │
                                                                                     │Tasks ─────────────────────── 1/4 │
                                                                                     │✔ Reproduce with failing test     │
-                                                                                    │  implementer · sonnet            │
+                                                                                    │  Implementer · sonnet            │
                                                                                     │◐ Fix parse_header                │
-                                                                                    │  implementer · sonnet            │
+                                                                                    │  Implementer · sonnet            │
                                                                                     │◐ Survey other callers            │
-                                                                                    │  researcher · haiku · ⧉gpu-box   │
+                                                                                    │  Researcher · haiku · ⧉gpu-box   │
                                                                                     │○ Bug-fix proof                   │
                                                                                     │                                  │
                                                                                     │                                  │

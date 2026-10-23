@@ -42,7 +42,7 @@ fn ui_demo_plays_the_scripted_session() {
     // The goal bar from the todo tool, on chat and map.
     assert!(chat.contains("Tasks") && chat.contains("2/2"), "{chat}");
     let map = section("map");
-    assert!(map.contains("✔ researcher"), "subagent on the map: {map}");
+    assert!(map.contains("✔ Researcher"), "subagent on the map: {map}");
     assert!(map.contains("Find the header parser"), "{map}");
     assert!(section("palette").contains("Command palette"));
     assert!(section("approval").contains("answered: once"));

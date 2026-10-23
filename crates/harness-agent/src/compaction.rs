@@ -19,6 +19,7 @@ pub mod manager;
 
 pub use elide::{ELIDED_PREFIX, ElidedResult, Elider, ElisionReport};
 pub use handoff::{
-    COMPACTION_NODE, CompactionError, CompactionReport, Compactor, HANDOFF_SECTIONS, Handoff,
+    COMPACTION_NODE, CompactionError, CompactionReport, Compactor, HANDOFF_OPEN, HANDOFF_SECTIONS,
+    Handoff,
 };
 pub use manager::{ContextManager, ContextSettings};

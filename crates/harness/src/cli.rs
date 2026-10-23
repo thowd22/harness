@@ -57,7 +57,7 @@ pub struct RunArgs {
     pub budget_tokens: Option<u64>,
     /// Skip the `[verify]` command.
     pub no_verify: bool,
-    /// Session to resume (id, id prefix or `last`).
+    /// Session to resume (`last`, a name, an id, an id prefix or a tag).
     pub resume: Option<String>,
     /// Scripted fake provider (tests, demos).
     pub fake_script: Option<PathBuf>,
@@ -85,7 +85,8 @@ Options:
   --budget-usd X          stop when this run has cost X dollars
   --budget-tokens N       stop when this run has used N tokens
   --no-verify             do not run the [verify] command
-  --resume ID|last        continue a saved session
+  --resume SESSION        continue a saved session: last, a name, an id
+                          prefix or a #tag (see harness sessions)
   --cwd DIR               project directory (default: current directory)
   --fake-script FILE      use the scripted fake provider (testing)
 

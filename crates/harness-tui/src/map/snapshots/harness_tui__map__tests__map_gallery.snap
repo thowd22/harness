@@ -5,13 +5,13 @@ expression: styled_snapshot(h.term.backend().buffer())
  fix-bug  ◐ running  2m14s  $0.39  ↑24.8k ↓1.4k cache 96%  critical path 2m14s  ⏸ 1 waiting  ⧉ gpu-box
 ╭──────────────────────╮     ╭──────────────────────╮     ╭──────────────────────╮     ╭──────────────────────╮
 │✔ repro               │────►│✔ prove-fail          │────►│⏸ fix         ⧉gpu-box│────►│○ proof               │
-│implementer · sonnet  │     │verify                │     │implementer · sonnet  │     │bugfix-proof          │
+│Implementer · sonnet  │     │verify                │     │Implementer · sonnet  │     │Bugfix proof          │
 │41.0s $0.080          │     │6.0s verify ✗         │     │1m26s $0.31 ↻1        │     │                      │
 │↑12.4k ↓812 cache 96% │     │                      │     │↑12.4k ↓600 cache 97% │     │                      │
 │                      │     │                      │     │⏸ approval · Enter    │     │                      │
 ╰──────────────────────╯     ╰──────────────────────╯     ╰─┬────────────────────╯     ╰──────────────────────╯
-                                                            ├──►◐ researcher (haiku) 1
-                                                            └──►✔ researcher (haiku) 9
+                                                            ├──►◐ Researcher (haiku) 1
+                                                            └──►✔ Researcher (haiku) 9
 
 
 

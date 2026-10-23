@@ -4,6 +4,7 @@
 
 pub mod blobs;
 pub mod logging;
+pub mod names;
 pub mod redact;
 pub mod reducer;
 pub mod schema;

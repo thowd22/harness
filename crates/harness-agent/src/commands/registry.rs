@@ -270,9 +270,13 @@ impl CommandRegistry {
             });
         }
         for e in catalog.agents.all() {
-            let description = match &e.item.description {
-                Some(d) => format!("Switch to the {} agent: {d}", e.item.name),
-                None => format!("Switch to the {} agent", e.item.name),
+            // People see the display name and one-line summary; the
+            // command itself stays the agent's name.
+            let shown = e.item.display_name();
+            let description = if e.item.description.is_some() {
+                format!("Switch to {shown}: {}", e.item.summary())
+            } else {
+                format!("Switch to {shown}")
             };
             authored.push(CommandSpec {
                 name: e.item.name.clone(),

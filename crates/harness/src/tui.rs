@@ -399,7 +399,13 @@ impl Driver {
         if let Some(core) = self.core.take() {
             let _ = core.finish().await;
         }
-        if let Some(f) = self.forward.take() {
+        // The recorder is gone, so the forwarder drains the old run's last
+        // events to the UI and ends; abort only if it does not finish.
+        if let Some(mut f) = self.forward.take()
+            && tokio::time::timeout(std::time::Duration::from_secs(2), &mut f)
+                .await
+                .is_err()
+        {
             f.abort();
         }
     }
@@ -499,6 +505,7 @@ impl Driver {
             }
             UiRequest::Memory(req) => commands::memory_request(self, req).await,
             UiRequest::SetModel(name) => commands::model(self, Some(&name)).await,
+            UiRequest::Resume(id) => commands::resume(self, &id).await,
             UiRequest::Login(sub) => commands::login(self, &sub).await,
         }
         true

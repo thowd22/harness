@@ -136,6 +136,7 @@ pub const FIXED_KEYS: &[(&str, &str)] = &[
     ("shift+tab / arrows", "move focus"),
     ("enter", "activate focused element"),
     ("pgup / pgdn", "scroll focused pane"),
+    ("end", "jump to the latest message"),
     ("mouse", "click activates, wheel scrolls"),
 ];
 

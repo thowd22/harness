@@ -10,6 +10,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use harness_agent::commands::{Builtin, CommandKind, CommandRegistry, Invocation as Command};
 use harness_agent::cost::{CostGroup, CostReport, UsageLedger};
+use harness_agent::session::SessionStore;
 use harness_events::schema::NodeId;
 use harness_hygiene::ledger::{Ledger, summary_lines};
 use harness_hygiene::report::{CheckpointBefore, HygieneReport, ReportInput};
@@ -71,16 +72,23 @@ pub fn palette_entries(registry: &CommandRegistry, core: &Core) -> Vec<PaletteEn
             )
         })
         .collect();
-    let runs: Vec<(String, String)> =
-        harness_tui::history::load_runs(core.data.root(), time::OffsetDateTime::now_utc())
-            .into_iter()
-            .take(20)
-            .map(|r| (r.run_id.to_string(), r.what()))
-            .collect();
+    let now = time::OffsetDateTime::now_utc();
+    let mut runs = harness_tui::history::load_runs(core.data.root(), now);
+    runs.truncate(20);
     v.extend(harness_tui::palette::run_entries(
-        runs.iter().map(|(a, b)| (a.as_str(), b.as_str())),
+        &runs,
+        local_offset(),
+        now,
     ));
     v.extend(harness_tui::palette::remote_entries(&core.cfg));
+    if let Ok(list) = SessionStore::new(core.data.sessions()).list() {
+        v.extend(crate::sessions::palette_entries(
+            &list,
+            Some(core.session_id()),
+            local_offset(),
+            now,
+        ));
+    }
     v.push(PaletteEntry::new(
         harness_tui::model_picker::PALETTE_ID,
         "Switch model",
@@ -88,6 +96,22 @@ pub fn palette_entries(registry: &CommandRegistry, core: &Core) -> Vec<PaletteEn
         EntryKind::Builtin,
     ));
     v
+}
+
+/// One `/agents` panel line: the display name and one-line summary first,
+/// then the command that switches to it and where it was loaded from.
+fn agent_line(agent: &harness_config::agents::Agent, origin: &str) -> String {
+    format!(
+        "{:<16} {}  (/{} · {origin})",
+        agent.display_name(),
+        agent.summary(),
+        agent.name
+    )
+}
+
+/// The local UTC offset for run times (UTC when it cannot be detected).
+fn local_offset() -> time::UtcOffset {
+    crate::sessions::local_offset()
 }
 
 /// Slash completion from the registry.
@@ -140,12 +164,25 @@ pub(super) async fn invocation(d: &mut Driver, inv: Invocation) {
         let mut err = Vec::new();
         harness_tui::history::show::run_show(d.data.root(), id, false, &mut out, &mut err);
         let text = String::from_utf8_lossy(if out.is_empty() { &err } else { &out }).into_owned();
+        // The TUI names runs, never shows raw ids: drop the `id` line and
+        // title the panel with the run's short tag.
+        let lines = text
+            .lines()
+            .filter(|l| !l.starts_with("id "))
+            .map(harness_events::names::scrub_ids)
+            .collect();
         return d
             .panel(
-                &format!("Run {id}"),
-                text.lines().map(str::to_owned).collect(),
+                &format!("Run {}", harness_events::names::short_tag(id)),
+                lines,
             )
             .await;
+    }
+    if let Some(id) = inv
+        .id
+        .strip_prefix(harness_tui::palette::ids::SESSION_PREFIX)
+    {
+        return resume(d, id).await;
     }
     if let Some(host) = inv
         .id
@@ -196,8 +233,87 @@ pub(super) async fn slash(d: &mut Driver, line: &str) {
     }
 }
 
+/// Opens the `/resume` picker over every saved session.
+async fn open_session_picker(d: &mut Driver) {
+    let store = SessionStore::new(d.data.sessions());
+    match store.list() {
+        Ok(list) => {
+            let current = d.core.as_ref().map(|c| c.session_id().to_owned());
+            let rows = crate::sessions::picker_rows(
+                &list,
+                current.as_deref(),
+                local_offset(),
+                time::OffsetDateTime::now_utc(),
+            );
+            d.send(CoreEvent::SessionPicker(rows)).await;
+        }
+        Err(e) => {
+            d.notify(Level::Error, "cannot list sessions", Some(e.to_string()))
+                .await
+        }
+    }
+}
+
+/// Resumes the session `query` names (`last`, a name, an id prefix or a
+/// tag). An unknown or ambiguous query keeps the current session.
+pub(super) async fn resume(d: &mut Driver, query: &str) {
+    let store = SessionStore::new(d.data.sessions());
+    let meta = match store.find(query) {
+        Ok(m) => m,
+        Err(e) => {
+            return d
+                .notify(Level::Error, "cannot resume", Some(e.to_string()))
+                .await;
+        }
+    };
+    let opts = TuiOptions {
+        resume: Some(meta.id.clone()),
+        ..d.opts.clone()
+    };
+    restart(d, opts).await;
+    d.notify(Level::Info, "resumed", Some(meta.display_name()))
+        .await;
+}
+
+/// `/rename [name]`: renames the session, or shows its name.
+async fn rename(d: &mut Driver, name: Option<&str>) {
+    let name = name.map(str::trim).filter(|n| !n.is_empty());
+    let busy = d.busy();
+    let Some(core) = d.core.as_mut() else {
+        let why = if busy {
+            "the agent is working; rename the session when it finishes"
+        } else {
+            "no session is open"
+        };
+        return d
+            .notify(Level::Warning, "cannot rename", Some(why.into()))
+            .await;
+    };
+    match name {
+        None => {
+            let current = core.session().display_name();
+            d.notify(
+                Level::Info,
+                "session name",
+                Some(format!("{current} · /rename <name> changes it")),
+            )
+            .await
+        }
+        Some(n) => match core.rename(n).await {
+            Ok(saved) => {
+                let title = format!("Session renamed to {saved}");
+                d.notify(Level::Success, &title, None).await
+            }
+            Err(e) => d.notify(Level::Error, "cannot rename", Some(e)).await,
+        },
+    }
+}
+
 /// Builds the next session and clears the views.
 async fn restart(d: &mut Driver, opts: TuiOptions) {
+    // End the old session (its final events reach the UI) before the UI
+    // resets, so nothing from the old run lands in the new run's state.
+    d.finish_core().await;
     d.send(CoreEvent::Reset).await;
     if let Err(e) = d.start(opts).await {
         d.notify(Level::Error, "could not start the session", Some(e))
@@ -224,13 +340,11 @@ async fn builtin(d: &mut Driver, b: Builtin, cmd: &Command) {
             };
             restart(d, opts).await;
         }
-        Builtin::Resume => {
-            let opts = TuiOptions {
-                resume: Some(cmd.get("session").unwrap_or("last").to_owned()),
-                ..d.opts.clone()
-            };
-            restart(d, opts).await;
-        }
+        Builtin::Resume => match cmd.get("session").map(str::trim).filter(|s| !s.is_empty()) {
+            Some(query) => resume(d, query).await,
+            None => open_session_picker(d).await,
+        },
+        Builtin::Rename => rename(d, cmd.get("name")).await,
         Builtin::Mode => match cmd.get("mode") {
             Some(m) => match Mode::parse(m) {
                 Some(mode) => {
@@ -262,14 +376,7 @@ async fn builtin(d: &mut Driver, b: Builtin, cmd: &Command) {
                 .agents
                 .active()
                 .iter()
-                .map(|e| {
-                    format!(
-                        "{:<16} {}  ({})",
-                        e.item.name,
-                        e.item.description.clone().unwrap_or_default(),
-                        e.origin.display
-                    )
-                })
+                .map(|e| agent_line(&e.item, &e.origin.display))
                 .collect();
             d.panel("Agents", lines).await;
         }
@@ -296,11 +403,12 @@ async fn builtin(d: &mut Driver, b: Builtin, cmd: &Command) {
         }
         Builtin::Memory => memory(d, &h, cmd).await,
         Builtin::Runs => {
-            let lines =
-                harness_tui::history::load_runs(d.data.root(), time::OffsetDateTime::now_utc())
-                    .iter()
-                    .map(|r| format!("{}  {}", r.run_id, r.what()))
-                    .collect();
+            let now = time::OffsetDateTime::now_utc();
+            let runs = harness_tui::history::load_runs(d.data.root(), now);
+            let lines = harness_tui::palette::run_entries(&runs, local_offset(), now)
+                .into_iter()
+                .map(|e| format!("{}  {}", e.title, e.description))
+                .collect();
             d.panel("Runs", lines).await;
         }
         Builtin::Remote => {

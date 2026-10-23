@@ -3,6 +3,7 @@
 //!
 //! ```yaml
 //! name: implementer
+//! display_name: Implementer     # shown in the TUI and CLI; default from the name
 //! description: Writes code for a scoped task
 //! model: sonnet                 # alias or provider/model
 //! effort: medium                # low | medium | high
@@ -209,6 +210,8 @@ impl OneOrMany {
 struct AgentDoc {
     name: String,
     #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
     description: Option<String>,
     #[serde(default)]
     model: Option<String>,
@@ -247,6 +250,9 @@ struct AgentDoc {
 pub struct Agent {
     /// Name.
     pub name: String,
+    /// Human-readable name shown in the palette, map, history and CLI
+    /// (`display_name:`); [`Agent::display_name`] falls back to the name.
+    pub display_name: Option<String>,
     /// Description (shown to parents choosing a subagent).
     pub description: Option<String>,
     /// Model alias or `provider/model`; `None` uses `[general] default_model`.
@@ -280,7 +286,38 @@ pub struct Agent {
     pub output_schema: Option<serde_json::Value>,
 }
 
+/// Display names by agent name ([`Agent::display_name`]), as recorded in
+/// `run_started.agent_names` so every view names agents the same way.
+pub fn display_names<'a>(agents: impl IntoIterator<Item = &'a Agent>) -> BTreeMap<String, String> {
+    agents
+        .into_iter()
+        .map(|a| (a.name.clone(), a.display_name()))
+        .collect()
+}
+
 impl Agent {
+    /// The name people see: `display_name:` when set, else the name with
+    /// `-`/`_` as spaces and a capital first letter
+    /// ([`harness_events::names::default_display_name`]).
+    pub fn display_name(&self) -> String {
+        self.display_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| harness_events::names::default_display_name(&self.name))
+    }
+
+    /// A one-line description: the first line of `description:`, else
+    /// `Run the <display name> agent`.
+    pub fn summary(&self) -> String {
+        self.description
+            .as_deref()
+            .and_then(|d| d.lines().map(str::trim).find(|l| !l.is_empty()))
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("Run the {} agent", self.display_name()))
+    }
+
     /// The tool names that appear in this agent's model requests, in a
     /// stable order: `tools:` as declared, then [`SPAWN_AGENT_TOOL`] if
     /// `subagents:` is non-empty, then [`MEMORY_TOOL`] if memory is not
@@ -332,7 +369,8 @@ impl Agent {
             "oneOf": [ { "required": ["prompt"] }, { "required": ["prompt_text"] } ],
             "properties": {
                 "name": { "type": "string", "minLength": 1 },
-                "description": { "type": "string" },
+                "display_name": { "type": "string", "minLength": 1, "description": "Human-readable name shown in the TUI and CLI. Defaults to the name with a capital first letter." },
+                "description": { "type": "string", "description": "One line shown in the palette and to parents choosing a subagent." },
                 "model": { "type": "string", "description": "Alias from [models] or provider/model. Defaults to [general] default_model." },
                 "effort": { "enum": ["low", "medium", "high"] },
                 "prompt": { "type": "string", "description": "Prompt name from prompts/." },
@@ -540,8 +578,18 @@ impl Artifact for Agent {
                 "`output_schema` must be a JSON Schema object".into(),
             ));
         }
+        if d.display_name
+            .as_deref()
+            .is_some_and(|n| n.trim().is_empty())
+        {
+            return Err(err(
+                &["display_name"],
+                "`display_name` must not be empty; remove it to use the default".into(),
+            ));
+        }
         Ok(Agent {
             name: d.name,
+            display_name: d.display_name,
             description: d.description,
             model: d.model,
             effort: d.effort,

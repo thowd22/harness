@@ -10,7 +10,8 @@ command palette both read from it.
 |---|---|---|
 | `/help` | `[command]` | Show commands and keys, or the details of one command |
 | `/new` | | Start a new session in this project |
-| `/resume` | `[session]` (id, prefix or `last`) | Resume a saved session |
+| `/resume` | `[session...]` (a name, `last`, an id prefix or a `#tag`) | Resume a saved session; with no argument, pick one in a searchable dialog ([sessions](sessions.md)) |
+| `/rename` | `[name...]` | Rename this session (without a name: show it) |
 | `/model` | `[model]` (alias or provider/model) | Switch the model directly, or open the model picker without an argument |
 | `/mode` | `[ask\|auto-edit\|auto]` | Show or switch the approval mode |
 | `/agents` | | List agents and switch to one |

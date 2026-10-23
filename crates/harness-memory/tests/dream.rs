@@ -92,6 +92,8 @@ async fn record_run(data: &Path, user: &str, reply: &str) -> String {
         name: "coder".into(),
         workflow: None,
         host: None,
+        title: None,
+        agent_names: Default::default(),
     }))
     .unwrap();
     rec.emit(EventDraft::node(

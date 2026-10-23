@@ -74,7 +74,7 @@ fn card_shows_status_agent_model_host_last_action_duration_and_cost_live() {
     ui.feed(&b, 0);
     let text = ui.draw();
     assert!(
-        text.contains("◐ survey (researcher) · haiku · ⧉ gpu-box"),
+        text.contains("◐ survey (Researcher) · haiku · ⧉ gpu-box"),
         "{text}"
     );
     let n = b.events().len();
@@ -107,7 +107,7 @@ fn finished_card_shows_the_final_summary() {
     b.finish("r1", NodeStatus::Succeeded, None);
     ui.feed(&b, 0);
     let text = ui.draw();
-    assert!(text.contains("✔ survey (researcher)"), "{text}");
+    assert!(text.contains("✔ survey (Researcher)"), "{text}");
     assert!(text.contains("│ Callers:"), "{text}");
     assert!(text.contains("│ - net::write"), "{text}");
     assert!(text.contains("9.0s"), "{text}");

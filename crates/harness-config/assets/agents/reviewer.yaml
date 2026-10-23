@@ -1,4 +1,5 @@
 name: reviewer
+display_name: Reviewer
 description: Independent reviewer agent (built in)
 prompt: reviewer
 effort: high

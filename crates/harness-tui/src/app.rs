@@ -76,6 +76,7 @@ use crate::model_picker::{ModelPicker, PickerAction, PickerOutcome};
 use crate::notify::Level;
 use crate::palette::{EntryKind, Invocation, PaletteEntry};
 use crate::panel::{Panel, PanelButton, PanelOutput};
+use crate::session_picker::{SessionAction, SessionOutcome, SessionPicker, SessionRow};
 use crate::status::StatusLine;
 use crate::theme::{ColorDepth, Theme, ThemeError, Token};
 
@@ -286,6 +287,9 @@ pub enum CoreEvent {
         /// The session's model (`provider/model`), marked in the list.
         current: Option<String>,
     },
+    /// Open the `/resume` picker over these saved sessions (newest
+    /// activity first).
+    SessionPicker(Vec<SessionRow>),
     /// A newer model catalog (a background refresh started or finished);
     /// replaces the rows of the open picker.
     ModelCatalog(Arc<Catalog>),
@@ -374,6 +378,8 @@ pub enum UiRequest {
     Memory(MemoryRequest),
     /// Switch the session to this model (chosen in the `/model` picker).
     SetModel(String),
+    /// Resume this session id (chosen in the `/resume` picker).
+    Resume(String),
     /// Verify and save a credential entered in the `/login` modal; answer
     /// with [`CoreEvent::LoginResult`].
     Login(LoginSubmission),
@@ -555,6 +561,12 @@ struct ModelScreen {
     interaction: Interaction<PickerAction>,
 }
 
+/// The `/resume` picker and its hit map.
+struct SessionScreen {
+    picker: SessionPicker,
+    interaction: Interaction<SessionAction>,
+}
+
 /// The memory browser and its focus model.
 struct MemoryScreen {
     browser: MemoryBrowser,
@@ -594,6 +606,7 @@ pub struct App {
     map: MapView,
     screen: Option<Screen>,
     models: Option<Box<ModelScreen>>,
+    sessions: Option<Box<SessionScreen>>,
     login: Option<Box<LoginScreen>>,
     goals: Goals,
     goalbar: GoalBar,
@@ -654,6 +667,7 @@ impl App {
             map,
             screen: None,
             models: None,
+            sessions: None,
             login: None,
             goals: Goals::new(),
             goalbar,
@@ -870,6 +884,11 @@ impl App {
         self.models.as_ref().map(|m| &m.picker)
     }
 
+    /// The open `/resume` picker.
+    pub fn session_picker(&self) -> Option<&SessionPicker> {
+        self.sessions.as_ref().map(|m| &m.picker)
+    }
+
     /// Whether the help overlay is open.
     pub fn help_open(&self) -> bool {
         self.help_open
@@ -956,6 +975,10 @@ impl App {
             return self.login_outcome(out);
         }
         if let Some(m) = &mut self.models {
+            m.picker.paste(&text);
+            return;
+        }
+        if let Some(m) = &mut self.sessions {
             m.picker.paste(&text);
             return;
         }
@@ -1103,6 +1126,12 @@ impl App {
             CoreEvent::ModelPicker { catalog, current } => {
                 self.models = Some(Box::new(ModelScreen {
                     picker: ModelPicker::new(catalog, current),
+                    interaction: Interaction::new(),
+                }));
+            }
+            CoreEvent::SessionPicker(rows) => {
+                self.sessions = Some(Box::new(SessionScreen {
+                    picker: SessionPicker::new(rows),
                     interaction: Interaction::new(),
                 }));
             }
@@ -1442,6 +1471,32 @@ impl App {
         self.dirty = true;
     }
 
+    /// Input for the open `/resume` picker.
+    fn sessions_event(&mut self, ev: &Event) {
+        let Some(m) = &mut self.sessions else {
+            return;
+        };
+        let out = match ev {
+            Event::Key(k) => m.picker.handle_key(k),
+            Event::Mouse(mouse) => match m.interaction.handle_mouse(mouse) {
+                Some(Dispatch::Activate(a)) => m.picker.activate(a),
+                Some(Dispatch::Scroll { lines, .. }) => m.picker.scroll(lines),
+                Some(Dispatch::Back) => SessionOutcome::Close,
+                _ => SessionOutcome::Ignored,
+            },
+            _ => SessionOutcome::Ignored,
+        };
+        match out {
+            SessionOutcome::Close => self.sessions = None,
+            SessionOutcome::Resume(id) => {
+                self.sessions = None;
+                self.request(UiRequest::Resume(id));
+            }
+            SessionOutcome::Ignored | SessionOutcome::Changed => {}
+        }
+        self.dirty = true;
+    }
+
     fn screen_event(&mut self, ev: &Event) {
         if matches!(self.screen, Some(Screen::Memory(_))) {
             return self.memory_event(ev);
@@ -1567,9 +1622,15 @@ impl App {
         if self.models.is_some() {
             return self.models_event(&Event::Key(*k));
         }
+        if self.sessions.is_some() {
+            return self.sessions_event(&Event::Key(*k));
+        }
         // The palette (in the chat) works on top of every view and screen.
         let palette = action == Some(Action::Palette) || self.chat.palette().is_open();
         if palette {
+            if !self.chat.palette().is_open() {
+                self.refresh_live_run_entry();
+            }
             self.view_or_chat_key(k, true);
             return;
         }
@@ -1596,6 +1657,24 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Rebuilds the palette entry of the run in progress from the live
+    /// state, so it shows the same title and elapsed time as the map rather
+    /// than the snapshot the core listed when the session started.
+    fn refresh_live_run_entry(&mut self) {
+        if self.run.run_id.is_none() {
+            return;
+        }
+        let now = OffsetDateTime::now_utc();
+        let Some(live) = crate::history::RunSummary::from_state(&self.run, now) else {
+            return;
+        };
+        let offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
+        crate::palette::refresh_run_entry(&mut self.extra_entries, &live, offset, now);
+        let mut all = app_entries();
+        all.extend(self.extra_entries.iter().cloned());
+        self.chat.set_palette_entries(all);
     }
 
     /// Sends a key to the chat. With `overlay` the chat's palette is shown
@@ -1627,6 +1706,9 @@ impl App {
         }
         if self.models.is_some() && !self.help_open {
             return self.models_event(&Event::Mouse(*m));
+        }
+        if self.sessions.is_some() && !self.help_open {
+            return self.sessions_event(&Event::Mouse(*m));
         }
         let (x, y) = (m.column, m.row);
         let inside = |r: Rect| x >= r.x && x < r.right() && y >= r.y && y < r.bottom();
@@ -1743,6 +1825,12 @@ impl App {
             let mut picker_hits = m.interaction.begin_frame();
             m.picker
                 .render(frame, area, &theme, &mut picker_hits, &|a: PickerAction| a);
+            m.interaction.end_frame(picker_hits);
+        }
+        if let Some(m) = &mut self.sessions {
+            let mut picker_hits = m.interaction.begin_frame();
+            m.picker
+                .render(frame, area, &theme, &mut picker_hits, &|a: SessionAction| a);
             m.interaction.end_frame(picker_hits);
         }
         // The login modal goes over the picker.

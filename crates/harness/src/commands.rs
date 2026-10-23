@@ -152,7 +152,7 @@ pub fn render_models(catalog: &Catalog, all: bool, out: &mut dyn Write) {
 }
 
 /// Usage of `harness runs`.
-pub const RUNS_USAGE: &str = "usage: harness runs show <ID|PREFIX|last> [--json]";
+pub const RUNS_USAGE: &str = "usage: harness runs show <ID|PREFIX|last|#TAG> [--json]";
 
 /// The memory index (`MEMORY.md`) as a lint source, when memory is enabled
 /// and the drive exists. The drive is never created here.

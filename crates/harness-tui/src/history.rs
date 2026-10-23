@@ -15,6 +15,7 @@ pub mod show;
 use std::path::Path;
 
 use crossterm::event::{Event, KeyCode, KeyEventKind, MouseEventKind};
+use harness_events::names;
 use harness_events::reducer::RunState;
 use harness_events::schema::{NodeKind, RunEvent, RunId, RunStatus};
 use harness_events::store::{list_runs, read_run, run_dir};
@@ -23,9 +24,9 @@ use ratatui::layout::Rect;
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use time::OffsetDateTime;
+use time::{OffsetDateTime, UtcOffset};
 
-use crate::chat::text::{fmt_cost, fmt_ms, truncate};
+use crate::chat::text::{fmt_cost, fmt_ms, truncate, width};
 use crate::interaction::{Dispatch, ElementId, HitMap, Interaction};
 use crate::palette::{ArgSpec, EntryKind as PaletteKind, Invocation, PaletteEntry};
 use crate::theme::{Theme, Token};
@@ -65,6 +66,12 @@ pub fn palette_entries() -> Vec<PaletteEntry> {
     ]
 }
 
+/// Longest title, in characters, inside a [`RunSummary::label`].
+pub const LABEL_TITLE_MAX: usize = 24;
+
+/// Width of the history list's run column.
+const RUN_COL: usize = 44;
+
 /// One row of the run history.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunSummary {
@@ -76,6 +83,15 @@ pub struct RunSummary {
     pub workflow: Option<String>,
     /// Agent of the first top-level agent node.
     pub agent: Option<String>,
+    /// What ran, for people: the workflow name or the agent's display
+    /// name ([`RunState::who`]).
+    pub who: String,
+    /// Short title from the first prompt or the workflow inputs.
+    pub title: Option<String>,
+    /// Files changed across the run.
+    pub files_changed: u32,
+    /// Run error, if it failed.
+    pub error: Option<String>,
     /// Status.
     pub status: RunStatus,
     /// Start time.
@@ -113,6 +129,13 @@ impl RunSummary {
                 .unwrap_or_else(|| "run".into()),
             workflow: run.workflow.clone(),
             agent,
+            who: run.who(),
+            title: run.title.clone(),
+            files_changed: run.nodes.iter().map(|n| n.files_changed).sum(),
+            error: run
+                .error
+                .clone()
+                .or_else(|| run.nodes.iter().rev().find_map(|n| n.error.clone())),
             status: run.status,
             started_at: started,
             duration_ms: crate::map::metrics::run_elapsed_ms(run, now),
@@ -126,20 +149,88 @@ impl RunSummary {
         })
     }
 
-    /// What ran: the workflow, else the agent, else the run name.
+    /// What ran and what it was about: `Coder · fix the header parser`
+    /// (just the agent or workflow before a title is known).
     pub fn what(&self) -> String {
-        match (&self.workflow, &self.agent) {
-            (Some(w), _) => format!("workflow {w}"),
-            (None, Some(a)) => format!("agent {a}"),
-            _ => self.name.clone(),
+        match &self.title {
+            Some(t) => format!("{} · {t}", self.who),
+            None => self.who.clone(),
         }
     }
 
-    /// Whether the row matches a lower-case query (name, workflow, agent,
-    /// status, host or id prefix).
+    /// The one-line label used in lists such as the palette:
+    /// `Coder · fix the header parser · 14:32 Oct 23 · ✔`. Times are shown
+    /// in `offset`; the id is never part of it.
+    pub fn label(&self, offset: UtcOffset, now: OffsetDateTime) -> String {
+        format!("{}{}", self.label_head(), self.label_tail(offset, now))
+    }
+
+    /// The part of [`RunSummary::label`] that may be cut in narrow lists:
+    /// `Coder · fix the header parser` with the title shortened.
+    pub fn label_head(&self) -> String {
+        match &self.title {
+            Some(t) => format!("{} · {}", self.who, names::shorten(t, LABEL_TITLE_MAX)),
+            None => self.who.clone(),
+        }
+    }
+
+    /// The part of [`RunSummary::label`] that lists keep visible:
+    /// ` · 14:32 Oct 23 · ✔`.
+    pub fn label_tail(&self, offset: UtcOffset, now: OffsetDateTime) -> String {
+        let mut s = String::new();
+        if let Some(t) = self.started_at {
+            s.push_str(" · ");
+            s.push_str(&names::when_label(t, offset, now));
+        }
+        s.push_str(" · ");
+        s.push(names::status_glyph(self.status));
+        s
+    }
+
+    /// A one-line summary of how the run went: `Succeeded in 2m14s ·
+    /// $0.12 · 3 files changed`, `Failed after 40s: <error>`, ...
+    pub fn outcome(&self) -> String {
+        let took = self.duration_ms.map(fmt_ms);
+        let mut s = match (self.status, &took) {
+            (RunStatus::Running, Some(d)) => format!("Running for {d}"),
+            (RunStatus::Running, None) => "Running".to_owned(),
+            (RunStatus::Succeeded, Some(d)) => format!("Succeeded in {d}"),
+            (RunStatus::Succeeded, None) => "Succeeded".to_owned(),
+            (RunStatus::Failed, Some(d)) => format!("Failed after {d}"),
+            (RunStatus::Failed, None) => "Failed".to_owned(),
+            (RunStatus::Cancelled, Some(d)) => format!("Cancelled after {d}"),
+            (RunStatus::Cancelled, None) => "Cancelled".to_owned(),
+        };
+        if self.status == RunStatus::Failed
+            && let Some(e) = self.error.as_deref().and_then(|e| e.lines().next())
+        {
+            s.push_str(": ");
+            s.push_str(&truncate(&names::scrub_ids(e.trim()), 60));
+        }
+        if self.cost_usd > 0.0 {
+            s.push_str(&format!(" · {}", fmt_cost(Some(self.cost_usd))));
+        }
+        match self.files_changed {
+            0 => {}
+            1 => s.push_str(" · 1 file changed"),
+            n => s.push_str(&format!(" · {n} files changed")),
+        }
+        if let Some(h) = &self.host {
+            s.push_str(&format!(" · on {h}"));
+        }
+        s
+    }
+
+    /// Whether the row matches a lower-case query (title, name, workflow,
+    /// agent, status, host, id prefix or tag).
     pub fn matches(&self, q: &str) -> bool {
         let status = format!("{:?}", self.status).to_lowercase();
+        if names::matches_tag(&self.run_id.to_string(), q) {
+            return true;
+        }
         [
+            self.title.as_ref().map(|s| s.to_lowercase()),
+            Some(self.who.to_lowercase()),
             Some(self.name.to_lowercase()),
             self.workflow.as_ref().map(|s| s.to_lowercase()),
             self.agent.as_ref().map(|s| s.to_lowercase()),
@@ -207,6 +298,7 @@ pub struct HistoryView {
     filter: String,
     theme: Theme,
     scroll: usize,
+    offset: UtcOffset,
     interaction: Interaction<RunId>,
 }
 
@@ -218,8 +310,15 @@ impl HistoryView {
             filter: String::new(),
             theme,
             scroll: 0,
+            offset: UtcOffset::UTC,
             interaction: Interaction::new(),
         }
+    }
+
+    /// Shows start times in `offset` (the local offset; UTC by default).
+    pub fn with_offset(mut self, offset: UtcOffset) -> HistoryView {
+        self.offset = offset;
+        self
     }
 
     /// Replaces the list.
@@ -326,7 +425,7 @@ impl HistoryView {
         )));
         lines.push(Line::from(Span::styled(
             format!(
-                "   {:<28} {:<16} {:>8} {:>8}  {}",
+                "   {:<RUN_COL$} {:<17} {:>8} {:>8}  {}",
                 "run", "started", "duration", "cost", "host"
             ),
             muted,
@@ -344,6 +443,28 @@ impl HistoryView {
             }
         }
         self.scroll = self.scroll.min(visible.len().saturating_sub(body_h));
+        // Rows with the same label and start minute get a short tag.
+        let keys: Vec<(String, Option<String>)> = visible
+            .iter()
+            .map(|r| {
+                let when = r.started_at.map(|s| names::when_label(s, self.offset, now));
+                (r.what(), when)
+            })
+            .collect();
+        // The tag goes after the cut so colliding rows stay distinct.
+        let labels: Vec<String> = names::collisions(&keys)
+            .into_iter()
+            .zip(&visible)
+            .map(|(dup, r)| {
+                if dup {
+                    let tag = names::short_tag(&r.run_id.to_string());
+                    let room = RUN_COL.saturating_sub(width(&tag) + 1);
+                    format!("{} {tag}", truncate(&r.what(), room))
+                } else {
+                    r.what()
+                }
+            })
+            .collect();
         for (row, r) in visible.iter().skip(self.scroll).take(body_h).enumerate() {
             let (icon, token) = match r.status {
                 RunStatus::Running => ('◐', Token::Running),
@@ -355,24 +476,18 @@ impl HistoryView {
             let focused = hits.is_focused(&ElementId::from(id.as_str()));
             let start = r
                 .started_at
-                .map(|s| {
-                    format!(
-                        "{:04}-{:02}-{:02} {:02}:{:02}",
-                        s.year(),
-                        u8::from(s.month()),
-                        s.day(),
-                        s.hour(),
-                        s.minute()
-                    )
-                })
+                .map(|s| names::when_label(s, self.offset, now))
                 .unwrap_or_else(|| "?".into());
             let mut line = Line::from(vec![
                 Span::styled(format!(" {icon} "), t.fg(token)),
                 Span::styled(
-                    format!("{:<28}", truncate(&r.what(), 28)),
+                    format!(
+                        "{:<RUN_COL$}",
+                        truncate(&labels[row + self.scroll], RUN_COL)
+                    ),
                     t.fg(Token::Agent),
                 ),
-                Span::styled(format!(" {start:<16}"), muted),
+                Span::styled(format!(" {start:<17}"), muted),
                 Span::styled(
                     format!(" {:>8}", r.duration_ms.map(fmt_ms).unwrap_or_default()),
                     t.fg(Token::Number),
@@ -402,7 +517,6 @@ impl HistoryView {
         if visible.is_empty() {
             lines.push(Line::from(Span::styled("   no runs", muted)));
         }
-        let _ = now;
         frame.render_widget(Paragraph::new(lines), area);
         self.interaction.end_frame(hits);
     }
@@ -456,6 +570,7 @@ mod tests {
         let mut b = EventBuilder::new();
         b.run_started("chat", None);
         b.start(NodeSpec::step("main").agent("coder"));
+        b.user_message("main", "Fix the header parser\nIt drops values");
         b.cost("main", 0.05);
         b.into_events()
     }
@@ -474,14 +589,16 @@ mod tests {
         assert!((wf.cost_usd - 0.42).abs() < 1e-9);
         let chat = runs.iter().find(|r| r.workflow.is_none()).unwrap();
         assert_eq!(chat.status, RunStatus::Running);
-        assert_eq!(chat.what(), "agent coder");
+        assert_eq!(chat.what(), "Coder · Fix the header parser");
+        assert_eq!(wf.what(), "fix-bug");
 
         let mut v = HistoryView::new(runs, Theme::default());
         let mut term = Terminal::new(TestBackend::new(100, 10)).unwrap();
         term.draw(|f| v.render(f, f.area(), now)).unwrap();
         let text = buffer_text(term.backend().buffer());
-        assert!(text.contains("✔ workflow fix-bug"), "{text}");
-        assert!(text.contains("◐ agent coder"), "{text}");
+        assert!(text.contains("✔ fix-bug"), "{text}");
+        assert!(text.contains("◐ Coder · Fix the header parser"), "{text}");
+        assert!(names::find_raw_id(&text).is_none(), "{text}");
         assert!(text.contains("$0.42"), "{text}");
         assert!(text.contains("⧉ gpu-box"), "{text}");
         assert!(text.contains("local"), "{text}");
@@ -502,7 +619,7 @@ mod tests {
         assert_eq!(v.visible().len(), 1);
         let mut term = Terminal::new(TestBackend::new(100, 10)).unwrap();
         term.draw(|f| v.render(f, f.area(), now)).unwrap();
-        let (x, y) = find_text(term.backend().buffer(), "workflow fix-bug").unwrap();
+        let (x, y) = find_text(term.backend().buffer(), "fix-bug").unwrap();
         assert_eq!(v.handle(&click(x, y)), Some(HistoryOutput::Open(wf)));
         v.run_palette(&Invocation {
             id: ids::CLEAR.into(),

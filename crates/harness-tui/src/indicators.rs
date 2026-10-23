@@ -224,6 +224,9 @@ pub struct Activity {
     cost_unknown: bool,
     tool_lines: usize,
     main: Option<NodeId>,
+    /// The main node finished, so the next root agent node (the next turn)
+    /// becomes the main node.
+    main_done: bool,
 }
 
 impl Activity {
@@ -241,6 +244,7 @@ impl Activity {
             cost_unknown: false,
             tool_lines: 0,
             main: None,
+            main_done: false,
         }
     }
 
@@ -280,7 +284,7 @@ impl Activity {
             .map_or(Duration::ZERO, |t| now.saturating_duration_since(t))
     }
 
-    /// The node treated as the main agent (the first root agent node).
+    /// The node treated as the main agent: the current turn's root agent node.
     pub fn main_node(&self) -> Option<&NodeId> {
         self.main.as_ref()
     }
@@ -355,15 +359,22 @@ impl Activity {
             kind: NodeKind::Agent,
             ..
         } = &ev.kind
-            && self.main.is_none()
+            && (self.main.is_none() || self.main_done)
             && ev.parent_node_id.is_none()
         {
+            // Each turn runs a new root agent node; follow it once the
+            // previous turn's node has finished.
             self.main = ev.node_id.clone();
+            self.main_done = false;
         }
-        match &ev.node_id {
+        let main = match &ev.node_id {
             None => true,
             Some(id) => self.main.as_ref().is_none_or(|m| m == id),
+        };
+        if main && ev.node_id.is_some() && matches!(ev.kind, EventKind::NodeFinished { .. }) {
+            self.main_done = true;
         }
+        main
     }
 
     /// Folds one run event. Only the main agent's events change the phase.
@@ -784,6 +795,71 @@ mod tests {
             t0,
         );
         assert!(!a.is_active());
+    }
+
+    #[test]
+    fn every_turn_start_and_finish_drives_the_activity_line() {
+        let t0 = Instant::now();
+        let mut a = Activity::new(t0);
+        let finished = |seq, node: &str, status| {
+            ev(
+                seq,
+                Some(node),
+                EventKind::NodeFinished {
+                    status,
+                    error: None,
+                },
+            )
+        };
+        let turns = [
+            ("One.", NodeStatus::Succeeded),
+            ("Two.", NodeStatus::Succeeded),
+            ("Three.", NodeStatus::Succeeded),
+            ("Four.", NodeStatus::Cancelled),
+            ("Five.", NodeStatus::Failed),
+        ];
+        let mut seq = 0;
+        for (i, (node, status)) in turns.into_iter().enumerate() {
+            seq += 10;
+            a.start_turn(t0);
+            assert!(a.is_active(), "{node} starts the activity line");
+            a.apply(
+                &ev(seq, Some(node), started(node, NodeKind::Agent, None)),
+                t0,
+            );
+            assert_eq!(a.main_node(), Some(&NodeId::from(node)));
+            a.apply(
+                &ev(
+                    seq + 1,
+                    Some(node),
+                    EventKind::Delta {
+                        call_id: "c".into(),
+                        channel: DeltaChannel::Text,
+                        text: "ok".into(),
+                    },
+                ),
+                t0,
+            );
+            assert_eq!(a.phase(), &Phase::Writing, "{node}");
+            let mut sub = ev(
+                seq + 2,
+                Some("sub"),
+                started("sub", NodeKind::Subagent, None),
+            );
+            sub.parent_node_id = Some(NodeId::from(node));
+            a.apply(&sub, t0);
+            let mut sub_done = finished(seq + 3, "sub", NodeStatus::Succeeded);
+            sub_done.parent_node_id = Some(NodeId::from(node));
+            a.apply(&sub_done, t0);
+            assert!(a.is_active(), "{node}: a subagent does not end the turn");
+            assert_eq!(a.main_node(), Some(&NodeId::from(node)));
+            a.apply(&finished(seq + 4, node, status), t0);
+            assert!(
+                !a.is_active(),
+                "{node} ({status:?}) clears the activity line"
+            );
+            assert_eq!(a.turn(), i as u32 + 1);
+        }
     }
 
     #[test]

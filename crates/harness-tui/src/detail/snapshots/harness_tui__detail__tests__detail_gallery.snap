@@ -2,7 +2,7 @@
 source: crates/harness-tui/src/detail/tests.rs
 expression: styled_snapshot(h.term.backend().buffer())
 ---
- ◐ fix · implementer · sonnet  1m00s  $0.031  in 24.7k (cached 23.9k) out 917 reasoning 120  fo…[⧉ copy entry]
+ ◐ fix · Implementer · sonnet  1m00s  $0.031  in 24.7k (cached 23.9k) out 917 reasoning 120  fo…[⧉ copy entry]
 ✔ Turn 1 4.2s                │▸ ✔ Turn 1  sonnet  in 12.4k (cached 11.9k) out 812 reasoning 120  $0.… 14:32:00
   ✔ edit src/parse.rs        │▾ ✗ Turn 2  sonnet  in 12.3k (cached 12k) out 100  $0.010  1.0s  1 too… 14:32:04
 ✗ Turn 2 1.0s                │  Running the tests.

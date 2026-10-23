@@ -170,6 +170,11 @@ keyboard:
   element, **Esc** backs out (closes the overlay or returns focus to the
   input).
 - **PgUp / PgDn** scroll the focused pane by a page.
+- **End** (or **Ctrl+End**) in the chat jumps back to the latest message
+  after scrolling up; see [tui-views.md](tui-views.md#scrolling).
+- **/resume** without an argument opens a clickable, fuzzy-searchable
+  picker of saved sessions by name and last activity, and **/rename NAME**
+  renames the open session; see [sessions.md](sessions.md).
 
 `[ui] mouse = false` starts without mouse capture so the terminal's native
 text selection works; the footer then shows `mouse off`. The palette's

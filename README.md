@@ -75,7 +75,7 @@ Change any of them in `[keys]` in `harness.ini`. The mouse works on everything v
 
 ### Slash commands
 
-Built-ins include `/help`, `/new`, `/resume`, `/model`, `/login`, `/mode`, `/agents`, `/workflows`, `/skills`, `/memory`, `/runs`, `/remote`, `/cost`, `/compact`, `/undo`, `/diff`, `/context`, `/config`, `/doctor` and `/quit`. Every workflow and skill adds its own command. See [docs/commands.md](docs/commands.md).
+Built-ins include `/help`, `/new`, `/resume`, `/rename`, `/model`, `/login`, `/mode`, `/agents`, `/workflows`, `/skills`, `/memory`, `/runs`, `/remote`, `/cost`, `/compact`, `/undo`, `/diff`, `/context`, `/config`, `/doctor` and `/quit`. Every workflow and skill adds its own command. See [docs/commands.md](docs/commands.md).
 
 ### Command line
 
@@ -92,7 +92,7 @@ Built-ins include `/help`, `/new`, `/resume`, `/model`, `/login`, `/mode`, `/age
 | `harness schema` | JSON Schema for prompt, agent and workflow YAML |
 | `harness doctor` | diagnose configuration and environment |
 | `harness ui-demo [--gallery\|--print]` | a scripted session without a model, or the component gallery |
-| `harness sessions` | saved sessions |
+| `harness sessions` | saved sessions by name and last activity |
 
 Every command is described in [docs/cli.md](docs/cli.md).
 

@@ -127,6 +127,55 @@ impl Harness {
 
 const TEXT: &str = "responses:\n  - content:\n      - text: \"All done.\"\n";
 
+/// Regression: `/new` reset the UI before the old session finished, so the
+/// old run's `run_finished` arrived after the reset and the UI adopted the
+/// old run's id; the new run's palette entry then stayed at "0ms".
+#[tokio::test]
+async fn new_session_events_never_mix_with_the_old_run() {
+    let env = Env::new();
+    let script = env.script(TEXT);
+    let mut h = Harness::start(&env, &script).await;
+    h.d.request(UiRequest::Submit("first".into())).await;
+    h.finish_turn().await;
+    let old = h.d.core.as_ref().unwrap().recorder.run_id();
+    h.seen.clear();
+
+    h.d.request(UiRequest::Submit("/new".into())).await;
+    let new = h.d.core.as_ref().unwrap().recorder.run_id();
+    assert_ne!(old, new);
+    h.until(|e| {
+        matches!(e, AppEvent::Run(ev)
+            if ev.run_id == new && matches!(ev.kind, EventKind::RunStarted { .. }))
+    })
+    .await;
+
+    let reset = h
+        .seen
+        .iter()
+        .position(|e| matches!(e, AppEvent::Core(CoreEvent::Reset)))
+        .expect("the UI is reset");
+    for (i, e) in h.seen.iter().enumerate() {
+        if let AppEvent::Run(ev) = e {
+            if i > reset {
+                assert_eq!(
+                    ev.run_id, new,
+                    "old-run event after the reset: {:?}",
+                    ev.kind
+                );
+            } else {
+                assert_eq!(
+                    ev.run_id, old,
+                    "new-run event before the reset: {:?}",
+                    ev.kind
+                );
+            }
+        }
+    }
+    // The old run's end reached the UI before the reset.
+    assert!(h.seen[..reset].iter().any(|e| matches!(e, AppEvent::Run(ev)
+        if ev.run_id == old && matches!(ev.kind, EventKind::RunFinished { .. }))));
+}
+
 #[tokio::test]
 async fn turns_stream_events_and_queue_while_busy() {
     let env = Env::new();
@@ -210,7 +259,12 @@ async fn builtin_commands_open_panels() {
     }))
     .await;
     let agents = h.panel("Agents").await;
-    assert!(agents.iter().any(|l| l.starts_with("coder")), "{agents:?}");
+    assert!(
+        agents
+            .iter()
+            .any(|l| l.starts_with("Coder") && l.contains("(/coder · ")),
+        "{agents:?}"
+    );
     h.d.request(UiRequest::Submit("/nope".into())).await;
     h.until(|e| {
         matches!(
@@ -266,6 +320,129 @@ async fn palette_lists_every_builtin_with_description_and_argument_help() {
         _ => unreachable!(),
     };
     assert!(slash.iter().any(|c| c.name == "fix" && c.scope.is_some()));
+}
+
+#[tokio::test]
+async fn agents_show_by_display_name_in_the_palette_and_the_agents_panel() {
+    let env = Env::new();
+    let agents = env.project.join(".harness/agents");
+    std::fs::create_dir_all(&agents).unwrap();
+    std::fs::write(
+        agents.join("deep-research.yaml"),
+        "name: deep-research\ndisplay_name: Deep Diver\ndescription: Reads widely\nprompt_text: read\n",
+    )
+    .unwrap();
+    // Trust the project as `harness trust` would, in the driver's data dir.
+    let mut cfg = harness_config::ini::load_str("", None).unwrap();
+    cfg.general.data_dir = env.root.join("data");
+    let data = harness_config::paths::DataDir::from_config(&cfg)
+        .open()
+        .unwrap();
+    let snap = harness_config::trust::snapshot_project(&env.project)
+        .unwrap()
+        .unwrap();
+    harness_config::trust::TrustStore::from_data_dir(&data)
+        .trust(&env.project, &snap)
+        .unwrap();
+    let script = env.script(TEXT);
+    let mut h = Harness::start(&env, &script).await;
+    let entries = match h
+        .until(|e| matches!(e, AppEvent::Core(CoreEvent::PaletteEntries(_))))
+        .await
+    {
+        AppEvent::Core(CoreEvent::PaletteEntries(v)) => v.clone(),
+        _ => unreachable!(),
+    };
+    let deep = entries
+        .iter()
+        .find(|e| e.id == "cmd.deep-research")
+        .unwrap_or_else(|| panic!("custom agent in the palette: {entries:?}"));
+    assert_eq!(deep.description, "Switch to Deep Diver: Reads widely");
+    let coder = entries.iter().find(|e| e.id == "cmd.coder").unwrap();
+    assert!(
+        coder.description.starts_with("Switch to Coder: "),
+        "{}",
+        coder.description
+    );
+    h.d.request(UiRequest::Submit("/agents".into())).await;
+    let lines = h.panel("Agents").await;
+    assert!(
+        lines.iter().any(|l| l.starts_with("Deep Diver ")
+            && l.contains("Reads widely")
+            && l.contains("(/deep-research · ")),
+        "{lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn past_runs_are_listed_by_title_never_by_id() {
+    let env = Env::new();
+    let script = env.script(TEXT);
+    let mut h = Harness::start(&env, &script).await;
+    h.until(|e| matches!(e, AppEvent::Core(CoreEvent::Session { .. })))
+        .await;
+    h.d.request(UiRequest::Submit(
+        "Fix the header parser\nIt drops values".into(),
+    ))
+    .await;
+    h.finish_turn().await;
+    h.d.request(UiRequest::Submit("/runs".into())).await;
+    let runs = h.panel("Runs").await;
+    assert!(
+        runs.iter()
+            .any(|l| l.starts_with("Coder · Fix the header parser · ") && l.contains(" · ◐")),
+        "{runs:?}"
+    );
+    for l in &runs {
+        assert!(harness_events::names::find_raw_id(l).is_none(), "{l}");
+    }
+    let core = h.d.core.as_ref().expect("core is back after the turn");
+    let entries = commands::palette_entries(&h.d.registry, core);
+    let run = entries
+        .iter()
+        .find(|e| e.kind == harness_tui::palette::EntryKind::Run)
+        .expect("a run entry");
+    assert!(
+        run.title.starts_with("Coder · Fix the header parser · "),
+        "{}",
+        run.title
+    );
+    assert!(
+        run.description.starts_with("Running"),
+        "{}",
+        run.description
+    );
+    assert!(harness_events::names::find_raw_id(&run.title).is_none());
+    assert!(harness_events::names::find_raw_id(&run.description).is_none());
+    // Opening it shows the run by name, without its raw id.
+    let (id, title) = (run.id.clone(), run.title.clone());
+    h.d.request(UiRequest::Run(Invocation {
+        id: id.clone(),
+        args: vec![],
+    }))
+    .await;
+    let (panel_title, lines) = match h
+        .until(|e| matches!(e, AppEvent::Core(CoreEvent::Panel { title, .. }) if title.starts_with("Run #")))
+        .await
+    {
+        AppEvent::Core(CoreEvent::Panel { title, lines, .. }) => (title.clone(), lines.clone()),
+        _ => unreachable!(),
+    };
+    assert_eq!(
+        panel_title,
+        format!(
+            "Run {}",
+            harness_events::names::short_tag(&id[harness_tui::palette::ids::RUN_PREFIX.len()..])
+        )
+    );
+    assert!(!title.contains('#'), "a lone run needs no tag: {title}");
+    assert!(
+        lines[0].starts_with("Coder · Fix the header parser"),
+        "{lines:?}"
+    );
+    for l in lines.iter().chain([&panel_title]) {
+        assert!(harness_events::names::find_raw_id(l).is_none(), "{l}");
+    }
 }
 
 #[tokio::test]
@@ -1078,4 +1255,232 @@ async fn usage_limit_offers_manage_usage_as_the_primary_button() {
     assert_eq!(req, UiRequest::PanelAction(commands::ERROR_ACTION.into()));
     h.d.request(req).await;
     assert_eq!(browser.0.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn sessions_are_named_renamed_listed_and_resumed_by_picker_and_name() {
+    let env = Env::new();
+    let script = env.script(TEXT);
+    let mut h = Harness::start(&env, &script).await;
+    h.d.request(UiRequest::Submit("Please fix the header parser".into()))
+        .await;
+    h.finish_turn().await;
+    let first = h.d.core.as_ref().unwrap().session().clone();
+    assert_eq!(first.name, "Fix header parser");
+    assert_eq!(first.description, "Please fix the header parser");
+    assert_eq!(first.messages, 2);
+    assert!(first.last_message_at.is_some());
+
+    // /rename shows the name without an argument and saves a new one.
+    h.d.request(UiRequest::Submit("/rename".into())).await;
+    h.until(|e| {
+        matches!(e, AppEvent::Core(CoreEvent::Notify { body: Some(b), .. }) if b.starts_with("Fix header parser"))
+    })
+    .await;
+    h.d.request(UiRequest::Submit("/rename Parser   work".into()))
+        .await;
+    assert_eq!(h.d.core.as_ref().unwrap().session().name, "Parser work");
+    // The chat confirms the new name.
+    h.until(|e| {
+        matches!(e, AppEvent::Core(CoreEvent::Notify { level: Level::Success, title, .. }) if title == "Session renamed to Parser work")
+    })
+    .await;
+    let store = harness_agent::session::SessionStore::new(h.d.data.sessions());
+    assert_eq!(store.load(&first.id).unwrap().name, "Parser work");
+
+    // A second session, then the picker lists both, newest first.
+    h.d.request(UiRequest::Submit("/new".into())).await;
+    h.d.request(UiRequest::Submit("write the docs".into()))
+        .await;
+    h.finish_turn().await;
+    let second = h.d.core.as_ref().unwrap().session().clone();
+    assert_ne!(second.id, first.id);
+    h.seen.clear();
+    h.d.request(UiRequest::Submit("/resume".into())).await;
+    let rows = match h
+        .until(|e| matches!(e, AppEvent::Core(CoreEvent::SessionPicker(_))))
+        .await
+    {
+        AppEvent::Core(CoreEvent::SessionPicker(rows)) => rows.clone(),
+        _ => unreachable!(),
+    };
+    let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names, ["Write docs", "Parser work"]);
+    assert!(rows[0].current && !rows[1].current);
+    assert!(rows[1].when.ends_with("today") || rows[1].when.starts_with("yesterday"));
+    assert_eq!(rows[1].messages, "2 msgs");
+    assert_eq!(rows[1].description, "Please fix the header parser");
+
+    // The palette offers the other session.
+    let entries = commands::palette_entries(&h.d.registry, h.d.core.as_ref().unwrap());
+    let sessions: Vec<&harness_tui::palette::PaletteEntry> = entries
+        .iter()
+        .filter(|e| e.kind == harness_tui::palette::EntryKind::Session)
+        .collect();
+    assert_eq!(sessions.len(), 1);
+    assert!(
+        sessions[0].title.starts_with("Resume Parser work · "),
+        "{}",
+        sessions[0].title
+    );
+
+    // Choosing it in the picker resumes it.
+    h.d.request(UiRequest::Resume(first.id.clone())).await;
+    assert_eq!(h.d.core.as_ref().unwrap().session_id(), first.id);
+    assert_eq!(h.d.core.as_ref().unwrap().conversation.messages.len(), 2);
+    // So does the palette entry, and `/resume <name>`.
+    h.d.request(UiRequest::Run(Invocation {
+        id: format!("{}{}", harness_tui::palette::ids::SESSION_PREFIX, second.id),
+        args: Vec::new(),
+    }))
+    .await;
+    assert_eq!(h.d.core.as_ref().unwrap().session_id(), second.id);
+    h.d.request(UiRequest::Submit("/resume parser work".into()))
+        .await;
+    assert_eq!(h.d.core.as_ref().unwrap().session_id(), first.id);
+    // An unknown name keeps the open session.
+    h.seen.clear();
+    h.d.request(UiRequest::Submit("/resume no such thing".into()))
+        .await;
+    h.until(|e| {
+        matches!(e, AppEvent::Core(CoreEvent::Notify { title, .. }) if title == "cannot resume")
+    })
+    .await;
+    assert_eq!(h.d.core.as_ref().unwrap().session_id(), first.id);
+}
+
+/// The `session-summary` events of the run log in `dir`.
+fn summary_events(dir: &Path) -> Vec<harness_events::schema::RunEvent> {
+    let replay = harness_events::store::read_run(dir).unwrap();
+    let nodes: Vec<_> = replay
+        .events
+        .iter()
+        .filter(|e| {
+            matches!(&e.kind, EventKind::NodeStarted { name, .. } if name == crate::sessions::SUMMARY_NODE)
+        })
+        .filter_map(|e| e.node_id.clone())
+        .collect();
+    replay
+        .events
+        .into_iter()
+        .filter(|e| e.node_id.as_ref().is_some_and(|n| nodes.contains(n)))
+        .collect()
+}
+
+#[tokio::test]
+async fn the_summary_runs_after_the_turn_and_is_recorded_with_its_usage() {
+    let env = Env::new();
+    let script = env.script(
+        "responses:\n  - content: [ { text: done } ]\n  - delay_ms: 200\n    content: [ { text: \"name: Colon parsing\\ndescription: Fixed colons in the header parser\" } ]\n    usage: { input_tokens: 40, output_tokens: 8 }\n",
+    );
+    let ini = "[general]\nsession_summary_model = cheap\n";
+    let mut h = Harness::with_ini(&env, &script, false, ini).await;
+    h.d.request(UiRequest::Submit("fix the header parser".into()))
+        .await;
+    h.finish_turn().await;
+    // The turn ends without waiting for the summary; the summary lands in
+    // the session file when its call finishes.
+    let id = h.d.core.as_ref().unwrap().session_id().to_owned();
+    let store = harness_agent::session::SessionStore::new(h.d.data.sessions());
+    h.until(|e| {
+        matches!(e, AppEvent::Run(ev) if matches!(&ev.kind, EventKind::NodeFinished { .. })
+            && ev.parent_node_id.is_some())
+    })
+    .await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let saved = loop {
+        let m = store.load(&id).unwrap();
+        if m.name == "Colon parsing" {
+            break m;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "summary not saved");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(saved.description, "Fixed colons in the header parser");
+    assert_eq!(saved.tokens, 48, "the summary call's tokens count");
+    let dir = h.d.core.as_ref().unwrap().recorder.dir().to_path_buf();
+    h.d.finish_core().await;
+    let events = summary_events(&dir);
+    assert!(
+        events.iter().all(|e| e.parent_node_id.is_some()),
+        "a child node, so resume never mistakes it for the conversation"
+    );
+    assert!(events.iter().any(|e| matches!(
+        &e.kind,
+        EventKind::ModelCallFinished { usage, .. } if usage.input == 40 && usage.output == 8
+    )));
+    assert!(events.iter().any(|e| matches!(
+        &e.kind,
+        EventKind::NodeFinished {
+            status: harness_events::schema::NodeStatus::Succeeded,
+            ..
+        }
+    )));
+    // The session on disk keeps the summary after the core closes.
+    assert_eq!(store.load(&id).unwrap().name, "Colon parsing");
+}
+
+#[tokio::test]
+async fn a_slow_summary_never_delays_turns_or_closing_and_cancelled_turns_skip_it() {
+    let env = Env::new();
+    let script = env.script(
+        "responses:\n  - content: [ { text: done } ]\n  - delay_ms: 60000\n    content: [ { text: \"name: Too late\\ndescription: never\" } ]\n",
+    );
+    let ini = "[general]\nsession_summary_model = cheap\n";
+    let mut h = Harness::with_ini(&env, &script, false, ini).await;
+    h.d.request(UiRequest::Submit("fix the header parser".into()))
+        .await;
+    let t = h.d.turn.take().unwrap();
+    let (core, outcome) = tokio::time::timeout(Duration::from_secs(20), t)
+        .await
+        .expect("the turn ends without waiting for the 60 s summary")
+        .unwrap();
+    h.d.turn_done(core, outcome).await;
+    h.until(|e| {
+        matches!(e, AppEvent::Run(ev) if matches!(&ev.kind, EventKind::ModelCallStarted { .. })
+            && ev.parent_node_id.is_some())
+    })
+    .await;
+    let id = h.d.core.as_ref().unwrap().session_id().to_owned();
+    let dir = h.d.core.as_ref().unwrap().recorder.dir().to_path_buf();
+    // Closing the session (/new, /resume, quit) cancels the summary.
+    tokio::time::timeout(Duration::from_secs(20), h.d.finish_core())
+        .await
+        .expect("closing does not wait for the summary");
+    let events = summary_events(&dir);
+    assert!(events.iter().any(|e| matches!(
+        &e.kind,
+        EventKind::NodeFinished {
+            status: harness_events::schema::NodeStatus::Cancelled,
+            ..
+        }
+    )));
+    let store = harness_agent::session::SessionStore::new(h.d.data.sessions());
+    assert_eq!(
+        store.load(&id).unwrap().description,
+        "fix the header parser"
+    );
+
+    // A cancelled turn makes no summary call.
+    let env = Env::new();
+    let script = env.script(
+        "responses:\n  - delay_ms: 30000\n    content: [ { text: late } ]\n  - content: [ { text: \"name: X\\ndescription: Y\" } ]\n",
+    );
+    let mut h = Harness::with_ini(&env, &script, false, ini).await;
+    h.d.request(UiRequest::Submit("go".into())).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    h.d.request(UiRequest::Interrupt).await;
+    let t = h.d.turn.take().unwrap();
+    let (core, outcome) = tokio::time::timeout(Duration::from_secs(10), t)
+        .await
+        .expect("cancelled promptly")
+        .unwrap();
+    assert_eq!(
+        outcome.stop,
+        harness_agent::agent_loop::StopReason::Cancelled
+    );
+    h.d.turn_done(core, outcome).await;
+    let dir = h.d.core.as_ref().unwrap().recorder.dir().to_path_buf();
+    h.d.finish_core().await;
+    assert!(summary_events(&dir).is_empty(), "no summary after a cancel");
 }

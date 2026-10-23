@@ -11,6 +11,71 @@ to built-in prompts, agents, workflows and `harness.ini` defaults.
 
 ## Unreleased
 
+### Changed
+
+- The chat transcript is bottom-anchored like a chat app: the newest
+  message sits just above the input and a short conversation hugs the
+  bottom of the pane. Scrolling up pauses following without moving the
+  lines you read; a clickable, focusable `↓ new messages · end` button
+  appears when output arrives, and End (or Ctrl+End) jumps back to the
+  latest message. Resizing keeps the bottom anchored and the reading
+  position stable.
+- Runs and agents have human-readable names everywhere. Past runs in the
+  palette read `Coder · fix the header parser · 14:32 Oct 23 · ✔` with the
+  outcome (`Succeeded in 2m14s · $0.12 · 3 files changed`) as the
+  description, instead of `Run agent coder` / `Open run <uuid>`. A run's
+  title comes from its first prompt or its workflow inputs. The map
+  header, node boxes, node detail, goal bar, subagent cards, `/runs`, the
+  run history and `harness runs show` use the same names, and no raw UUID
+  appears in the TUI: when two titles collide they get a short `#tag`,
+  which `harness runs show` accepts next to full ids and id prefixes.
+  Agent YAML gains an optional `display_name:` (default: the name with a
+  capital first letter), shown in the agents' palette entries
+  (`Switch to Coder: …`) and `/agents`; `run_started` records the run's
+  title and agent display names. Narrow palettes, the run history and the
+  map header cut the title rather than the tag, time, status or metrics.
+- Sessions have short names, descriptions and last-activity times. A
+  session is named from its first prompt (`Fix header parser`), or with
+  the new `/rename` command, and its one-line description follows the
+  conversation (first and latest request, files edited). `/resume` without
+  an argument opens a fuzzy-searchable, clickable picker showing name,
+  last message time (`14:32 today`, `yesterday 09:10`, `Oct 21 16:05`),
+  project, model, message count, cost and description, most recently
+  active first; the palette lists recent sessions the same way, and
+  `harness sessions` prints one such line per session. `--resume` and
+  `/resume` accept `last`, a name, an id prefix or a `#tag`. Names and
+  descriptions are derived locally; the new `[general]
+  session_summary_model` (off by default) lets a cheap model write them
+  in the background after a turn, recorded as a `session-summary` node
+  whose cost counts towards the session and budgets. Verifier feedback
+  and compaction handoffs are not shown or counted as requests.
+
+### Fixed
+
+- `/new` (and other session restarts) no longer mixes the old run into the new one: the old
+  session now finishes before the UI resets, so the palette, map and status show the new run
+  (the palette's live run entry no longer stays at "Running for 0ms").
+- Session names read better: a short first prompt stays whole (`hi there`
+  is `Hi there`, not `There`), and a long one is cut on a word without a
+  dangling preposition, article or conjunction (`Fix flaky login test`,
+  not `Fix flaky login test in`). `/rename` confirms with `Session renamed
+  to <name>`, and `harness sessions --help` (or `-h`) prints usage and
+  exits 0 instead of listing sessions; other arguments are a usage error.
+- The command palette's entry for the run in progress now shows its title as soon as the first prompt is known and how long it has been running, like the map and `/runs`, instead of an untitled "Running for 0ms" frozen at session start.
+- From the second turn on, the activity line above the input no longer
+  stays on "sending" (and later "no data for …") after the turn finishes.
+  It now follows each turn's main agent node, so every turn's finish,
+  including a cancelled or failed one, clears it, while subagent nodes
+  still do not end it.
+- A fresh interactive session shows its agent as ready instead of a
+  spinning "running" in the footer and map header. A run counts as working
+  only while a node runs, is queued or waits for approval, or while a
+  workflow run has not created its first node yet.
+- The palette and slash-completion frame-budget tests no longer fail on a
+  single slow frame from a busy CI runner: each runs its key sequence five
+  times on fresh state and checks the best run's slowest frame against the
+  same 16 ms budget, so a genuinely slow implementation still fails.
+
 ## [0.1.0] - 2026-10-23
 
 ### Added
@@ -191,3 +256,14 @@ fingerprint. CI fails until the entry exists; `cargo test -p harness-eval
   answering questions about them, so it stops guessing. New `[general]
   identity_prompt` setting, default `on`; `off` removes the layer.
   defaults-fingerprint: 95e10042f5f1
+- The built-in `coder`, `researcher` and `reviewer` agents set
+  `display_name:` (`Coder`, `Researcher`, `Reviewer`), shown wherever an
+  agent is named in the TUI and CLI. Prompts, tools and descriptions are
+  unchanged, so model requests are unchanged.
+  defaults-fingerprint: fb557d15ada9
+- New `[general] session_summary_model` setting, default `off`: session
+  names and descriptions are derived locally from the conversation, with
+  no extra model call. Set a cheap model alias (for example `haiku`) to
+  have it write them after each turn. Prompts, agents and model requests
+  are unchanged.
+  defaults-fingerprint: 00feb6d0d4e5

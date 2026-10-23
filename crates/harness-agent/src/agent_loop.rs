@@ -479,6 +479,11 @@ struct RunState {
 const FEEDBACK_OUTPUT_CHARS: usize = 4000;
 
 /// The user message sent after a failed verification.
+/// How the verifier's fix feedback to the model starts (before any
+/// provenance marker). Session descriptions skip such messages; they are
+/// not user requests.
+pub const VERIFY_FEEDBACK_PREFIX: &str = "Verification failed (fix attempt";
+
 fn verify_feedback(command: &str, res: &VerifyResult, attempt: u32, max: u32) -> String {
     let status = match res.exit_code {
         Some(code) => format!("exited with code {code}"),
@@ -489,7 +494,7 @@ fn verify_feedback(command: &str, res: &VerifyResult, attempt: u32, max: u32) ->
         .iter()
         .collect();
     format!(
-        "Verification failed (fix attempt {attempt} of {max}): `{command}` {status}.\n\n\
+        "{VERIFY_FEEDBACK_PREFIX} {attempt} of {max}): `{command}` {status}.\n\n\
          Output (last {FEEDBACK_OUTPUT_CHARS} characters at most):\n```\n{tail}\n```\n\n\
          Fix the cause of the failure, then end your turn. The harness runs the \
          check again when you are done."

@@ -40,6 +40,12 @@ Event types: `run_started`, `run_finished`, `node_started`, `node_running`,
 `approval_resolved`, `file_changed`, `verify_started`, `verify_finished`,
 `memory`, `cost` and `error`.
 
+A `run_started` event has `name`, and optionally `workflow`, `host`,
+`title` (a short title, set for workflow runs from their inputs; other runs
+are titled after their first `user_message`) and `agent_names` (agent name
+→ YAML `display_name`, so every view names agents the same way). Both are
+omitted when empty, so older runs still load.
+
 An `error` event has `message`, `recoverable` (whether the run continued)
 and, when the error has a way out, an optional `action`:
 `{"label": "Manage usage", "url": "https://chatgpt.com/settings/usage"}`

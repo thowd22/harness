@@ -2,11 +2,11 @@
 source: crates/harness-tui/src/demo/gallery.rs
 expression: "snap(Page::Palette)"
 ---
- ui-demo  chat   map   detail   goal bar   palette   approvals   diff   inspector
+ ui-demo  chat   map   detail   goal bar   palette   approvals   diff   inspector   history
 
 
             ╭ Command palette ─────────────────────────────────────────────────────────────────────────────╮
-            │›   12 of 12                                                                                  │
+            │›   17 of 17                                                                                  │
             │▸ Interrupt                             Stop the running agent                 builtin  ctrl+c│
             │  Jump to end                           Scroll the chat to the latest output           builtin│
             │  Notifications                         Show the notification history                  builtin│
@@ -14,16 +14,16 @@ expression: "snap(Page::Palette)"
             │  Show keys                             List key bindings                              builtin│
             │  Switch view                           Toggle between chat and agent map         builtin  tab│
             │  Toggle mouse                          Mouse capture on/off (off allows native text … builtin│
+            │  Researcher · Survey how the net… · 14:32 Oct 22 · ◐     Running for 5m00s · $0.12        run│
+            │  Coder · Fix the header parser · 14:02 Oct 22 · ✔        Succeeded in 2m14s · $0.12 · 1 … run│
+            │  Coder · Update the changelog #7a2b02 · 13:32 Oct 22 · ✔ Succeeded in 2m14s · $0.12 · 1 … run│
+            │  Coder · Update the changelog #7a2b03 · 13:32 Oct 22 · ✔ Succeeded in 2m14s · $0.12 · 1 … run│
+            │  fix-bug · Header parser drops… · 13:02 Oct 22 · ✗       Failed after 41.0s: step `repro… run│
             │  Mode: ask                             Ask before every edit and command              setting│
             │  Mode: auto                            Act without asking (rules and outward guard s… setting│
             │  Mode: auto-edit                       Edit files freely, ask before commands         setting│
             │  Thinking: cycle                       collapsed → expanded → hidden for this session setting│
             │  Timestamps: cycle                     time → relative → off for this session         setting│
-            │                                                                                              │
-            │                                                                                              │
-            │                                                                                              │
-            │                                                                                              │
-            │                                                                                              │
             │                                                                                              │
             │                                                                                              │
             ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -51,7 +51,9 @@ expression: "snap(Page::Palette)"
 0 64-69: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
 0 70-70: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 0 71-81: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
-0 82-119: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
+0 82-82: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
+0 83-91: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
+0 92-119: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 1 0-119: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 2 0-119: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 3 0-11: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
@@ -126,66 +128,81 @@ expression: "snap(Page::Palette)"
 12 0-11: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 12 12-12: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90) mod=BOLD
 12 13-14: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90)
-12 15-52: fg=Rgb(248, 248, 242) bg=Rgb(68, 71, 90)
-12 53-98: fg=Rgb(98, 114, 164) bg=Rgb(68, 71, 90)
-12 99-106: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90)
+12 15-70: fg=Rgb(248, 248, 242) bg=Rgb(68, 71, 90)
+12 71-102: fg=Rgb(98, 114, 164) bg=Rgb(68, 71, 90)
+12 103-106: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90)
 12 107-107: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90) mod=BOLD
 12 108-119: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 13 0-11: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 13 12-12: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90) mod=BOLD
 13 13-14: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90)
-13 15-52: fg=Rgb(248, 248, 242) bg=Rgb(68, 71, 90)
-13 53-98: fg=Rgb(98, 114, 164) bg=Rgb(68, 71, 90)
-13 99-106: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90)
+13 15-70: fg=Rgb(248, 248, 242) bg=Rgb(68, 71, 90)
+13 71-102: fg=Rgb(98, 114, 164) bg=Rgb(68, 71, 90)
+13 103-106: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90)
 13 107-107: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90) mod=BOLD
 13 108-119: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 14 0-11: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 14 12-12: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90) mod=BOLD
 14 13-14: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90)
-14 15-52: fg=Rgb(248, 248, 242) bg=Rgb(68, 71, 90)
-14 53-98: fg=Rgb(98, 114, 164) bg=Rgb(68, 71, 90)
-14 99-106: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90)
+14 15-70: fg=Rgb(248, 248, 242) bg=Rgb(68, 71, 90)
+14 71-102: fg=Rgb(98, 114, 164) bg=Rgb(68, 71, 90)
+14 103-106: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90)
 14 107-107: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90) mod=BOLD
 14 108-119: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 15 0-11: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 15 12-12: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90) mod=BOLD
 15 13-14: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90)
-15 15-52: fg=Rgb(248, 248, 242) bg=Rgb(68, 71, 90)
-15 53-98: fg=Rgb(98, 114, 164) bg=Rgb(68, 71, 90)
-15 99-106: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90)
+15 15-70: fg=Rgb(248, 248, 242) bg=Rgb(68, 71, 90)
+15 71-102: fg=Rgb(98, 114, 164) bg=Rgb(68, 71, 90)
+15 103-106: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90)
 15 107-107: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90) mod=BOLD
 15 108-119: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 16 0-11: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 16 12-12: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90) mod=BOLD
 16 13-14: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90)
-16 15-52: fg=Rgb(248, 248, 242) bg=Rgb(68, 71, 90)
-16 53-98: fg=Rgb(98, 114, 164) bg=Rgb(68, 71, 90)
-16 99-106: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90)
+16 15-70: fg=Rgb(248, 248, 242) bg=Rgb(68, 71, 90)
+16 71-102: fg=Rgb(98, 114, 164) bg=Rgb(68, 71, 90)
+16 103-106: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90)
 16 107-107: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90) mod=BOLD
 16 108-119: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 17 0-11: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 17 12-12: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90) mod=BOLD
-17 13-106: fg=Rgb(248, 248, 242) bg=Rgb(68, 71, 90)
+17 13-14: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90)
+17 15-52: fg=Rgb(248, 248, 242) bg=Rgb(68, 71, 90)
+17 53-98: fg=Rgb(98, 114, 164) bg=Rgb(68, 71, 90)
+17 99-106: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90)
 17 107-107: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90) mod=BOLD
 17 108-119: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 18 0-11: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 18 12-12: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90) mod=BOLD
-18 13-106: fg=Rgb(248, 248, 242) bg=Rgb(68, 71, 90)
+18 13-14: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90)
+18 15-52: fg=Rgb(248, 248, 242) bg=Rgb(68, 71, 90)
+18 53-98: fg=Rgb(98, 114, 164) bg=Rgb(68, 71, 90)
+18 99-106: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90)
 18 107-107: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90) mod=BOLD
 18 108-119: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 19 0-11: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 19 12-12: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90) mod=BOLD
-19 13-106: fg=Rgb(248, 248, 242) bg=Rgb(68, 71, 90)
+19 13-14: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90)
+19 15-52: fg=Rgb(248, 248, 242) bg=Rgb(68, 71, 90)
+19 53-98: fg=Rgb(98, 114, 164) bg=Rgb(68, 71, 90)
+19 99-106: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90)
 19 107-107: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90) mod=BOLD
 19 108-119: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 20 0-11: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 20 12-12: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90) mod=BOLD
-20 13-106: fg=Rgb(248, 248, 242) bg=Rgb(68, 71, 90)
+20 13-14: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90)
+20 15-52: fg=Rgb(248, 248, 242) bg=Rgb(68, 71, 90)
+20 53-98: fg=Rgb(98, 114, 164) bg=Rgb(68, 71, 90)
+20 99-106: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90)
 20 107-107: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90) mod=BOLD
 20 108-119: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 21 0-11: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 21 12-12: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90) mod=BOLD
-21 13-106: fg=Rgb(248, 248, 242) bg=Rgb(68, 71, 90)
+21 13-14: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90)
+21 15-52: fg=Rgb(248, 248, 242) bg=Rgb(68, 71, 90)
+21 53-98: fg=Rgb(98, 114, 164) bg=Rgb(68, 71, 90)
+21 99-106: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90)
 21 107-107: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90) mod=BOLD
 21 108-119: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 22 0-11: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)

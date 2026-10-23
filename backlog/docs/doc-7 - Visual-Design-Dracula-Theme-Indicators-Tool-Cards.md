@@ -3,7 +3,7 @@ id: doc-7
 title: 'Visual Design - Dracula Theme, Indicators, Tool Cards'
 type: specification
 created_date: '2026-10-22 14:43'
-updated_date: '2026-10-22 20:42'
+updated_date: '2026-10-23 04:34'
 ---
 # Visual Design: Dracula Theme, Working Indicators, Tool Cards
 
@@ -97,6 +97,10 @@ One card per call. Header: status icon, tool name (`accent`), concise argument s
 ╰──────────────────────────────────────────────────────────────────────────╯
 ```
 Live last action, cost and duration; click or Enter opens the agent in the map or node detail.
+
+## Chat transcript scrolling
+
+The transcript is bottom-anchored: the newest line sits just above the input, a transcript shorter than the pane is padded above so it hugs the input, and older output scrolls away upward. Scrolling up pins the top visible line (entry + line offset), so new output never moves what the user is reading; a `↓ new messages · end` button (`accent` on `surface`, focus style when focused) appears on the bottom transcript row once output arrives below. Clicking it, Enter on it, End (when the input would not use it) or Ctrl+End, scrolling to the end, or the palette's follow entry resume following. A width change keeps the pinned entry on top at the same relative offset; a pinned view that can show the whole tail follows again. Frames lay out only visible entries.
 
 ## Status line (footer)
 

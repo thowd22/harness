@@ -1,4 +1,5 @@
 name: coder
+display_name: Coder
 description: Default coding agent (built in)
 prompt: coder
 tools: [read, write, edit, bash, todo]

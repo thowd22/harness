@@ -60,9 +60,28 @@ will come from the log once it records user messages.)
 
 ### Scrolling
 
-PgUp/PgDn and the mouse wheel scroll. When you scroll back, new output no
-longer moves the view; scrolling to the end (or the palette's `Jump to end`)
-follows new output again.
+The transcript is anchored to the bottom, like a chat app: the newest
+message sits just above the input, a short conversation sits at the bottom
+of the pane with empty space above it, and older messages scroll away
+upward. While you are at the bottom, new output appears there and the view
+follows it.
+
+PgUp/PgDn and the mouse wheel scroll. Scrolling up pauses following: new
+output no longer moves the lines you are reading, and a
+`↓ new messages · end` button appears on the bottom row of the transcript.
+Any of these returns to the bottom and follows again:
+
+- clicking the button, or focusing it (Shift+Tab from the input) and
+  pressing Enter;
+- **End**, when the input is empty or its cursor is already at the end of
+  the line (otherwise End first moves the cursor), or **Ctrl+End** at any
+  time;
+- scrolling back down to the end;
+- the palette's `Jump to end`, or sending a message.
+
+Resizing the terminal keeps a following view at the bottom and keeps a
+scrolled-up view on the message you were reading. A scrolled-up view that
+becomes tall enough to show everything follows again.
 
 ## Tool cards
 
@@ -155,6 +174,16 @@ arguments) ask for them inline, one at a time; Esc goes back to the list and
 Esc again closes the palette. Rows are clickable and a click outside closes
 it. Opening and filtering stay within one frame even with 1000 entries.
 
+Past runs are titled `Coder · fix the header parser · 14:32 Oct 23 · ✔`
+(agent or workflow, first prompt or workflow inputs, start time, status)
+with the outcome as the description; a short `#tag` is added after the
+title only when two titles collide (`Coder · fix it #7a2b02 · 14:32 Oct 23 · ✔`).
+In a narrow palette the title is cut, never the tag, time or status. With an
+empty query past runs stay newest first. Agents are listed by their slash
+command with their `display_name` and one-line description
+(`/coder  Switch to Coder: Default coding agent (built in)`); `/agents` lists them the
+same way.
+
 Built-in entries: Toggle mouse, Show keys, Switch view, Interrupt,
 Notifications, Jump to end, Quit, Timestamps: cycle, Thinking: cycle,
 Mode: ask / auto-edit / auto (for this session; the status line updates),
@@ -205,3 +234,8 @@ branch, model and autonomy mode, a context usage bar (green, orange above
 running agents and the remote hosts in use. It updates from run events as
 they arrive. On narrow terminals the least important parts (remotes, path,
 tokens, verify, agents) are dropped first.
+
+An open session with nothing in flight, including a fresh one waiting for
+its first prompt, shows as ready, not running: a run counts as working only
+while a node runs, is queued or waits for approval, or while a workflow run
+has not created its first node yet. The map header follows the same rule.

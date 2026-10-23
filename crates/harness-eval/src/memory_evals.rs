@@ -114,6 +114,8 @@ async fn session(
         name: "memory-eval".into(),
         workflow: None,
         host: None,
+        title: None,
+        agent_names: Default::default(),
     }));
     let dispatcher = Dispatcher::new(tools, Arc::new(AllowAll));
     let mut lp = AgentLoop::new(

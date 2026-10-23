@@ -222,6 +222,7 @@ async fn run_inner(
     let started = Instant::now();
     let shown = core.warnings.len();
     let outcome = core.turn(args.prompt.clone(), &cancel).await;
+    core.wait_summary(&cancel).await;
     let session = core.session_id().to_owned();
     for w in &core.warnings[shown..] {
         eprintln!("harness: warning: {w}");
@@ -245,17 +246,34 @@ async fn run_inner(
     Ok(exit_code(&outcome))
 }
 
-/// `harness sessions`: lists saved sessions, newest first.
+/// Usage of `harness sessions`.
+pub const SESSIONS_USAGE: &str = "\
+usage: harness sessions
+
+Lists saved sessions, most recently active first: name, last activity,
+project, model, messages, cost, tag and description.
+
+Resume one in the TUI with harness --resume <NAME|ID|#TAG|last>, or with
+/resume inside the TUI; rename it there with /rename <name>.
+
+Options:
+  -h, --help    print this help";
+
+/// `harness sessions`: lists saved sessions, most recently active first:
+/// name, last activity, project, model, messages, cost, tag and
+/// description.
 pub fn sessions(data: &DataDir, out: &mut dyn Write) -> u8 {
     let store = SessionStore::new(data.sessions());
     match store.list() {
-        Ok(list) if list.is_empty() => {
+        Ok(list) if list.iter().all(|m| m.is_empty()) => {
             let _ = writeln!(out, "no saved sessions");
             exit::SUCCESS
         }
         Ok(list) => {
-            for m in list {
-                let _ = writeln!(out, "{}", m.listing_line());
+            let now = time::OffsetDateTime::now_utc();
+            let offset = crate::sessions::local_offset();
+            for m in list.iter().filter(|m| !m.is_empty()) {
+                let _ = writeln!(out, "{}", m.listing_line(offset, now));
             }
             exit::SUCCESS
         }

@@ -155,6 +155,19 @@ pub struct Core {
     config: LoopConfig,
     memory_node: NodeHandle,
     last: Option<LoopOutcome>,
+    /// `[general] session_summary_model`.
+    summary: Option<crate::sessions::SummaryModel>,
+    /// The summary of the last turn, running in the background.
+    summary_task: Option<SummaryTask>,
+    /// The session's shared spend meter (the budget hook charges it too).
+    meter: BudgetMeter,
+    redactor: Arc<Redactor>,
+}
+
+/// The background summary of the last turn ([`Core::spawn_summary`]).
+struct SummaryTask {
+    cancel: CancellationToken,
+    handle: tokio::task::JoinHandle<Option<harness_agent::session::SummaryUpdate>>,
 }
 
 /// Resolves `name` to a model. The fake provider (when given) serves every
@@ -484,7 +497,7 @@ impl Core {
             Ok(TrustStatus::Trusted { .. }) => ProjectTrust::Trusted,
             _ => ProjectTrust::Untrusted,
         };
-        let (context, hooks) = hooks(
+        let (context, hooks, meter) = hooks(
             &cfg,
             &data,
             &agent,
@@ -525,6 +538,8 @@ impl Core {
             ))
         });
 
+        let cfg_summary = cfg.clone();
+        let fake_summary = fake.clone();
         Ok(Core {
             cfg,
             data,
@@ -550,6 +565,10 @@ impl Core {
             config,
             memory_node,
             last: None,
+            summary: crate::sessions::summary_model(&cfg_summary, fake_summary),
+            summary_task: None,
+            meter,
+            redactor: redactor.clone(),
         })
     }
 
@@ -560,6 +579,15 @@ impl Core {
             name: self.agent.name.clone(),
             workflow: None,
             host: None,
+            title: None,
+            agent_names: harness_config::agents::display_names(
+                self.catalog
+                    .agents
+                    .active()
+                    .iter()
+                    .map(|e| &e.item)
+                    .chain([&self.agent]),
+            ),
         }));
     }
 
@@ -573,6 +601,94 @@ impl Core {
         self.session.meta()
     }
 
+    /// Renames the session (`/rename`). The name is kept from then on.
+    /// A summary still running in the background is cancelled first.
+    pub async fn rename(&mut self, name: &str) -> Result<String, String> {
+        self.settle_summary(None).await;
+        self.session.rename(name).map_err(|e| e.to_string())?;
+        Ok(self.session.meta().name.clone())
+    }
+
+    /// Starts the optional cheap-model summary of the last turn
+    /// (`[general] session_summary_model`, off by default) in the
+    /// background, so it never delays the turn. It is skipped after a
+    /// cancelled turn and while a budget is exhausted; its call is a
+    /// [`crate::sessions::SUMMARY_NODE`] child node of `parent` and its
+    /// cost is charged to the budgets. The task saves the name and
+    /// description to the session file itself;
+    /// [`settle_summary`](Self::settle_summary) mirrors them here.
+    fn spawn_summary(&mut self, parent: NodeId) {
+        let Some(summary) = self.summary.clone() else {
+            return;
+        };
+        if let Some(exceeded) = self.meter.check().exceeded {
+            tracing::info!(target: "harness::session", %exceeded, "session summary skipped");
+            return;
+        }
+        let cancel = CancellationToken::new();
+        let token = cancel.clone();
+        let conversation = self.conversation.clone();
+        let redactor = self.redactor.clone();
+        let recorder = self.recorder.clone();
+        let meter = self.meter.clone();
+        let store = self.session.store().clone();
+        let id = self.session.meta().id.clone();
+        let handle = tokio::spawn(async move {
+            let update = crate::sessions::summarize(
+                &summary,
+                &conversation,
+                &redactor,
+                &recorder,
+                &parent,
+                &token,
+            )
+            .await?;
+            if let Some(usd) = update.cost_usd {
+                meter.charge(usd);
+            }
+            if let Err(e) = store.update(&id, |m| m.apply_summary(&update)) {
+                tracing::warn!(target: "harness::session", error = %e, "could not save the session summary");
+            }
+            Some(update)
+        });
+        self.summary_task = Some(SummaryTask { cancel, handle });
+    }
+
+    /// Ends the background summary, if any, and applies what it saved to
+    /// the live session. With `wait`, it may finish (until `wait` fires);
+    /// without, it is cancelled at once (a new turn, `/rename`, or the
+    /// end of the session).
+    async fn settle_summary(&mut self, wait: Option<&CancellationToken>) {
+        let Some(SummaryTask { cancel, mut handle }) = self.summary_task.take() else {
+            return;
+        };
+        let done = match wait {
+            Some(w) => tokio::select! {
+                r = &mut handle => Some(r),
+                _ = w.cancelled() => None,
+            },
+            None => None,
+        };
+        let done = match done {
+            Some(r) => r,
+            None => {
+                cancel.cancel();
+                handle.await
+            }
+        };
+        if let Ok(Some(update)) = done
+            && let Err(e) = self.session.apply_summary(&update)
+        {
+            tracing::warn!(error = %e, "could not save the session summary");
+        }
+    }
+
+    /// Waits for the background summary of the last turn (headless runs,
+    /// which end right after their turn), unless `cancel` fires first.
+    pub async fn wait_summary(&mut self, cancel: &CancellationToken) {
+        self.settle_summary(Some(cancel)).await;
+    }
+
     /// Shared handle to the effective autonomy mode.
     pub fn mode_handle(&self) -> Arc<Mutex<Mode>> {
         self.gate.mode_handle()
@@ -580,6 +696,7 @@ impl Core {
 
     /// Runs one user turn on a new node and saves the session.
     pub async fn turn(&mut self, prompt: String, cancel: &CancellationToken) -> LoopOutcome {
+        self.settle_summary(None).await;
         let node = NodeId::random();
         self.checkpoint(&node).await;
         *self.memory_node.lock().unwrap_or_else(|e| e.into_inner()) = Some(node.clone());
@@ -605,7 +722,7 @@ impl Core {
             self.recorder.clone(),
             self.config.clone(),
         )
-        .with_node(node)
+        .with_node(node.clone())
         .with_labeler(self.labeler.clone());
         if let Some(cost) = &self.model.cost {
             agent_loop = agent_loop.with_cost(cost.clone());
@@ -623,6 +740,9 @@ impl Core {
             tracing::warn!(error = %e, "could not save the session");
             self.warnings
                 .push(format!("could not save the session: {e}"));
+        }
+        if outcome.stop != StopReason::Cancelled && !cancel.is_cancelled() {
+            self.spawn_summary(node);
         }
         self.last = Some(outcome.clone());
         outcome
@@ -720,7 +840,8 @@ impl Core {
     }
 
     /// Records `run_finished` (status from the last turn) and closes the log.
-    pub async fn finish(self) -> Result<(), String> {
+    pub async fn finish(mut self) -> Result<(), String> {
+        self.settle_summary(None).await;
         let (status, error) = match &self.last {
             Some(o) => (run_status(o), finished_error(o)),
             None => (RunStatus::Cancelled, None),
@@ -912,6 +1033,7 @@ fn hooks(
 ) -> (
     Arc<ContextManager>,
     Vec<Arc<dyn harness_agent::agent_loop::RequestHook>>,
+    BudgetMeter,
 ) {
     let mut compactor = Compactor::new(
         model.provider.clone(),
@@ -933,9 +1055,9 @@ fn hooks(
         .unwrap_or(0.0);
     let meter = BudgetMeter::new(Budgets::from_config(&cfg.budget))
         .with_spent(BudgetScope::Day, spent_today);
-    let budget = BudgetGuard::new(meter, approver).with_agent_limit(agent.budget.usd);
+    let budget = BudgetGuard::new(meter.clone(), approver).with_agent_limit(agent.budget.usd);
     let context = Arc::new(context);
-    (context.clone(), vec![context, Arc::new(budget)])
+    (context.clone(), vec![context, Arc::new(budget)], meter)
 }
 
 /// Opens the shadow-git checkpoint store of the project.

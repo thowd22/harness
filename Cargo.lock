@@ -948,6 +948,7 @@ version = "0.1.0"
 dependencies = [
  "dirs",
  "globset",
+ "harness-events",
  "hex",
  "minijinja",
  "nix 0.31.3",

@@ -12,6 +12,8 @@ pub enum Builtin {
     New,
     /// `/resume [session]`.
     Resume,
+    /// `/rename <name...>`.
+    Rename,
     /// `/model [model]`.
     Model,
     /// `/mode [ask|auto-edit|auto]`.
@@ -50,10 +52,11 @@ pub enum Builtin {
 
 impl Builtin {
     /// Every built-in, in help order.
-    pub const ALL: [Builtin; 20] = [
+    pub const ALL: [Builtin; 21] = [
         Builtin::Help,
         Builtin::New,
         Builtin::Resume,
+        Builtin::Rename,
         Builtin::Model,
         Builtin::Mode,
         Builtin::Agents,
@@ -79,6 +82,7 @@ impl Builtin {
             Self::Help => "help",
             Self::New => "new",
             Self::Resume => "resume",
+            Self::Rename => "rename",
             Self::Model => "model",
             Self::Mode => "mode",
             Self::Agents => "agents",
@@ -109,7 +113,8 @@ impl Builtin {
         match self {
             Self::Help => "Show commands and keys, or the details of one command",
             Self::New => "Start a new session in this project",
-            Self::Resume => "Resume a saved session",
+            Self::Resume => "Resume a saved session: pick one, or name it",
+            Self::Rename => "Rename this session",
             Self::Model => "Show or switch the model for this session",
             Self::Mode => "Show or switch the approval mode",
             Self::Agents => "List agents and switch to one",
@@ -135,8 +140,12 @@ impl Builtin {
         match self {
             Self::Help => vec![ArgSpec::optional("command").with_help("a command name")],
             Self::Resume => {
-                vec![ArgSpec::optional("session").with_help("session id, id prefix or `last`")]
+                vec![
+                    ArgSpec::rest("session")
+                        .with_help("a name, `last`, an id prefix or a #tag; none opens the picker"),
+                ]
             }
+            Self::Rename => vec![ArgSpec::rest("name").with_help("the new session name")],
             Self::Model => {
                 vec![ArgSpec::optional("model").with_help("model alias or provider/model")]
             }

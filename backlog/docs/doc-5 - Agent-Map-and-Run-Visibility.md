@@ -89,8 +89,16 @@ Exact payload sent to the provider and raw response/stream for any model call, r
 ### 4. Run history
 List of past runs (status, workflow/agent, start, duration, cost, host). Open any run in Map; replay it with a time scrubber (palette: "Replay run").
 
+### Names, not ids
+People pick runs and agents by name, so every view names them the same way (`harness_events::names`, `RunState::label`/`node_label`):
+- Agents show their YAML `display_name` (default: the name with `-`/`_` as spaces and a capital first letter). `run_started.agent_names` records the display names when the run starts, so live views, history and replay agree.
+- A run's title is `run_started.title` (a workflow's inputs: the first string input, cut on a word) or else its first prompt (first readable line, markdown markers stripped, UUIDs replaced by tags, at most 48 characters).
+- Lists read `who · title · time · status`, e.g. `Coder · fix the header parser · 14:32 Oct 23 · ✔`, with the outcome (`Succeeded in 2m14s · $0.12 · 3 files changed`, `Failed after 40s: <error>`) as the description. The map header shows `who · title`.
+- No raw UUID or hash appears in the TUI. When two labels would be identical, each gets a `#tag` (the last six hex digits of the run id, its random part). `harness runs show` accepts full ids, unique prefixes, `last` and tags. An audit test renders every gallery page at several sizes and fails on any UUID or long hex hash.
+- Sessions are named the same way (`harness_agent::session`): a short name of at most five words from the first prompt (`names::session_name`, openers such as `please`/`can you` and articles dropped, editable with `/rename`), a one-line description derived locally from the first and latest requests and the files edited, and the last activity as `names::activity_label` (`14:32 today`, `yesterday 09:10`, `Oct 21 16:05`, with the year when it differs; calendar days in the local offset). The `/resume` picker, the palette's session entries and `harness sessions` all show name, last activity, project, model, message count, cost and description, most recently active first, with the short `#tag` as the only id. `[general] session_summary_model` optionally lets a cheap model write the description (off by default: no extra model call).
+
 ## Data model
-Views are folds over the run's event log (`harness-events` reducer) so live, history and replay share one code path. The same reducer powers `harness runs show <id> --json`.
+Views are folds over the run's event log (`harness-events` reducer) so live, history and replay share one code path; run titles and agent display names come from the log too. The same reducer powers `harness runs show <id> --json`.
 
 ## Performance
 Incremental reducer updates; layout recomputed only when the graph topology changes; render ≤16 ms at 200+ nodes.

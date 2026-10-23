@@ -10,6 +10,7 @@ separated; comments start with `;` or `#`.
 default_model = sonnet           ; alias or provider/model
 mode = auto-edit                 ; ask | auto-edit | auto
 identity_prompt = on             ; on | off: the built-in identity prompt layer
+session_summary_model = off      ; off | a cheap model: names and describes sessions (docs/sessions.md)
 
 [provider.anthropic]
 api_key_cmd = pass show anthropic

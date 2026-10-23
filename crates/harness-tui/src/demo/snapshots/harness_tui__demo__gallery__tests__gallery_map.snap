@@ -2,17 +2,17 @@
 source: crates/harness-tui/src/demo/gallery.rs
 expression: "snap(Page::Map)"
 ---
- ui-demo  chat   map   detail   goal bar   palette   approvals   diff   inspector
+ ui-demo  chat   map   detail   goal bar   palette   approvals   diff   inspector   history
  fix-bug  ◐ running  30.0s  $0.39  ↑24.8k ↓1.4k cache 96%  critical path 47.0s  ⏸ 1 waiting
 ╭──────────────────────╮     ╭──────────────────────╮     ╭──────────────────────╮     ╭──────────────────────╮
 │✔ repro               │────►│✔ prove-fail          │────►│◐ fix                 │────►│○ proof               │
-│implementer · sonnet  │     │verify                │     │implementer · sonnet  │     │bugfix-proof          │
+│Implementer · sonnet  │     │verify                │     │Implementer · sonnet  │     │Bugfix proof          │
 │41.0s $0.080          │     │6.0s verify ✗         │     │0ms $0.31 ↻1          │     │                      │
 │↑12.4k ↓812 cache 96% │     │                      │     │↑12.4k ↓600 cache 97% │     │                      │
 │                      │     │                      │     │⏸ approval · Enter    │     │                      │
 ╰──────────────────────╯     ╰──────────────────────╯     ╰─┬────────────────────╯     ╰──────────────────────╯
-                                                            ├──►◐ researcher (haiku) 0
-                                                            └──►✔ researcher (haiku) 9
+                                                            ├──►◐ Researcher (haiku) 0
+                                                            └──►✔ Researcher (haiku) 9
 
 
 
@@ -51,7 +51,9 @@ expression: "snap(Page::Map)"
 0 64-69: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
 0 70-70: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 0 71-81: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
-0 82-119: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
+0 82-82: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
+0 83-91: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
+0 92-119: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 1 0-8: fg=Rgb(189, 147, 249) bg=Rgb(40, 42, 54) mod=BOLD
 1 9-18: fg=Rgb(139, 233, 253) bg=Rgb(40, 42, 54)
 1 19-20: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)

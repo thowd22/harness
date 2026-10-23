@@ -102,6 +102,8 @@ fn started(seq: u64) -> AppEvent {
             name: "demo".into(),
             workflow: None,
             host: None,
+            title: None,
+            agent_names: Default::default(),
         },
     )
 }
@@ -523,7 +525,8 @@ fn map_nodes_open_detail_by_mouse_and_keyboard() {
 fn subagent_card_click_opens_its_detail() {
     let mut ui = Ui::sized(AppConfig::default(), 120, 30);
     ui.feed(&demo_run());
-    ui.click_text("researcher");
+    // Subagent cards show the agent's display name.
+    ui.click_text("Researcher");
     assert_eq!(ui.app.screen(), Some("detail"), "{}", ui.text());
     assert_eq!(ui.app.detail_node(), Some(&NodeId::from("r1")));
 }
@@ -1525,4 +1528,142 @@ fn model_picker_is_ninety_percent_of_the_terminal_at_several_sizes() {
             "{w}x{h}"
         );
     }
+}
+
+fn open_sessions(ui: &mut Ui) {
+    ui.core(CoreEvent::SessionPicker(
+        crate::session_picker::tests::sample(),
+    ));
+}
+
+#[test]
+fn session_picker_filters_and_resumes_by_keyboard_over_every_view() {
+    let mut ui = Ui::sized(AppConfig::default(), 120, 30);
+    ui.send(type_text("draft"));
+    open_sessions(&mut ui);
+    assert!(ui.app.session_picker().is_some());
+    let text = ui.text();
+    assert!(text.contains(crate::session_picker::TITLE), "{text}");
+    assert!(text.contains("Fix header parser"), "{text}");
+    assert!(text.contains("yesterday 09:10"), "{text}");
+    // Typing filters the picker, not the chat input.
+    ui.send(type_text("release"));
+    assert_eq!(ui.app.session_picker().unwrap().query(), "release");
+    assert_eq!(ui.app.draft(), "draft");
+    ui.send(keys("enter"));
+    assert!(ui.app.session_picker().is_none());
+    assert_eq!(
+        ui.requests(),
+        vec![UiRequest::Resume("s-000000cccccc".into())]
+    );
+    // Arrows move; Esc closes without a request.
+    open_sessions(&mut ui);
+    ui.send(keys("down down esc"));
+    assert!(ui.app.session_picker().is_none());
+    assert!(ui.requests().is_empty());
+    open_sessions(&mut ui);
+    ui.send(keys("down enter"));
+    assert_eq!(
+        ui.requests(),
+        vec![UiRequest::Resume("s-000000cccccc".into())]
+    );
+    // Over the map too.
+    ui.send(keys("tab"));
+    assert_eq!(ui.app.view(), View::Map);
+    open_sessions(&mut ui);
+    assert!(ui.text().contains(crate::session_picker::TITLE));
+    ui.send(keys("esc"));
+    assert_eq!(ui.app.view(), View::Map);
+    assert!(ui.app.session_picker().is_none());
+}
+
+#[test]
+fn session_picker_rows_are_clickable_and_the_wheel_scrolls() {
+    let mut ui = Ui::sized(AppConfig::default(), 120, 30);
+    open_sessions(&mut ui);
+    let before = ui
+        .app
+        .session_picker()
+        .unwrap()
+        .selected()
+        .unwrap()
+        .id
+        .clone();
+    let (x, y) = find_text(ui.term.backend().buffer(), "Release notes").unwrap();
+    ui.send(vec![wheel_down(x, y)]);
+    let after = ui
+        .app
+        .session_picker()
+        .unwrap()
+        .selected()
+        .unwrap()
+        .id
+        .clone();
+    assert_ne!(before, after);
+    // A click on the description row resumes that session.
+    ui.click_text("parser docs and the guide");
+    assert!(ui.app.session_picker().is_none());
+    assert_eq!(
+        ui.requests(),
+        vec![UiRequest::Resume("s-000000dddddd".into())]
+    );
+    // Clicking the name row works too.
+    open_sessions(&mut ui);
+    ui.click_text("Fix header parser");
+    assert_eq!(
+        ui.requests(),
+        vec![UiRequest::Resume("s-000000bbbbbb".into())]
+    );
+    // A click outside closes it; pasted text goes to the filter.
+    open_sessions(&mut ui);
+    ui.app
+        .handle(AppEvent::Terminal(Event::Paste("docs".into())));
+    assert_eq!(ui.app.session_picker().unwrap().query(), "docs");
+    ui.send(vec![click(0, 0)]);
+    assert!(ui.app.session_picker().is_none());
+    assert!(ui.requests().is_empty());
+}
+
+#[test]
+fn palette_run_entry_follows_the_live_run() {
+    use crate::history::RunSummary;
+    let mut ui = Ui::new(AppConfig::default());
+    let mut b = EventBuilder::new();
+    b.run_started("coder", None);
+    b.start(NodeSpec::step("main").agent("coder"));
+    // The core lists the run as soon as it begins: no title yet, 0ms.
+    let stale = RunSummary::from_state(&RunState::from_events(b.events()), b.now()).unwrap();
+    assert_eq!(stale.duration_ms, Some(0));
+    ui.core(CoreEvent::PaletteEntries(crate::palette::run_entries(
+        &[stale],
+        UtcOffset::UTC,
+        b.now(),
+    )));
+    b.user_message("main", "fix the header parser");
+    ui.feed(b.events());
+    ui.send(keys("ctrl+p"));
+    let runs: Vec<&PaletteEntry> = ui
+        .app
+        .chat()
+        .palette()
+        .entries()
+        .iter()
+        .filter(|e| e.kind == EntryKind::Run)
+        .collect();
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert!(
+        runs[0].title.contains("· fix the header parser ·"),
+        "{}",
+        runs[0].title
+    );
+    assert!(
+        runs[0].description.starts_with("Running"),
+        "{}",
+        runs[0].description
+    );
+    assert!(
+        !runs[0].description.contains("0ms"),
+        "{}",
+        runs[0].description
+    );
 }

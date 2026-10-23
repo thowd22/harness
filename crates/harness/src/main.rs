@@ -26,6 +26,7 @@ mod login;
 mod memory;
 mod remote;
 mod remote_agent;
+mod sessions;
 mod tui;
 mod verify;
 mod wiring;
@@ -57,7 +58,7 @@ Commands:
   config show [PATH]         print the effective, redacted config with sources
   schema [KIND]              print the JSON schema of prompt, agent or workflow files
   runs show <ID> [--json]    print a run as a tree (or its state as JSON)
-  sessions                   list saved sessions
+  sessions                   list saved sessions by name, most recently active first
   ui-demo [--gallery]        play a scripted demo run in the TUI (no model needed)
   remote-agent --stdio       the remote helper (started over SSH)
   --version                  print the version and git commit";
@@ -171,6 +172,8 @@ fn cmd_tui(args: &[String]) -> ExitCode {
 }
 
 fn main() -> ExitCode {
+    // Before any thread exists: the OS refuses the lookup afterwards.
+    sessions::init_local_offset();
     let raw: Vec<OsString> = std::env::args_os().collect();
     if raw
         .get(1)
@@ -204,10 +207,23 @@ fn main() -> ExitCode {
         Some("run") => cmd_run(&args[1..]),
         Some("wf") => cmd_wf(&args[1..]),
         Some("eval") => cmd_eval(&args[1..]),
-        Some("sessions") => {
-            let (_, data, _) = startup_or_exit();
-            ExitCode::from(headless::sessions(&data, stdout))
-        }
+        Some("sessions") => match args[1..].first().map(String::as_str) {
+            None => {
+                let (_, data, _) = startup_or_exit();
+                ExitCode::from(headless::sessions(&data, stdout))
+            }
+            Some("--help" | "-h") => {
+                println!("{}", headless::SESSIONS_USAGE);
+                ExitCode::SUCCESS
+            }
+            Some(a) => {
+                eprintln!(
+                    "harness sessions: unexpected argument {a}\n\n{}",
+                    headless::SESSIONS_USAGE
+                );
+                ExitCode::from(cli::exit::USAGE)
+            }
+        },
         Some("config") if sub == Some("check") => {
             let path = args.get(2).map(Path::new);
             code(harness_config::ini::run_check(path, stdout, stderr))

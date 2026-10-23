@@ -1,4 +1,5 @@
 name: researcher
+display_name: Researcher
 description: Read-only investigation agent (built in)
 prompt: researcher
 effort: low

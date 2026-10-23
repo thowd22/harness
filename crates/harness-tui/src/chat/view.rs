@@ -19,6 +19,14 @@
 //! then a focused transcript element (Tab/arrows move, Enter toggles, Esc
 //! returns to the input), then the input.
 //!
+//! The transcript is bottom-anchored like a chat app: the newest message
+//! sits just above the input and a short conversation hugs the bottom of
+//! the pane. Scrolling up (wheel, PgUp) pins the view; new output then shows
+//! a `↓ new messages` button on the bottom row. Clicking it, Enter on it,
+//! End (from an empty input or with the cursor at the end of its line, or
+//! from a focused transcript element), Ctrl+End, the palette's follow entry
+//! or scrolling back down returns to the bottom and resumes following.
+//!
 //! Copy: the `copy` key copies the focused element (or the last assistant
 //! message), the `select` key starts keyboard selection (see
 //! [`super::copy`]), and copy buttons in the transcript are clickable. Every
@@ -30,7 +38,7 @@
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use harness_config::ini::config::{Config, ShowThinking};
 use harness_events::schema::{NodeId, RunEvent};
@@ -61,6 +69,12 @@ use crate::theme::Theme;
 /// Scroll pane id of the transcript.
 pub const CHAT_PANE: &str = "chat";
 
+/// Element id of the `↓ new messages` button shown while scrolled up.
+pub const NEW_MESSAGES_ID: &str = "chat.new-messages";
+
+/// Label of the `↓ new messages` button.
+const NEW_MESSAGES_LABEL: &str = " ↓ new messages · end ";
+
 /// Every clickable element of the chat screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatAction {
@@ -76,6 +90,8 @@ pub enum ChatAction {
     Notify(NotifyAction),
     /// A selection-mode bar button.
     Select(SelectAction),
+    /// The `↓ new messages` button: jump to the bottom and follow.
+    Follow,
 }
 
 /// What the chat screen asks the app or core to do.
@@ -569,6 +585,11 @@ impl ChatView {
             }
         }
         let input_focused = self.interaction.focused().is_none_or(|f| f.0 == INPUT_ID);
+        if self.is_follow_key(k, input_focused) {
+            self.transcript.follow();
+            self.interaction.set_focus(INPUT_ID);
+            return;
+        }
         if !input_focused {
             if let Some(d) = self.interaction.handle_key(k) {
                 return self.dispatch(d, now, out);
@@ -595,6 +616,25 @@ impl ChatView {
                 }
             }
         }
+    }
+
+    /// Whether `k` jumps to the bottom: Ctrl+End always while scrolled up;
+    /// plain End too unless the input would use it to move its cursor.
+    fn is_follow_key(&self, k: &KeyEvent, input_focused: bool) -> bool {
+        if self.transcript.is_following() || k.code != KeyCode::End {
+            return false;
+        }
+        if k.modifiers == KeyModifiers::CONTROL {
+            return true;
+        }
+        if !k.modifiers.is_empty() {
+            return false;
+        }
+        let raw = self.input.raw();
+        let at_line_end = raw
+            .get(self.input.cursor()..)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('\n'));
+        !input_focused || self.input.is_empty() || at_line_end
     }
 
     fn submit(&mut self, text: String, now: Instant, out: &mut Vec<ChatOutput>) {
@@ -684,6 +724,10 @@ impl ChatView {
             }
             ChatAction::Notify(n) => {
                 self.notify.activate(n);
+            }
+            ChatAction::Follow => {
+                self.transcript.follow();
+                self.interaction.set_focus(INPUT_ID);
             }
             ChatAction::Select(a) => match a {
                 SelectAction::Copy => self.copy_selection(now, out),
@@ -937,16 +981,39 @@ impl ChatView {
         };
         let (lines, thits) = self.transcript.render(body, &f);
         if lines.is_empty() {
+            // Bottom-anchored like the transcript: the hint sits above the input.
+            let row = Rect::new(body.x, body.bottom().saturating_sub(1), body.width, 1);
             frame.render_widget(
                 Paragraph::new("Type a message and press Enter. Ctrl+P opens the command palette.")
                     .style(theme.fg(crate::theme::Token::Muted)),
-                body,
+                row.intersection(body),
             );
         } else {
-            frame.render_widget(Paragraph::new(lines), body);
+            let pad = self.transcript.pad().min(body.height);
+            let r = Rect::new(body.x, body.y + pad, body.width, body.height - pad);
+            frame.render_widget(Paragraph::new(lines), r);
         }
         for h in thits {
             hits.register(h.id, h.rect, ChatAction::Transcript(h.action));
+        }
+        // New output below a scrolled-up view.
+        if self.transcript.has_unseen() && !self.transcript.is_following() && body.height > 0 {
+            let label = NEW_MESSAGES_LABEL;
+            let w = (unicode_width::UnicodeWidthStr::width(label) as u16).min(body.width);
+            let r = Rect::new(
+                body.right().saturating_sub(w + 1).max(body.x),
+                body.bottom() - 1,
+                w,
+                1,
+            );
+            let focused = focus.as_deref() == Some(NEW_MESSAGES_ID);
+            let style = if focused {
+                theme.focused().patch(theme.fg(crate::theme::Token::Accent))
+            } else {
+                theme.fg_on(crate::theme::Token::Accent, crate::theme::Token::Surface)
+            };
+            frame.render_widget(Paragraph::new(label).style(style), r);
+            hits.register(NEW_MESSAGES_ID, r, ChatAction::Follow);
         }
         // Activity line.
         if activity_h > 0 {
@@ -1064,6 +1131,13 @@ mod tests {
                 now,
                 out: Vec::new(),
             };
+            ui.draw();
+            ui
+        }
+
+        fn sized(w: u16, h: u16) -> Ui {
+            let mut ui = Ui::new();
+            ui.term = Terminal::new(TestBackend::new(w, h)).unwrap();
             ui.draw();
             ui
         }
@@ -1417,6 +1491,306 @@ mod tests {
                 ChatOutput::Cancel,
                 ChatOutput::Quit,
             ]
+        );
+    }
+
+    // ---- bottom-anchored transcript (TASK-143) ----
+
+    impl Ui {
+        fn rows(&self) -> Vec<String> {
+            self.text().lines().map(str::to_owned).collect()
+        }
+
+        /// The input row.
+        fn input_row(&self) -> usize {
+            self.find("› ").1 as usize
+        }
+
+        /// The transcript rows (everything above the input).
+        fn body_rows(&self) -> Vec<String> {
+            let r = self.rows();
+            r[..self.input_row()].to_vec()
+        }
+
+        fn push(&mut self, text: &str) {
+            self.view.transcript_mut().push_user(text, T0);
+            self.draw();
+        }
+
+        fn fill(&mut self, n: usize) {
+            for i in 0..n {
+                self.view
+                    .transcript_mut()
+                    .push_user(&format!("message {i}"), T0);
+            }
+            self.draw();
+        }
+
+        fn resize(&mut self, w: u16, h: u16) {
+            self.term.backend_mut().resize(w, h);
+            self.draw();
+        }
+
+        fn snapshot(&self) -> String {
+            crate::interaction::testing::styled_snapshot(self.term.backend().buffer())
+        }
+    }
+
+    /// Rows between the last non-blank transcript row and the input.
+    fn gap_above_input(ui: &Ui) -> usize {
+        let body = ui.body_rows();
+        let last = body
+            .iter()
+            .rposition(|r| !r.trim().is_empty())
+            .expect("transcript has content");
+        body.len() - 1 - last
+    }
+
+    #[test]
+    fn short_transcript_sits_directly_above_the_input() {
+        let mut ui = Ui::sized(60, 14);
+        ui.push("hello");
+        ui.push("second");
+        let body = ui.body_rows();
+        // The newest message is right above the input (one separator row)…
+        assert_eq!(gap_above_input(&ui), 1, "{}", ui.text());
+        assert!(body[body.len() - 2].contains("second"), "{}", ui.text());
+        // …and the empty space is above the conversation.
+        let first = body.iter().position(|r| r.contains("hello")).unwrap();
+        assert!(first >= 5, "{}", ui.text());
+        assert!(body[..first].iter().all(|r| r.trim().is_empty()));
+        assert!(ui.view.transcript().is_following());
+        insta::assert_snapshot!("chat_short", ui.snapshot());
+    }
+
+    #[test]
+    fn empty_chat_hint_sits_above_the_input() {
+        let ui = Ui::sized(80, 10);
+        let body = ui.body_rows();
+        assert!(
+            body.last()
+                .unwrap()
+                .contains("Type a message and press Enter")
+        );
+        assert!(body[..body.len() - 1].iter().all(|r| r.trim().is_empty()));
+    }
+
+    #[test]
+    fn short_transcript_copy_buttons_are_clickable_where_drawn() {
+        // Hits move down with the padding: clicking a drawn button works.
+        let mut ui = Ui::sized(60, 14);
+        ui.push("hello");
+        ui.click_text("⧉ copy");
+        assert_eq!(copies(ui.take()), vec![("message".into(), "hello".into())]);
+    }
+
+    #[test]
+    fn new_output_appears_at_the_bottom_and_is_followed() {
+        let mut ui = Ui::sized(60, 14);
+        ui.fill(40);
+        assert!(ui.body_rows()[ui.input_row() - 2].contains("message 39"));
+        ui.push("newest");
+        let body = ui.body_rows();
+        assert!(body[body.len() - 2].contains("newest"), "{}", ui.text());
+        assert_eq!(gap_above_input(&ui), 1);
+        assert!(ui.view.transcript().is_following());
+        assert!(!ui.text().contains("new messages"));
+        insta::assert_snapshot!("chat_long", ui.snapshot());
+    }
+
+    /// Scrolls up, adds output, and checks that the viewed lines stayed put
+    /// and the indicator appeared on the bottom transcript row.
+    fn scroll_up_then_output(ui: &mut Ui, up: Vec<Event>) -> (u16, u16) {
+        ui.fill(40);
+        ui.send(up);
+        assert!(!ui.view.transcript().is_following());
+        assert!(!ui.text().contains("new messages"), "no output yet");
+        let before = ui.body_rows();
+        ui.push("arrived while reading");
+        let after = ui.body_rows();
+        // Every row but the bottom one (the indicator) is unchanged.
+        assert_eq!(before[..before.len() - 1], after[..after.len() - 1]);
+        assert!(after.last().unwrap().contains("↓ new messages · end"));
+        assert!(!ui.text().contains("arrived while reading"));
+        assert!(ui.view.transcript().has_unseen());
+        ui.find("↓ new messages")
+    }
+
+    fn assert_at_bottom(ui: &Ui) {
+        assert!(ui.view.transcript().is_following());
+        assert!(!ui.view.transcript().has_unseen());
+        assert!(!ui.text().contains("new messages"), "{}", ui.text());
+        let body = ui.body_rows();
+        assert!(
+            body[body.len() - 2].contains("arrived while reading"),
+            "{}",
+            ui.text()
+        );
+    }
+
+    #[test]
+    fn wheel_up_pauses_and_clicking_the_indicator_resumes() {
+        let mut ui = Ui::sized(60, 14);
+        let wheel = crate::interaction::testing::wheel_up(5, 5);
+        let (x, y) = scroll_up_then_output(&mut ui, vec![wheel.clone(), wheel]);
+        insta::assert_snapshot!("chat_scrolled_up", ui.snapshot());
+        ui.send(vec![click(x, y)]);
+        assert_at_bottom(&ui);
+        assert_eq!(ui.view.focused().map(|f| f.0.as_str()), Some(INPUT_ID));
+    }
+
+    #[test]
+    fn page_up_pauses_and_end_resumes() {
+        let mut ui = Ui::sized(60, 14);
+        scroll_up_then_output(&mut ui, vec![key("pageup")]);
+        ui.send(vec![key("end")]);
+        assert_at_bottom(&ui);
+    }
+
+    #[test]
+    fn end_moves_the_input_cursor_first_and_ctrl_end_always_follows() {
+        let mut ui = Ui::sized(60, 14);
+        scroll_up_then_output(&mut ui, vec![key("pageup")]);
+        ui.send(type_text("draft"));
+        ui.send(vec![key("home")]);
+        // Mid-line, End moves the cursor to the end of the line.
+        ui.send(vec![key("end")]);
+        assert!(!ui.view.transcript().is_following());
+        assert_eq!(ui.view.input().cursor(), "draft".len());
+        // At the end of the line, End jumps to the bottom.
+        ui.send(vec![key("end")]);
+        assert_at_bottom(&ui);
+        assert_eq!(ui.view.input().raw(), "draft");
+        ui.send(vec![key("pageup")]);
+        ui.send(vec![key("home"), key("ctrl+end")]);
+        assert!(ui.view.transcript().is_following());
+    }
+
+    #[test]
+    fn indicator_is_keyboard_focusable_and_enter_resumes() {
+        let mut ui = Ui::sized(60, 14);
+        scroll_up_then_output(&mut ui, vec![key("pageup")]);
+        // The indicator is the last element above the input.
+        ui.send(vec![key("shift+tab")]);
+        assert_eq!(
+            ui.view.focused().map(|f| f.0.as_str()),
+            Some(NEW_MESSAGES_ID)
+        );
+        // Focus is drawn with the focus style.
+        let (x, y) = ui.find("↓ new messages");
+        let cell = &ui.term.backend().buffer()[(x, y)];
+        assert_eq!(cell.style().bg, ui.view.cfg.theme.focused().bg);
+        ui.send(vec![key("enter")]);
+        assert_at_bottom(&ui);
+    }
+
+    #[test]
+    fn scrolling_back_down_resumes_following() {
+        let mut ui = Ui::sized(60, 14);
+        scroll_up_then_output(&mut ui, vec![key("pageup")]);
+        ui.send(vec![key("pagedown"); 3]);
+        assert_at_bottom(&ui);
+    }
+
+    #[test]
+    fn scrolling_a_short_transcript_keeps_it_at_the_bottom() {
+        let mut ui = Ui::sized(60, 14);
+        ui.push("hello");
+        let before = ui.rows();
+        ui.send(vec![
+            key("pageup"),
+            crate::interaction::testing::wheel_up(5, 5),
+        ]);
+        assert!(ui.view.transcript().is_following());
+        assert_eq!(ui.rows(), before);
+    }
+
+    #[test]
+    fn resizing_keeps_the_bottom_anchored() {
+        let mut ui = Ui::sized(60, 14);
+        ui.fill(40);
+        for (w, h) in [(40, 10), (90, 20), (60, 14)] {
+            ui.resize(w, h);
+            assert!(ui.view.transcript().is_following());
+            let body = ui.body_rows();
+            assert!(
+                body[body.len() - 2].contains("message 39"),
+                "{w}x{h}\n{}",
+                ui.text()
+            );
+            assert_eq!(gap_above_input(&ui), 1);
+        }
+        // A short transcript stays at the bottom of a taller pane.
+        let mut ui = Ui::sized(60, 10);
+        ui.push("hello");
+        ui.resize(60, 20);
+        assert_eq!(gap_above_input(&ui), 1, "{}", ui.text());
+        insta::assert_snapshot!("chat_resized", ui.snapshot());
+    }
+
+    #[test]
+    fn resizing_a_scrolled_up_view_keeps_the_reading_position() {
+        let mut ui = Ui::sized(60, 14);
+        ui.fill(40);
+        ui.send(vec![key("pageup"), key("pageup")]);
+        let top = ui.body_rows()[0].clone();
+        assert!(top.contains("message"), "{top}");
+        let first = |ui: &Ui| {
+            ui.body_rows()
+                .into_iter()
+                .find(|r| r.contains("message"))
+                .unwrap()
+                .split_whitespace()
+                .take(3)
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let reading = first(&ui);
+        for (w, h) in [(90, 14), (40, 14), (60, 20), (60, 14)] {
+            ui.resize(w, h);
+            assert!(!ui.view.transcript().is_following(), "{w}x{h}");
+            assert_eq!(first(&ui), reading, "{w}x{h}\n{}", ui.text());
+        }
+        // Growing past the tail follows again instead of leaving a gap.
+        ui.resize(60, 200);
+        assert!(ui.view.transcript().is_following());
+        assert_eq!(gap_above_input(&ui), 1);
+    }
+
+    #[test]
+    fn long_transcript_frames_stay_within_budget() {
+        // The slowest frame of draw / page up / new output / follow on fresh
+        // state with 10k entries.
+        let sequence = || {
+            let mut ui = Ui::new();
+            for i in 0..10_000 {
+                ui.view
+                    .transcript_mut()
+                    .push_user(&format!("message {i} with some **markdown**"), T0);
+            }
+            let mut worst = std::time::Duration::ZERO;
+            let mut frame = |ui: &mut Ui, events: Vec<Event>| {
+                let t = Instant::now();
+                ui.send(events);
+                if ui.out.is_empty() {
+                    ui.draw();
+                }
+                worst = worst.max(t.elapsed());
+            };
+            frame(&mut ui, vec![]);
+            frame(&mut ui, vec![key("pageup")]);
+            ui.view.transcript_mut().push_user("late", T0);
+            frame(&mut ui, vec![]);
+            frame(&mut ui, vec![key("end")]);
+            assert!(ui.view.transcript().is_following());
+            worst
+        };
+        // Best of five: a slow implementation is slow every run, a CI
+        // scheduler hiccup only hits some of them.
+        let worst = (0..5).map(|_| sequence()).min().unwrap();
+        assert!(
+            worst < std::time::Duration::from_millis(16),
+            "worst frame {worst:?}"
         );
     }
 

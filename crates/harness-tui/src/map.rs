@@ -57,6 +57,9 @@ pub const LIVE_PANE: &str = "map.live";
 /// Element id of the live pane's close button.
 pub const LIVE_CLOSE_ID: &str = "map.live.close";
 
+/// Narrowest the run name in the map header gets before the metrics are cut.
+const MIN_HEADER_NAME: usize = 12;
+
 /// Element id of a node on the map.
 pub fn node_element_id(id: &NodeId) -> String {
     format!("map.node.{}", id.as_str())
@@ -551,9 +554,9 @@ impl MapView {
         self.interaction.end_frame(hits);
     }
 
+    /// The map header: the run's name, then its status and metrics.
     fn header_line(&self, theme: &Theme, now: OffsetDateTime, width: u16) -> Line<'static> {
         let r = &self.run;
-        let name = r.name.clone().unwrap_or_else(|| "run".into());
         // An interactive session's run stays open between turns.
         let idle = !r.is_working();
         let (glyph, token, status) = match r.status {
@@ -565,13 +568,7 @@ impl MapView {
         };
         let muted = theme.fg(Token::Muted);
         let num = theme.fg(Token::Number);
-        let mut spans = vec![
-            Span::styled(
-                format!(" {name} "),
-                theme.fg(Token::Agent).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(format!(" {glyph} {status}"), theme.fg(token)),
-        ];
+        let mut spans = vec![Span::styled(format!(" {glyph} {status}"), theme.fg(token))];
         if let Some(ms) = metrics::run_elapsed_ms(r, now) {
             spans.push(Span::styled("  ", muted));
             spans.push(Span::styled(fmt_ms(ms), num));
@@ -613,6 +610,23 @@ impl MapView {
         if let Some(h) = hosts.first() {
             spans.push(Span::styled(format!("  ⧉ {h}"), theme.fg(Token::Running)));
         }
+        // Status, cost and waiting come first: the run's name gets the
+        // room left over, so a long title is cut instead of them.
+        let rest: usize = spans
+            .iter()
+            .map(|s| crate::chat::text::width(&s.content))
+            .sum();
+        let room = usize::from(width)
+            .saturating_sub(rest + 2)
+            .max(MIN_HEADER_NAME);
+        let name = crate::chat::text::truncate(&r.label(), room);
+        spans.insert(
+            0,
+            Span::styled(
+                format!(" {name} "),
+                theme.fg(Token::Agent).add_modifier(Modifier::BOLD),
+            ),
+        );
         crate::chat::text::truncate_line(Line::from(spans), usize::from(width))
     }
 
@@ -773,7 +787,10 @@ impl MapView {
             &[
                 Span::styled(format!("{glyph} "), theme.fg(token).patch(bg)),
                 Span::styled(
-                    truncate(&n.name, usize::from(name_w.saturating_sub(2))),
+                    truncate(
+                        &self.run.node_label(n),
+                        usize::from(name_w.saturating_sub(2)),
+                    ),
                     theme
                         .fg(Token::Agent)
                         .patch(bg)
@@ -786,10 +803,12 @@ impl MapView {
             c.spans(x + w - host_w, r.y + 1, &host, host_w);
         }
         let mut who = Vec::new();
-        let agent = n
-            .agent
-            .clone()
-            .or_else(|| n.kind.map(|k| format!("{k:?}").to_lowercase()));
+        let agent = self.run.node_agent_detail(n).or_else(|| {
+            n.agent
+                .is_none()
+                .then(|| n.kind.map(|k| format!("{k:?}").to_lowercase()))
+                .flatten()
+        });
         if let Some(a) = agent {
             who.push(Span::styled(a, muted));
         }
@@ -892,7 +911,7 @@ impl MapView {
         let mut spans = vec![
             Span::styled(format!("{glyph} "), theme.fg(token).patch(bg)),
             Span::styled(
-                n.name.clone(),
+                self.run.node_label(n),
                 theme.fg(name_token).patch(bg).add_modifier(Modifier::BOLD),
             ),
         ];
@@ -956,7 +975,7 @@ impl MapView {
             .selected
             .as_ref()
             .and_then(|s| self.run.node(s))
-            .map(|n| n.name.clone())
+            .map(|n| self.run.node_label(n))
             .unwrap_or_default();
         let focused = hits.is_focused(&ElementId::from(LIVE_CLOSE_ID));
         let block = Block::new()

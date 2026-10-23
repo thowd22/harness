@@ -2,7 +2,8 @@
 source: crates/harness-tui/src/history/show.rs
 expression: text
 ---
-fix-bug (00000000-0000-0000-0000-000000000000) running  41.0s  $0.080  ↑1k ↓50  critical path 41.0s
-├─ ✔ repro  implementer · sonnet  41.0s  $0.080
-└─ ◐ fix  implementer · sonnet  ⧉ gpu-box  0ms  $0.000  ↑1k ↓50  needs: repro
+fix-bug  running  41.0s  $0.080  ↑1k ↓50  critical path 41.0s
+id 00000000-0000-0000-0000-000000000000 (#000000)  started 14:32 Oct 22
+├─ ✔ repro  Implementer · sonnet  41.0s  $0.080
+└─ ◐ fix  Implementer · sonnet  ⧉ gpu-box  0ms  $0.000  ↑1k ↓50  needs: repro
    └─ ◐ researcher  haiku  0ms  $0.000

@@ -451,3 +451,41 @@ fn runs_on_fallback_hosts_are_validated_and_allow_unmatched_labels() {
         "{m:?}"
     );
 }
+
+#[test]
+fn display_name_is_optional_and_defaults_from_the_name() {
+    let a = load("name: bugfix-proof\nprompt_text: x\n").unwrap();
+    assert_eq!(a.display_name, None);
+    assert_eq!(a.display_name(), "Bugfix proof");
+    assert_eq!(a.summary(), "Run the Bugfix proof agent");
+    let b = load(
+        "name: implementer\ndisplay_name: Code Smith\ndescription: |\n  Writes code\n  for a scoped task\nprompt_text: x\n",
+    )
+    .unwrap();
+    assert_eq!(b.display_name(), "Code Smith");
+    assert_eq!(b.summary(), "Writes code");
+    let e = err("name: a\ndisplay_name: '  '\nprompt_text: x\n");
+    assert!(e.to_string().contains("display_name"), "{e}");
+}
+
+#[test]
+fn schema_lists_display_name() {
+    let s = Agent::json_schema();
+    assert_eq!(s["properties"]["display_name"]["type"], "string");
+}
+
+#[test]
+fn builtin_agents_have_display_names_and_one_line_descriptions() {
+    let c = crate::discovery::Catalog::load(&crate::builtins::roots());
+    for (name, display) in [
+        ("coder", "Coder"),
+        ("researcher", "Researcher"),
+        ("reviewer", "Reviewer"),
+    ] {
+        let a = c.agents.get(name).expect(name);
+        assert_eq!(a.display_name.as_deref(), Some(display));
+        let d = a.description.as_deref().expect(name);
+        assert_eq!(d.lines().count(), 1, "{name}: {d}");
+        assert_eq!(a.summary(), d);
+    }
+}

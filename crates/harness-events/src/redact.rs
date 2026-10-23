@@ -249,10 +249,16 @@ impl Redactor {
                 name,
                 workflow,
                 host,
+                title,
+                agent_names,
             } => {
                 r(name);
                 ro(workflow);
                 ro(host);
+                ro(title);
+                for v in agent_names.values_mut() {
+                    r(v);
+                }
             }
             EventKind::RunFinished { error, .. } | EventKind::NodeFinished { error, .. } => {
                 ro(error)
@@ -543,6 +549,18 @@ mod tests {
         let json = serde_json::to_string(&kind).unwrap();
         assert!(!json.contains("ini-secret"), "{json}");
         assert!(json.contains(MASK));
+
+        // Run titles come from user inputs, so they are redacted too.
+        let mut kind = EventKind::RunStarted {
+            name: "fix".into(),
+            workflow: Some("fix".into()),
+            host: None,
+            title: Some("deploy with ini-secret-value-1".into()),
+            agent_names: [("coder".to_owned(), "ini-secret-value-1".to_owned())].into(),
+        };
+        r.redact_event(&mut kind);
+        let json = serde_json::to_string(&kind).unwrap();
+        assert!(!json.contains("ini-secret"), "{json}");
 
         let mut kind = EventKind::Error {
             message: format!("bad {ANT}"),

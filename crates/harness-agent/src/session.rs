@@ -6,7 +6,16 @@
 //! appended to.
 //!
 //! - [`SessionStore`] keeps `<data_dir>/sessions/<id>/session.json`
-//!   ([`SessionMeta`]: title, project, times, cost, runs and file hashes).
+//!   ([`SessionMeta`]: name, description, project, times, message count,
+//!   cost, runs and file hashes).
+//! - Names and descriptions are derived locally, without a model call:
+//!   the name from the first prompt ([`names::session_name`], until the
+//!   user sets one with `/rename`), the description from the first and
+//!   latest requests and the files edited ([`describe`]). An optional
+//!   cheap-model summary ([`summary_request`], [`parse_summary`]) can
+//!   replace the description after each turn.
+//! - [`SessionStore::find`] resolves `last`, an id, an id prefix, a short
+//!   tag (`#1a2b3c`) or a session name.
 //!   [`SessionHandle::record`] rewrites it atomically after every loop run,
 //!   so a session is never more than one turn behind its event log.
 //! - [`rebuild_conversation`] folds a run's events back into the exact
@@ -20,15 +29,18 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use harness_events::blobs::BlobStore;
+use harness_events::names;
 use harness_events::schema::{BlobEncoding, EventKind, Payload, RunEvent, RunId};
 use harness_events::store::{self, StoreError};
-use harness_providers::model::{ContentBlock, Message, Role, ToolResultPart};
+use harness_policy::provenance;
+use harness_providers::model::{ChatRequest, ContentBlock, Message, Role, ToolResultPart};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use time::OffsetDateTime;
+use time::{OffsetDateTime, UtcOffset};
 
-use crate::agent_loop::{Conversation, LoopOutcome};
+use crate::agent_loop::{Conversation, LoopOutcome, VERIFY_FEEDBACK_PREFIX};
+use crate::compaction::HANDOFF_OPEN;
 use crate::robustness;
 
 /// File name of the session metadata.
@@ -36,6 +48,15 @@ pub const SESSION_FILE: &str = "session.json";
 
 /// Maximum title length in characters.
 pub const TITLE_MAX_CHARS: usize = 60;
+
+/// Longest name `/rename` accepts, in characters.
+pub const NAME_MAX_CHARS: usize = 60;
+
+/// Longest description, in characters.
+pub const DESCRIPTION_MAX_CHARS: usize = 120;
+
+/// The title of a session whose first prompt is not known yet.
+pub const UNTITLED: &str = "(untitled)";
 
 /// Errors from session persistence.
 #[derive(Debug, thiserror::Error)]
@@ -62,6 +83,9 @@ pub enum SessionError {
         /// How many matched.
         count: usize,
     },
+    /// A name for `/rename` that is empty after trimming.
+    #[error("a session name needs at least one visible character")]
+    EmptyName,
     /// The session has no runs to resume from.
     #[error("session {0} has no recorded runs")]
     NoRuns(String),
@@ -80,6 +104,23 @@ pub struct SessionMeta {
     pub id: String,
     /// Short title (from the first prompt).
     pub title: String,
+    /// Short name (a few words). Derived from the first prompt until the
+    /// user sets one with `/rename`. Empty in sessions saved before names
+    /// existed; [`SessionMeta::display_name`] fills it in.
+    #[serde(default)]
+    pub name: String,
+    /// True when the user chose the name; it is then never re-derived.
+    #[serde(default)]
+    pub renamed: bool,
+    /// One line on what the session is about, updated after every turn.
+    #[serde(default)]
+    pub description: String,
+    /// When the last message (prompt or reply) was recorded.
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub last_message_at: Option<OffsetDateTime>,
+    /// Prompts and replies in the conversation (tool results not counted).
+    #[serde(default)]
+    pub messages: usize,
     /// Project root.
     pub project: PathBuf,
     /// Creation time.
@@ -122,6 +163,11 @@ impl SessionMeta {
         Self {
             id: uuid::Uuid::now_v7().to_string(),
             title: title_from_prompt(prompt),
+            name: names::session_name(prompt),
+            renamed: false,
+            description: names::title_from_text(prompt).unwrap_or_default(),
+            last_message_at: None,
+            messages: 0,
             project: project.into(),
             created_at: now,
             updated_at: now,
@@ -136,15 +182,45 @@ impl SessionMeta {
         }
     }
 
-    /// One line for listings: id prefix, time, cost, project and title.
-    pub fn listing_line(&self) -> String {
-        let when = self
-            .updated_at
-            .format(&time::macros::format_description!(
-                "[year]-[month]-[day] [hour]:[minute]"
-            ))
-            .unwrap_or_default();
-        let cost = if self.cost_unknown && self.cost_usd == 0.0 {
+    /// The name to show: the saved name, else one derived from the title
+    /// (sessions saved before names existed).
+    pub fn display_name(&self) -> String {
+        if !self.name.trim().is_empty() {
+            return self.name.clone();
+        }
+        if self.title == UNTITLED {
+            return names::UNNAMED_SESSION.to_owned();
+        }
+        names::session_name(&self.title)
+    }
+
+    /// The description to show: the saved one, else the title.
+    pub fn display_description(&self) -> String {
+        if !self.description.trim().is_empty() {
+            return self.description.clone();
+        }
+        if self.title == UNTITLED {
+            return String::new();
+        }
+        self.title.clone()
+    }
+
+    /// A session that never got a prompt or a name (the TUI saves one at
+    /// startup). Lists leave these out.
+    pub fn is_empty(&self) -> bool {
+        self.title == UNTITLED && self.messages == 0 && !self.renamed
+    }
+
+    /// When the session was last active: its last message, else (older
+    /// sessions, or none sent yet) its last save.
+    pub fn last_activity(&self) -> OffsetDateTime {
+        self.last_message_at.unwrap_or(self.updated_at)
+    }
+
+    /// The cost as shown in lists: `$0.0412`, `$0.0412+` when some calls
+    /// had no price, `unknown` when none had.
+    pub fn cost_label(&self) -> String {
+        if self.cost_unknown && self.cost_usd == 0.0 {
             "unknown".to_owned()
         } else {
             format!(
@@ -152,14 +228,331 @@ impl SessionMeta {
                 self.cost_usd,
                 if self.cost_unknown { "+" } else { "" }
             )
-        };
+        }
+    }
+
+    /// `1 msg`, `12 msgs`.
+    pub fn messages_label(&self) -> String {
         format!(
-            "{}  {when}  {cost:>9}  {}  {}",
-            &self.id[..self.id.len().min(13)],
-            self.project.display(),
-            self.title
+            "{} msg{}",
+            self.messages,
+            if self.messages == 1 { "" } else { "s" }
         )
     }
+
+    /// The short tag of the id (`#1a2b3c`), accepted by
+    /// [`SessionStore::find`].
+    pub fn tag(&self) -> String {
+        names::short_tag(&self.id)
+    }
+
+    /// One line for `harness sessions`: name, last activity
+    /// ([`names::activity_label`] in `offset`), project, model, message
+    /// count, cost, tag and description.
+    pub fn listing_line(&self, offset: UtcOffset, now: OffsetDateTime) -> String {
+        let when = names::activity_label(self.last_activity(), offset, now);
+        let mut line = format!(
+            "{:<24}  {when:<17}  {}  {}  {:>8}  {:>9}  {}",
+            names::shorten(&self.display_name(), 24),
+            self.project.display(),
+            self.model,
+            self.messages_label(),
+            self.cost_label(),
+            self.tag(),
+        );
+        let desc = self.display_description();
+        if !desc.is_empty() {
+            line.push_str("  ");
+            line.push_str(&desc);
+        }
+        line
+    }
+
+    /// Applies a reply of the optional summary model: the description
+    /// (when the reply had one), the name unless the user chose one, and
+    /// the call's tokens and cost.
+    pub fn apply_summary(&mut self, update: &SummaryUpdate) {
+        if let Some(n) = update.name.clone().filter(|_| !self.renamed) {
+            self.name = n;
+        }
+        if let Some(d) = &update.description {
+            self.description = d.clone();
+        }
+        self.tokens += update.tokens;
+        if let Some(usd) = update.cost_usd {
+            self.cost_usd += usd;
+        }
+        self.cost_unknown |= update.cost_unknown;
+    }
+
+    /// Updates name, description, message count and last-message time
+    /// from `conversation` (after a turn). The name is derived only while
+    /// the session has none (and never after `/rename`).
+    pub fn refresh_from(&mut self, conversation: &Conversation, now: OffsetDateTime) {
+        let prompts = user_prompts(conversation);
+        if let Some(first) = prompts.first() {
+            if self.title == UNTITLED {
+                self.title = title_from_prompt(first);
+            }
+            if !self.renamed && (self.name.trim().is_empty() || self.name == names::UNNAMED_SESSION)
+            {
+                self.name = names::session_name(first);
+            }
+        }
+        self.description = describe(conversation, &self.project, &self.title);
+        let count = message_count(conversation);
+        if count != self.messages || self.last_message_at.is_none() {
+            self.last_message_at = Some(now);
+        }
+        self.messages = count;
+    }
+}
+
+/// True for user-role text the harness wrote rather than the user: a
+/// provenance-marked block (`<tool_result ...>` such as the verifier's fix
+/// feedback, `<project_file ...>`, `<web_content ...>`), the compaction
+/// handoff, or unmarked verifier feedback. Such text is not a request.
+pub fn is_harness_text(text: &str) -> bool {
+    let t = text.trim_start();
+    if t.starts_with(HANDOFF_OPEN) || t.starts_with(VERIFY_FEEDBACK_PREFIX) {
+        return true;
+    }
+    let Some(rest) = t.strip_prefix('<') else {
+        return false;
+    };
+    provenance::TAGS.iter().any(|tag| {
+        rest.strip_prefix(tag)
+            .is_some_and(|r| r.starts_with(|c: char| c == '>' || c.is_whitespace()))
+    })
+}
+
+/// The user's own text in `message`: its text blocks without the ones
+/// the harness wrote ([`is_harness_text`]). `None` for assistant
+/// messages, tool results and harness-only messages.
+fn request_text(message: &Message) -> Option<String> {
+    if message.role != Role::User {
+        return None;
+    }
+    let text: String = message
+        .content
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Text { text } if !is_harness_text(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    (!text.trim().is_empty()).then_some(text)
+}
+
+/// Text of every user request in `conversation`, oldest first: user
+/// messages with text the user wrote. Tool results, verifier feedback and
+/// compaction handoffs are not requests ([`is_harness_text`]).
+pub fn user_prompts(conversation: &Conversation) -> Vec<String> {
+    conversation
+        .messages
+        .iter()
+        .filter_map(request_text)
+        .collect()
+}
+
+/// Prompts and replies in `conversation`: assistant messages and user
+/// messages the user wrote (text or images), not tool results, verifier
+/// feedback or compaction handoffs.
+pub fn message_count(conversation: &Conversation) -> usize {
+    conversation
+        .messages
+        .iter()
+        .filter(|m| {
+            m.role == Role::Assistant
+                || m.content.iter().any(|b| match b {
+                    ContentBlock::Text { text } => {
+                        !text.trim().is_empty() && !is_harness_text(text)
+                    }
+                    ContentBlock::ToolResult { .. } => false,
+                    _ => true,
+                })
+        })
+        .count()
+}
+
+/// A one-line description of a session, derived locally: the first
+/// request (`title`, else the first prompt), the latest request when
+/// there were several, and the files the agent wrote or edited, cut to
+/// [`DESCRIPTION_MAX_CHARS`].
+///
+/// `fix the header parser → add tests for colons · edited src/parse.rs,
+/// tests/parse.rs`
+pub fn describe(conversation: &Conversation, project: &Path, title: &str) -> String {
+    let prompts = user_prompts(conversation);
+    let first = (title != UNTITLED && !title.trim().is_empty())
+        .then(|| title.to_owned())
+        .or_else(|| prompts.first().and_then(|p| names::title_from_text(p)));
+    let mut out = first.clone().unwrap_or_default();
+    if prompts.len() > 1
+        && let Some(latest) = prompts.last().and_then(|p| names::title_from_text(p))
+        && Some(&latest) != first.as_ref()
+    {
+        if !out.is_empty() {
+            out.push_str(" → ");
+        }
+        out.push_str(&latest);
+    }
+    let edited = edited_paths(conversation, project);
+    if edited.is_empty() {
+        return names::shorten(&out, DESCRIPTION_MAX_CHARS);
+    }
+    const SHOWN: usize = 3;
+    let mut files = format!(
+        "edited {}",
+        edited
+            .iter()
+            .take(SHOWN)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    if edited.len() > SHOWN {
+        files.push_str(&format!(" +{}", edited.len() - SHOWN));
+    }
+    let files = names::shorten(&files, DESCRIPTION_MAX_CHARS / 2);
+    if out.is_empty() {
+        return files;
+    }
+    // The requests give way first, so the edited files stay visible.
+    let room = DESCRIPTION_MAX_CHARS.saturating_sub(files.chars().count() + 3);
+    format!("{} · {files}", names::shorten(&out, room))
+}
+
+/// Project-relative paths the conversation wrote or edited, in the order
+/// first touched.
+fn edited_paths(conversation: &Conversation, project: &Path) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for msg in &conversation.messages {
+        for (_, name, input) in msg.tool_uses() {
+            if !matches!(name, "write" | "edit") {
+                continue;
+            }
+            let Some(path) = input.get("path").and_then(Value::as_str) else {
+                continue;
+            };
+            let abs = harness_tools::workspace::normalize(&project.join(path));
+            let shown = match abs.strip_prefix(project) {
+                Ok(rel) => rel.display().to_string(),
+                Err(_) => path.to_owned(),
+            };
+            if !out.contains(&shown) {
+                out.push(shown);
+            }
+        }
+    }
+    out
+}
+
+/// A name for `/rename`: whitespace collapsed, at most
+/// [`NAME_MAX_CHARS`] characters.
+pub fn clean_name(name: &str) -> Result<String, SessionError> {
+    let collapsed = name.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return Err(SessionError::EmptyName);
+    }
+    Ok(names::shorten(&collapsed, NAME_MAX_CHARS))
+}
+
+/// System prompt of the optional session summary call.
+pub const SUMMARY_SYSTEM: &str = "You name and describe coding sessions for a session list. \
+Reply with exactly two lines:\nname: <2 to 5 words>\ndescription: <one sentence, at most 15 words, on what the session did>";
+
+/// Most transcript characters sent to the summary model.
+pub const SUMMARY_TRANSCRIPT_CHARS: usize = 6000;
+
+/// A compact transcript for the summary model: each prompt and reply as
+/// `user:` / `assistant:` lines, tool calls by name, newest kept when it
+/// is longer than `max_chars`. Redact it before sending.
+pub fn summary_transcript(conversation: &Conversation, max_chars: usize) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    for m in &conversation.messages {
+        match m.role {
+            Role::User => {
+                if let Some(text) = request_text(m) {
+                    lines.push(format!("user: {}", text.trim()));
+                }
+            }
+            Role::Assistant => {
+                let text = m.text();
+                let text = text.trim();
+                if !text.is_empty() {
+                    lines.push(format!("assistant: {text}"));
+                }
+                for (_, name, input) in m.tool_uses() {
+                    let path = input.get("path").and_then(Value::as_str).unwrap_or("");
+                    lines.push(format!("tool: {name} {path}").trim_end().to_owned());
+                }
+            }
+        }
+    }
+    let all = lines.join("\n");
+    let n = all.chars().count();
+    if n <= max_chars {
+        return all;
+    }
+    all.chars().skip(n - max_chars).collect()
+}
+
+/// The request of the optional session summary call to `model` (a cheap
+/// model; `[general] session_summary_model`).
+pub fn summary_request(model: impl Into<String>, transcript: &str) -> ChatRequest {
+    let mut req = ChatRequest::new(model.into());
+    req.system = Some(SUMMARY_SYSTEM.to_owned());
+    req.messages = vec![Message::user(format!(
+        "Session transcript:\n{transcript}\n\nName and describe this session."
+    ))];
+    req.max_tokens = Some(120);
+    req
+}
+
+/// What one call of the optional summary model changes in a session
+/// ([`SessionMeta::apply_summary`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SummaryUpdate {
+    /// New name (ignored after `/rename`).
+    pub name: Option<String>,
+    /// New description; `None` when the reply had none.
+    pub description: Option<String>,
+    /// Tokens the call used.
+    pub tokens: u64,
+    /// Known cost of the call in USD.
+    pub cost_usd: Option<f64>,
+    /// True when the call was answered but has no price.
+    pub cost_unknown: bool,
+}
+
+/// Parses a summary reply (`name: ...` and `description: ...` lines, in
+/// any order and case). Returns `(name, description)`; `None` when the
+/// reply has no description.
+pub fn parse_summary(reply: &str) -> Option<(Option<String>, String)> {
+    let mut name = None;
+    let mut description = None;
+    for line in reply.lines() {
+        let line = line.trim().trim_start_matches(['-', '*', ' ']);
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim().trim_matches(['"', '*', '`', ' ']);
+        if value.is_empty() {
+            continue;
+        }
+        match key.trim().trim_matches('*').to_lowercase().as_str() {
+            "name" => {
+                name = names::title_from_text(value).map(|n| names::shorten(&n, NAME_MAX_CHARS))
+            }
+            "description" => {
+                description =
+                    names::title_from_text(value).map(|d| names::shorten(&d, DESCRIPTION_MAX_CHARS))
+            }
+            _ => {}
+        }
+    }
+    description.map(|d| (name, d))
 }
 
 /// A title from the first prompt: first line, whitespace collapsed,
@@ -169,7 +562,7 @@ pub fn title_from_prompt(prompt: &str) -> String {
     let words: Vec<&str> = line.split_whitespace().collect();
     let title = words.join(" ");
     if title.is_empty() {
-        "(untitled)".into()
+        UNTITLED.into()
     } else {
         robustness::truncate_chars(&title, TITLE_MAX_CHARS)
     }
@@ -221,8 +614,22 @@ impl SessionStore {
         serde_json::from_slice(&text).map_err(|source| SessionError::Corrupt { path, source })
     }
 
-    /// Every readable session, most recently updated first. Unreadable
-    /// entries are skipped with a warning.
+    /// Loads session `id`, changes it with `f` and saves it.
+    pub fn update(
+        &self,
+        id: &str,
+        f: impl FnOnce(&mut SessionMeta),
+    ) -> Result<SessionMeta, SessionError> {
+        let mut meta = self.load(id)?;
+        f(&mut meta);
+        meta.updated_at = OffsetDateTime::now_utc();
+        self.save(&meta)?;
+        Ok(meta)
+    }
+
+    /// Every readable session, most recently active first
+    /// ([`SessionMeta::last_activity`]). Unreadable entries are skipped
+    /// with a warning.
     pub fn list(&self) -> Result<Vec<SessionMeta>, SessionError> {
         let mut out = Vec::new();
         let entries = match std::fs::read_dir(&self.dir) {
@@ -245,32 +652,73 @@ impl SessionStore {
                 }
             }
         }
-        out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then(b.id.cmp(&a.id)));
+        out.sort_by(|a, b| {
+            b.last_activity()
+                .cmp(&a.last_activity())
+                .then(b.id.cmp(&a.id))
+        });
         Ok(out)
     }
 
-    /// Finds a session by id or unique id prefix. `last` picks the most
-    /// recently updated session.
-    pub fn find(&self, id_or_prefix: &str) -> Result<SessionMeta, SessionError> {
+    /// Finds a session. `query` is, in this order of precedence:
+    ///
+    /// 1. `last`: the most recently active session that has a prompt,
+    /// 2. a full id,
+    /// 3. a name, ignoring case (`/resume header parser`),
+    /// 4. a unique id prefix,
+    /// 5. a short tag (`#1a2b3c` or `1a2b3c`),
+    /// 6. a unique name prefix, ignoring case.
+    ///
+    /// Several sessions with the same name or prefix are
+    /// [`SessionError::Ambiguous`]; use the tag then.
+    pub fn find(&self, query: &str) -> Result<SessionMeta, SessionError> {
         let all = self.list()?;
-        if id_or_prefix == "last" {
+        let q = query.trim();
+        if q == "last" {
+            let pos = all.iter().position(|m| !m.is_empty()).unwrap_or(0);
             return all
                 .into_iter()
-                .next()
+                .nth(pos)
                 .ok_or_else(|| SessionError::NotFound("last".into()));
         }
-        let matches: Vec<SessionMeta> = all
-            .into_iter()
-            .filter(|m| m.id.starts_with(id_or_prefix))
-            .collect();
-        match matches.len() {
-            0 => Err(SessionError::NotFound(id_or_prefix.into())),
-            1 => Ok(matches.into_iter().next().unwrap_or_else(|| unreachable!())),
-            count => Err(SessionError::Ambiguous {
-                prefix: id_or_prefix.into(),
-                count,
-            }),
+        if q.is_empty() {
+            return Err(SessionError::NotFound(String::new()));
         }
+        if let Some(m) = all.iter().find(|m| m.id == q) {
+            return Ok(m.clone());
+        }
+        let lower = q.to_lowercase();
+        let named = |m: &SessionMeta| !m.is_empty();
+        let stages: [&dyn Fn(&SessionMeta) -> bool; 4] = [
+            &|m| named(m) && m.display_name().to_lowercase() == lower,
+            &|m| m.id.starts_with(q),
+            &|m| names::matches_tag(&m.id, q),
+            &|m| named(m) && m.display_name().to_lowercase().starts_with(&lower),
+        ];
+        for stage in stages {
+            let matches: Vec<&SessionMeta> = all.iter().filter(|m| stage(m)).collect();
+            match matches.len() {
+                0 => continue,
+                1 => return Ok(matches[0].clone()),
+                count => {
+                    return Err(SessionError::Ambiguous {
+                        prefix: q.into(),
+                        count,
+                    });
+                }
+            }
+        }
+        Err(SessionError::NotFound(q.into()))
+    }
+
+    /// Renames the session `query` finds ([`SessionStore::find`]) and
+    /// saves it. The name is kept from then on.
+    pub fn rename(&self, query: &str, name: &str) -> Result<SessionMeta, SessionError> {
+        let mut meta = self.find(query)?;
+        meta.name = clean_name(name)?;
+        meta.renamed = true;
+        self.save(&meta)?;
+        Ok(meta)
     }
 
     /// Rebuilds the conversation of session `id` from its latest run and
@@ -439,7 +887,28 @@ impl SessionHandle {
         self.touch_and_save()
     }
 
-    /// Records a finished loop run: totals, stop code and file hashes.
+    /// Sets the name (`/rename`) and saves. The name is never re-derived
+    /// afterwards.
+    pub fn rename(&mut self, name: &str) -> Result<(), SessionError> {
+        self.meta.name = clean_name(name)?;
+        self.meta.renamed = true;
+        self.touch_and_save()
+    }
+
+    /// Applies a summary from the optional summary model
+    /// ([`SessionMeta::apply_summary`]) and saves.
+    pub fn apply_summary(&mut self, update: &SummaryUpdate) -> Result<(), SessionError> {
+        self.meta.apply_summary(update);
+        self.touch_and_save()
+    }
+
+    /// The store the session is saved in.
+    pub fn store(&self) -> &SessionStore {
+        &self.store
+    }
+
+    /// Records a finished loop run: totals, stop code, file hashes, and
+    /// the name, description, message count and last-message time.
     pub fn record(
         &mut self,
         outcome: &LoopOutcome,
@@ -451,6 +920,8 @@ impl SessionHandle {
         self.meta.last_stop = Some(outcome.stop.code().to_owned());
         let paths = touched_paths(conversation, &self.meta.project);
         self.meta.files = snapshot_files(&self.meta.project, paths.iter().map(String::as_str));
+        self.meta
+            .refresh_from(conversation, OffsetDateTime::now_utc());
         self.touch_and_save()
     }
 

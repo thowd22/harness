@@ -167,7 +167,8 @@ fn runs_show_prints_the_tree_and_json_state() {
     let o = env.cmd(&["runs", "show", "last"]).output().unwrap();
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     let tree = stdout(&o);
-    assert!(tree.contains("coder"), "{tree}");
+    // Titled after the prompt, with the agent's display name.
+    assert!(tree.starts_with("Coder · write  succeeded"), "{tree}");
     let o = env
         .cmd(&["runs", "show", "last", "--json"])
         .output()

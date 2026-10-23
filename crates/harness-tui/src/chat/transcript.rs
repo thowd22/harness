@@ -13,6 +13,14 @@
 //! the anchor, so the cost of a frame depends on the viewport and the scroll
 //! distance, never on the transcript length.
 //!
+//! **Bottom anchoring.** Like a chat app, the newest line sits at the bottom
+//! of the viewport. A transcript shorter than the viewport is padded above
+//! ([`Transcript::pad`]), so a short conversation hugs the input. Scrolling up
+//! pins the top line; new output then leaves the view still and raises
+//! [`Transcript::has_unseen`] until the view follows the tail again. A
+//! resize keeps a pinned reading position (scaled within its entry when the
+//! width changes) and lets a following view stay at the bottom.
+//!
 //! **Copy.** User and assistant headers, code blocks and tool cards carry
 //! `⧉ copy` buttons ([`TranscriptAction::Copy`]); [`Transcript::copy_text`]
 //! resolves a [`CopyTarget`] to plain text. A keyboard selection mode
@@ -414,6 +422,13 @@ pub struct TranscriptHit {
     pub action: TranscriptAction,
 }
 
+/// One rendered frame: visible lines and their hits.
+#[derive(Debug, Clone, Default)]
+struct Rendered {
+    lines: Vec<Line<'static>>,
+    hits: Vec<TranscriptHit>,
+}
+
 /// The transcript and its scroll state.
 #[derive(Debug, Clone, Default)]
 pub struct Transcript {
@@ -431,12 +446,18 @@ pub struct Transcript {
     turns: HashMap<String, usize>,
     cards: HashMap<String, usize>,
     subagents: HashMap<NodeId, usize>,
+    /// Agent display names from `run_started` (subagent cards).
+    agent_names: std::collections::BTreeMap<String, String>,
     last_turn: Option<String>,
     /// `None` follows the tail; `Some((entry, line))` pins the top line.
     anchor: Option<(usize, usize)>,
     layouts: usize,
     last_height: usize,
     last_width: usize,
+    /// Blank rows above the content in the last frame.
+    last_pad: usize,
+    /// New output arrived while the view was pinned.
+    unseen: bool,
     /// Keyboard selection mode, when active.
     selection: Option<Selection>,
 }
@@ -476,6 +497,38 @@ impl Transcript {
         self.anchor.is_none()
     }
 
+    /// Blank rows above the content in the last rendered frame: the
+    /// viewport height minus the line count, non-zero only when the whole
+    /// transcript fits. Callers draw the lines below this padding.
+    pub fn pad(&self) -> u16 {
+        self.last_pad as u16
+    }
+
+    /// Whether output arrived below a pinned (scrolled-up) view since it
+    /// was pinned. Cleared when the view follows the tail again.
+    pub fn has_unseen(&self) -> bool {
+        self.unseen
+    }
+
+    /// Pins the top line at `pos`, or follows when `pos` is at or past the
+    /// tail (so a transcript that fits never leaves the bottom).
+    fn pin(&mut self, pos: (usize, usize), width: usize, height: usize, f: &Frame<'_>) {
+        let tail = self.tail_top(width, height, f);
+        if pos >= tail {
+            self.follow();
+        } else {
+            self.anchor = Some(pos);
+        }
+    }
+
+    /// A cheap fingerprint of the bottom of the transcript.
+    fn tail_mark(&self) -> (usize, u64) {
+        (
+            self.entries.len(),
+            self.entries.last().map_or(0, |e| e.version),
+        )
+    }
+
     /// The tool card for `call_id`.
     pub fn card(&self, call_id: &str) -> Option<&ToolCard> {
         let i = *self.cards.get(call_id)?;
@@ -495,6 +548,9 @@ impl Transcript {
             version: 0,
             layout: None,
         });
+        if self.anchor.is_some() {
+            self.unseen = true;
+        }
         self.entries.len() - 1
     }
 
@@ -653,6 +709,17 @@ impl Transcript {
 
     /// Folds one run event.
     pub fn apply(&mut self, ev: &RunEvent) {
+        let before = self.tail_mark();
+        self.apply_event(ev);
+        if self.anchor.is_some() && self.tail_mark() != before {
+            self.unseen = true;
+        }
+    }
+
+    fn apply_event(&mut self, ev: &RunEvent) {
+        if let EventKind::RunStarted { agent_names, .. } = &ev.kind {
+            self.agent_names.clone_from(agent_names);
+        }
         if !self.is_main(ev) {
             self.apply_subagent(ev);
             return;
@@ -953,8 +1020,16 @@ impl Transcript {
                     ev.ts,
                     EntryKind::Subagent(SubagentCard {
                         node: node.clone(),
-                        name: name.clone(),
-                        agent: agent.clone().filter(|a| a != name),
+                        // Agent display names, as in the map and history.
+                        name: match agent {
+                            Some(a) if a == name => {
+                                harness_events::names::agent_display_name(a, &self.agent_names)
+                            }
+                            _ => name.clone(),
+                        },
+                        agent: agent.as_deref().filter(|a| a != name).map(|a| {
+                            harness_events::names::agent_display_name(a, &self.agent_names)
+                        }),
                         summary: String::new(),
                         model: model.clone(),
                         host: host.clone(),
@@ -1089,7 +1164,6 @@ impl Transcript {
                     off = self.height(i, width, f).saturating_sub(1);
                 }
             }
-            self.anchor = Some((i, off));
         } else {
             let mut down = lines as usize;
             while down > 0 {
@@ -1106,23 +1180,21 @@ impl Transcript {
                     off = 0;
                 }
             }
-            // Back at (or past) the tail: follow again.
-            let tail = self.tail_top(width, height, f);
-            self.anchor = if (i, off) >= tail {
-                None
-            } else {
-                Some((i, off))
-            };
         }
+        // At (or past) the tail, including a transcript that fits: follow.
+        self.pin((i, off), width, height, f);
     }
 
     /// Jumps to the end and follows new output.
     pub fn follow(&mut self) {
         self.anchor = None;
+        self.unseen = false;
     }
 
-    /// Lays out the visible part into `area`'s size. Returns the lines (at
-    /// most `area.height`) and the interactive regions in screen coordinates.
+    /// Lays out the visible part into `area`'s size, bottom-anchored.
+    /// Returns the lines (at most `area.height`) and the interactive regions
+    /// in screen coordinates; the lines belong [`Transcript::pad`] rows below
+    /// `area.y` (non-zero only when the whole transcript fits).
     pub fn render(
         &mut self,
         area: Rect,
@@ -1130,22 +1202,65 @@ impl Transcript {
     ) -> (Vec<Line<'static>>, Vec<TranscriptHit>) {
         let width = area.width as usize;
         let height = area.height as usize;
+        let resized = self.last_width != 0 && self.last_width != width;
+        let old_width = self.last_width;
         self.last_height = height;
         self.last_width = width;
-        let mut out = Vec::new();
-        let mut hits = Vec::new();
+        self.last_pad = 0;
         if self.entries.is_empty() || height == 0 {
-            return (out, hits);
+            return (Vec::new(), Vec::new());
         }
         if let Some((i, _)) = self.anchor
             && i >= self.entries.len()
         {
-            self.anchor = None;
+            self.follow();
         }
-        let (mut i, mut off) = match self.anchor {
-            Some(a) => a,
-            None => self.tail_top(width, height, f),
-        };
+        // A width change rewraps every entry: keep the pinned entry and the
+        // same relative position inside it.
+        if resized && let Some((i, off)) = self.anchor {
+            let old_h = self.entries[i]
+                .layout
+                .as_ref()
+                .filter(|l| l.key.width == old_width)
+                .map(|l| l.lines.len());
+            let new_h = self.height(i, width, f);
+            let off = match old_h {
+                Some(old_h) if old_h > 0 => off * new_h / old_h,
+                _ => off,
+            };
+            self.anchor = Some((i, off.min(new_h.saturating_sub(1))));
+        }
+        let mut r = Rendered::default();
+        if let Some(top) = self.anchor {
+            r = self.fill(area, top, f);
+            // The content below the pin shrank or the viewport grew: the
+            // tail fits, so follow it again.
+            if r.lines.len() < height {
+                self.follow();
+            }
+        }
+        if self.anchor.is_none() {
+            let top = self.tail_top(width, height, f);
+            r = self.fill(area, top, f);
+        }
+        let pad = height - r.lines.len();
+        if pad > 0 {
+            for h in &mut r.hits {
+                h.rect.y += pad as u16;
+            }
+        }
+        self.last_pad = pad;
+        (r.lines, r.hits)
+    }
+
+    /// Lays out entries from `top` downwards until `area` is full. Hit
+    /// rectangles start at `area.y`.
+    fn fill(&mut self, area: Rect, top: (usize, usize), f: &Frame<'_>) -> Rendered {
+        let width = area.width as usize;
+        let height = area.height as usize;
+        let mut out = Vec::new();
+        let mut hits = Vec::new();
+        let (mut i, mut off) = top;
         while out.len() < height && i < self.entries.len() {
             self.layout_entry(i, width, f);
             let layout = self.entries[i].layout.as_ref().expect("laid out");
@@ -1184,7 +1299,7 @@ impl Transcript {
             off = 0;
             i += 1;
         }
-        (out, hits)
+        Rendered { lines: out, hits }
     }
 }
 
@@ -1949,6 +2064,97 @@ mod tests {
         assert!(render_all(&mut t, &theme, 40, 4)[0].starts_with("▌ m0 "));
     }
 
+    fn untimed() -> Transcript {
+        Transcript::new(ViewSettings {
+            time: TimeFormat::new(super::super::timefmt::Timestamps::Off, UtcOffset::UTC),
+            ..ViewSettings::default()
+        })
+    }
+
+    #[test]
+    fn a_short_transcript_is_padded_above_and_hits_move_down() {
+        let theme = Theme::default();
+        let mut t = untimed();
+        t.push_user("hi", T0);
+        let (lines, hits) = t.render(Rect::new(0, 3, 40, 10), &frame(&theme));
+        assert_eq!(usize::from(t.pad()) + lines.len(), 10);
+        assert!(t.pad() > 0);
+        let copy = hits.iter().find(|h| h.id == copy_message_id(0)).unwrap();
+        // Screen row = area top + padding + line index of the header.
+        let header = texts(&lines).iter().position(|l| l.contains("hi")).unwrap();
+        assert_eq!(copy.rect.y, 3 + t.pad() + header as u16);
+        // A full viewport has no padding.
+        for i in 0..20 {
+            t.push_user(&format!("m{i}"), T0);
+        }
+        let (lines, _) = t.render(Rect::new(0, 0, 40, 10), &frame(&theme));
+        assert_eq!((t.pad(), lines.len()), (0, 10));
+    }
+
+    #[test]
+    fn streamed_output_below_a_pinned_view_is_unseen_until_following() {
+        let theme = Theme::default();
+        let mut t = untimed();
+        t.apply(&model_call(1, "c1"));
+        t.apply(&delta(2, "c1", DeltaChannel::Text, "first\n\n"));
+        for i in 0..20 {
+            t.push_user(&format!("m{i}"), T0);
+        }
+        t.apply(&model_call(3, "c2"));
+        render_all(&mut t, &theme, 40, 6);
+        assert!(!t.has_unseen());
+        t.scroll(-8, 40, &frame(&theme));
+        let pinned = render_all(&mut t, &theme, 40, 6);
+        assert!(!t.has_unseen(), "scrolling alone is not new output");
+        // A delta into the last (off-screen) entry is new output.
+        t.apply(&delta(4, "c2", DeltaChannel::Text, "streaming more"));
+        assert!(t.has_unseen());
+        assert_eq!(render_all(&mut t, &theme, 40, 6), pinned);
+        t.follow();
+        assert!(!t.has_unseen() && t.is_following());
+        // Output while following is never unseen.
+        t.apply(&delta(5, "c2", DeltaChannel::Text, " and more"));
+        assert!(!t.has_unseen());
+    }
+
+    #[test]
+    fn a_pinned_view_whose_content_now_fits_follows_again() {
+        let theme = Theme::default();
+        let mut t = untimed();
+        for i in 0..10 {
+            t.push_user(&format!("m{i}"), T0);
+        }
+        render_all(&mut t, &theme, 40, 4);
+        t.scroll(-3, 40, &frame(&theme));
+        assert!(!t.is_following());
+        // Taller than the whole transcript: bottom-anchored, following.
+        let (lines, _) = t.render(Rect::new(0, 0, 40, 60), &frame(&theme));
+        assert!(t.is_following());
+        assert_eq!(usize::from(t.pad()) + lines.len(), 60);
+    }
+
+    #[test]
+    fn a_width_change_keeps_the_pinned_entry_on_top() {
+        let theme = Theme::default();
+        let mut t = untimed();
+        let long = "word ".repeat(40);
+        for i in 0..30 {
+            t.push_user(&format!("m{i} {long}"), T0);
+        }
+        render_all(&mut t, &theme, 60, 8);
+        t.scroll(-40, 60, &frame(&theme));
+        let (i, off) = t.anchor.unwrap();
+        let h60 = t.height(i, 60, &frame(&theme));
+        render_all(&mut t, &theme, 30, 8);
+        let (j, off30) = t.anchor.unwrap();
+        let h30 = t.height(j, 30, &frame(&theme));
+        assert_eq!(i, j, "same entry stays on top");
+        // Same relative position within the entry, give or take a line.
+        let rel = |o: usize, h: usize| o as f64 / h as f64;
+        assert!((rel(off, h60) - rel(off30, h30)).abs() <= 1.0 / h30 as f64 + 1e-9);
+        assert!(!t.is_following());
+    }
+
     #[test]
     fn live_and_replay_show_identical_times() {
         let theme = Theme::default();
@@ -2194,7 +2400,9 @@ mod tests {
             .iter()
             .find(|h| h.id == undo_button_id(SHA))
             .expect("undo button region");
-        assert!(texts(&lines)[undo.rect.y as usize].contains("[ undo ]"));
+        // Hit rows are screen rows: the lines start below the padding.
+        let row = (undo.rect.y - t.pad()) as usize;
+        assert!(texts(&lines)[row].contains("[ undo ]"));
         assert_eq!(
             t.activate(&undo.action),
             Some(TranscriptOutput::UndoMemory(SHA.into()))

@@ -376,6 +376,8 @@ impl Executor for InProcessExecutor {
             name: agent.name.clone(),
             workflow: None,
             host: None,
+            title: None,
+            agent_names: Default::default(),
         }));
         let all = ToolSet::standard(StandardTools {
             workspace: Arc::new(LocalWorkspace::new(workspace)),

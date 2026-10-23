@@ -162,6 +162,11 @@ pub struct General {
     /// Send the built-in identity prompt layer, which names harness and
     /// points the model to its docs (`identity_prompt`). Default true.
     pub identity_prompt: bool,
+    /// Model alias or `provider/model` ref that names and describes
+    /// sessions after each turn (`session_summary_model`). `None` (the
+    /// default, also written `off`) derives them locally with no model
+    /// call.
+    pub session_summary_model: Option<String>,
 }
 
 /// `[provider.<id>]`. Use [`ProviderConfig::resolve_api_key`] to obtain the key.
@@ -454,6 +459,7 @@ impl Config {
                 max_concurrent_agents: 4,
                 model_list_ttl: Duration::from_secs(24 * 3600),
                 identity_prompt: true,
+                session_summary_model: None,
             },
             providers: BTreeMap::new(),
             models: BTreeMap::new(),
@@ -628,6 +634,10 @@ fn read_general(r: &mut SectionReader<'_>, g: &mut General) {
     );
     set!(g.model_list_ttl, r.duration("model_list_ttl"));
     set!(g.identity_prompt, on_off(r, "identity_prompt"));
+    if let Some(v) = r.string("session_summary_model") {
+        let v = v.trim();
+        g.session_summary_model = (!v.is_empty() && v != "off").then(|| v.to_owned());
+    }
 }
 
 /// Reads a switch written `on` / `off` (or `true` / `false`).
@@ -903,6 +913,17 @@ mod tests {
         assert_eq!(c.context.compact_at, 0.8);
         assert_eq!(c.memory.dream_model, "haiku");
         assert!(c.providers.is_empty());
+        assert_eq!(c.general.session_summary_model, None);
+    }
+
+    #[test]
+    fn session_summary_model_is_off_unless_set() {
+        let c = load("[general]\nsession_summary_model = haiku\n").unwrap();
+        assert_eq!(c.general.session_summary_model.as_deref(), Some("haiku"));
+        for off in ["off", ""] {
+            let c = load(&format!("[general]\nsession_summary_model = {off}\n")).unwrap();
+            assert_eq!(c.general.session_summary_model, None, "{off:?}");
+        }
     }
 
     #[test]

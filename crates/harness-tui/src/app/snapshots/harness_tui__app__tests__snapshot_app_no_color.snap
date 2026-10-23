@@ -2,7 +2,6 @@
 source: crates/harness-tui/src/app/tests.rs
 expression: "snapshot(ColorDepth::None)"
 ---
-Type a message and press Enter. Ctrl+P opens the command palette.
 
 
           ┌ Keys ───────────────────────────────────────────────────┐
@@ -19,15 +18,18 @@ Type a message and press Enter. Ctrl+P opens the command palette.
           │ shift+tab / arrows      move focus                      │
           │ enter                   activate focused element        │
           │ pgup / pgdn             scroll focused pane             │
+          │ end                     jump to the latest message      │
           │ mouse                   click activates, wheel scrolls  │
           │                                                         │
-          │                        [ Close ]                        │
+Type a mes│                        [ Close ]                        │
 ◐ sending └─────────────────────────────────────────── esc to close ┘
 › Type a message, / for commands
 . │ no model · auto-edit │ ↑0 ↓0 │ $? │ ◐ 1 agent
  chat  map  │ ◐ running                                                    keys
 --- styles ---
-3 10-68: mod=BOLD
+2 10-68: mod=BOLD
+3 10-10: mod=BOLD
+3 68-68: mod=BOLD
 4 10-10: mod=BOLD
 4 68-68: mod=BOLD
 5 10-10: mod=BOLD

@@ -261,8 +261,7 @@ impl Transcript {
         } else {
             return;
         };
-        let tail = self.tail_top(self.last_width.max(1), self.last_height.max(1), f);
-        self.anchor = (new_top < tail).then_some(new_top);
+        self.pin(new_top, self.last_width.max(1), self.last_height.max(1), f);
     }
 
     /// Starts selection mode with the cursor on the bottom visible line.
@@ -325,13 +324,14 @@ impl Transcript {
     }
 
     /// Puts the cursor on viewport row `row` (a click). With a mark set,
-    /// this extends the range.
+    /// this extends the range. Rows in the padding above a short transcript
+    /// select its first line.
     pub fn select_row(&mut self, row: usize, f: &Frame<'_>) {
         let Some(sel) = self.selection else {
             return;
         };
         let top = self.viewport_top(f);
-        let cursor = self.step(top, row as i64, f);
+        let cursor = self.step(top, row.saturating_sub(self.last_pad) as i64, f);
         self.selection = Some(Selection { cursor, ..sel });
     }
 

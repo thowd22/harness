@@ -309,6 +309,7 @@ struct Shared {
     library: Option<Arc<dyn WorkflowLibrary>>,
     board: Option<Arc<TaskBoard>>,
     hosts: Option<Arc<HostPool>>,
+    agent_names: std::collections::BTreeMap<String, String>,
     store: ArtifactStore,
 }
 
@@ -381,6 +382,7 @@ impl Executor {
                 library: None,
                 board: None,
                 hosts: None,
+                agent_names: std::collections::BTreeMap::new(),
                 store,
             }),
         }
@@ -401,6 +403,12 @@ impl Executor {
     /// Seeds and updates `board` (goal bar).
     pub fn with_board(self, board: Arc<TaskBoard>) -> Self {
         self.update(|s| s.board = Some(board))
+    }
+
+    /// Records these agent display names (agent name → `display_name`)
+    /// in `run_started`, so views name the run's agents as their YAML does.
+    pub fn with_agent_names(self, names: std::collections::BTreeMap<String, String>) -> Self {
+        self.update(|s| s.agent_names = names)
     }
 
     /// Places `runs_on` steps with `hosts`.
@@ -432,14 +440,23 @@ impl Executor {
                     crate::rerun::OriginKind::Resume => "resume",
                     crate::rerun::OriginKind::Rerun => "re-run",
                 },
-                p.origin.run.0
+                harness_events::names::short_tag(&p.origin.run.to_string())
             ),
             None => wf.name.clone(),
         };
+        // Title from the inputs in declared order (given, else default).
+        let title = harness_events::names::title_from_inputs(wf.inputs.iter().filter_map(|i| {
+            inputs
+                .get(&i.name)
+                .or(i.default.as_ref())
+                .map(|v| (i.name.as_str(), v))
+        }));
         sh.emit(EventDraft::run(EventKind::RunStarted {
             name,
             workflow: Some(wf.name.clone()),
             host: None,
+            title,
+            agent_names: sh.agent_names.clone(),
         }));
         let out = match resolve_inputs(wf, inputs) {
             Ok(inputs) => {

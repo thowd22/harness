@@ -114,3 +114,102 @@ pub fn scripted_run() -> Vec<RunEvent> {
     b.approval("fix", "approval-1-1", "git push origin main");
     b.into_events()
 }
+
+/// Past runs for the gallery's history page and palette: agent runs
+/// titled after their first prompt, a workflow titled after its inputs,
+/// a failed and a running run, and two runs whose titles collide (so they
+/// carry `#tags`). Ids are fixed so snapshots are stable.
+pub fn history_runs() -> Vec<crate::history::RunSummary> {
+    use harness_events::schema::{EventKind, RunId, RunStatus};
+    let id = |n: u32| -> RunId {
+        serde_json::from_value(json!(format!("0199f1a2-3b4c-7d5e-8f60-{n:012x}")))
+            .expect("demo run id parses")
+    };
+    let started =
+        |b: &mut EventBuilder, name: &str, workflow: Option<&str>, title: Option<&str>| {
+            b.push(
+                None,
+                None,
+                EventKind::RunStarted {
+                    name: name.to_owned(),
+                    workflow: workflow.map(str::to_owned),
+                    host: None,
+                    title: title.map(str::to_owned),
+                    agent_names: Default::default(),
+                },
+            );
+        };
+    let agent_run = |n: u32, agent: &str, prompt: &str, at_min: i64, status: Option<RunStatus>| {
+        let mut b = EventBuilder::with_run(id(n));
+        b.advance(at_min * 60_000);
+        started(&mut b, agent, None, None);
+        b.start(NodeSpec::step("main").agent(agent).model("sonnet"));
+        b.user_message("main", prompt);
+        b.advance(134_000);
+        b.cost("main", 0.12);
+        if let Some(s) = status {
+            b.file_changed("main", "src/parse.rs", FileChangeKind::Modified, None);
+            b.finish("main", NodeStatus::Succeeded, None);
+            b.run_finished(s);
+        }
+        b.into_events()
+    };
+    let mut wf = EventBuilder::with_run(id(0xabc001));
+    wf.advance(-90 * 60_000);
+    started(
+        &mut wf,
+        "fix-bug",
+        Some("fix-bug"),
+        Some("Header parser drops values after a colon"),
+    );
+    wf.start(NodeSpec::step("repro").agent("implementer").model("sonnet"));
+    wf.advance(41_000);
+    wf.cost("repro", 0.08);
+    wf.finish("repro", NodeStatus::Failed, Some("verify failed: 2 tests"));
+    wf.push(
+        None,
+        None,
+        EventKind::RunFinished {
+            status: RunStatus::Failed,
+            error: Some("step `repro` failed: verify failed: 2 tests".into()),
+        },
+    );
+    let logs = [
+        agent_run(
+            0xfed001,
+            "researcher",
+            "Survey how the net module retries requests",
+            0,
+            None,
+        ),
+        agent_run(
+            0x7a2b01,
+            "coder",
+            "Fix the header parser.\nIt drops values after a colon.",
+            -30,
+            Some(RunStatus::Succeeded),
+        ),
+        agent_run(
+            0x7a2b02,
+            "coder",
+            "Update the changelog",
+            -60,
+            Some(RunStatus::Succeeded),
+        ),
+        agent_run(
+            0x7a2b03,
+            "coder",
+            "Update the changelog",
+            -60,
+            Some(RunStatus::Succeeded),
+        ),
+        wf.into_events(),
+    ];
+    let now = events::T0 + time::Duration::minutes(5);
+    logs.iter()
+        .filter_map(|events| {
+            let state = harness_events::reducer::RunState::from_events(events);
+            crate::history::RunSummary::from_state(&state, now)
+        })
+        .collect()
+}

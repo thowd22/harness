@@ -433,9 +433,12 @@ pub async fn build(setup: Setup<'_>) -> Result<Built, String> {
             .with_proof(steps.local_only("bugfix-proof", proof))
             .with_dream(steps.local_only("dream", dream))
     };
+    let agent_names =
+        harness_config::agents::display_names(catalog.agents.active().iter().map(|e| &e.item));
     let mut executor = Executor::new(recorder.clone(), runners, scheduler)
         .with_library(Arc::new(library))
-        .with_board(board);
+        .with_board(board)
+        .with_agent_names(agent_names);
     if !cfg.remotes.is_empty() {
         let registry = harness_remote::hosts::HostRegistry::from_config(cfg);
         let cache = harness_remote::probe::ProbeCache::default();
