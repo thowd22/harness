@@ -167,6 +167,11 @@ pub struct General {
     /// default, also written `off`) derives them locally with no model
     /// call.
     pub session_summary_model: Option<String>,
+    /// Model calls an agent with the `todo` tool may make in one turn with
+    /// an empty task list before harness reminds it to plan with `todo`
+    /// (`todo_nudge_after`). The reminder repeats at most this often and
+    /// stops once a task exists. Default 3; 0 turns it off.
+    pub todo_nudge_after: u32,
 }
 
 /// `[provider.<id>]`. Use [`ProviderConfig::resolve_api_key`] to obtain the key.
@@ -481,6 +486,7 @@ impl Config {
                 model_list_ttl: Duration::from_secs(24 * 3600),
                 identity_prompt: true,
                 session_summary_model: None,
+                todo_nudge_after: 3,
             },
             providers: BTreeMap::new(),
             models: BTreeMap::new(),
@@ -678,6 +684,7 @@ fn read_general(r: &mut SectionReader<'_>, g: &mut General) {
     );
     set!(g.model_list_ttl, r.duration("model_list_ttl"));
     set!(g.identity_prompt, on_off(r, "identity_prompt"));
+    set!(g.todo_nudge_after, r.uint("todo_nudge_after"));
     if let Some(v) = r.string("session_summary_model") {
         let v = v.trim();
         g.session_summary_model = (!v.is_empty() && v != "off").then(|| v.to_owned());
@@ -1142,6 +1149,14 @@ mod tests {
         let c = load("[general]\nmodel_list_ttl = 6h\n").unwrap();
         assert_eq!(c.general.model_list_ttl, Duration::from_secs(6 * 3600));
         assert!(load("[general]\nmodel_list_ttl = soon\n").is_err());
+    }
+
+    #[test]
+    fn todo_nudge_after_defaults_to_three_and_zero_turns_it_off() {
+        assert_eq!(load("").unwrap().general.todo_nudge_after, 3);
+        let c = load("[general]\ntodo_nudge_after = 0\n").unwrap();
+        assert_eq!(c.general.todo_nudge_after, 0);
+        assert!(load("[general]\ntodo_nudge_after = -1\n").is_err());
     }
 
     #[test]

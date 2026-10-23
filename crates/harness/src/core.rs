@@ -511,7 +511,7 @@ impl Core {
             max_usd: opts.budget_usd.or(agent.budget.usd).or(cfg.budget.run_usd),
         };
         config.max_fix_attempts = cfg.verify.max_fix_attempts;
-        let (context, hooks, meter) = hooks(
+        let (context, mut hooks, meter) = hooks(
             &cfg,
             &data,
             &agent,
@@ -519,6 +519,10 @@ impl Core {
             &recorder,
             opts.budget_approver.clone(),
         );
+        hooks.push(Arc::new(harness_agent::todo::TodoNudge::new(
+            board.clone(),
+            cfg.general.todo_nudge_after,
+        )));
         let checkpoints = if opts.checkpoints {
             open_checkpoints(&data, &cwd, &mut warnings).await
         } else {

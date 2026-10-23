@@ -112,3 +112,21 @@ carries a previous run's tasks into a resumed session's new run.
 Workflows can seed the board from their `goal:` and `tasks:` (see
 [workflows.md](workflows.md)). A task linked to a step follows that step's
 status and owning agent.
+
+### Planning by default
+
+The built-in `coder` has `todo`, and its prompt and the tool description ask
+the model to add each step before starting any task with several steps, so
+the goal bar shows the plan. Models still sometimes skip it, so harness also
+nudges: when an agent that has `todo` has made `[general] todo_nudge_after`
+model calls in one turn (default 3) and the run's board is still empty, its
+next request carries a one-paragraph reminder to plan with `todo`
+(`harness_agent::todo::TodoNudge`, text in `NUDGE_TEXT`).
+
+- It repeats at most every `todo_nudge_after` calls and stops as soon as any
+  task exists (from this agent, a subagent or a workflow).
+- It is added to the newest tool-result message, which has not been sent
+  yet. Earlier messages never change, so prompt caching is unaffected, and
+  the reminder is visible in that request's `model_call_started` event.
+- Agents without the `todo` tool never get it. `todo_nudge_after = 0` turns
+  it off.

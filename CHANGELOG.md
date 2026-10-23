@@ -11,6 +11,18 @@ to built-in prompts, agents, workflows and `harness.ini` defaults.
 
 ## Unreleased
 
+### Changed
+
+- The coder now keeps a todo list by default, so the goal bar fills in.
+  The coder prompt and the `todo` tool description tell the model to add
+  each step before starting any task with several steps. When an agent with
+  the `todo` tool has made `[general] todo_nudge_after` model calls in a turn
+  (default 3) and the task list is still empty, harness adds a short
+  reminder to its next request, repeated at most that often and dropped once
+  a task exists. The reminder goes on the newest, not-yet-sent tool-result
+  message, so earlier requests and their prompt cache are unchanged, and it
+  is recorded in the run log. `todo_nudge_after = 0` turns it off.
+
 ## [0.3.0] - 2026-10-23
 
 ### Added
@@ -357,3 +369,9 @@ fingerprint. CI fails until the entry exists; `cargo test -p harness-eval
   it runs. Built-in agents select no MCP tools, so prompts, agents and
   model requests are unchanged.
   defaults-fingerprint: 00feb6d0d4e5
+- The coder prompt and the `todo` tool description now ask the model to add
+  each step to `todo` before starting any task with several steps (models
+  skipped the softer wording and the goal bar stayed empty), and the new
+  `[general] todo_nudge_after = 3` reminds agents that still have no task
+  list after three model calls.
+  defaults-fingerprint: 8328cb67af31

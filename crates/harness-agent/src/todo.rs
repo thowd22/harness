@@ -34,8 +34,8 @@ use crate::dispatch::AgentTool;
 /// Tool name.
 pub const NAME: &str = "todo";
 /// Tool description sent to the model.
-pub const DESCRIPTION: &str = "Shared task list for this run, shown to the user. \
-add: new task (you own it). update: change title/status, claim=true to take it over. list: all tasks.";
+pub const DESCRIPTION: &str = "Task list shown to the user as the goal bar. For any task with several steps, \
+add each step first, then mark it in_progress and done. add: new task. update: title/status, claim. list: all.";
 /// Task journal file name inside the run directory.
 pub const TASKS_FILE: &str = "tasks.jsonl";
 /// Capacity of the live event channel.
@@ -806,6 +806,9 @@ impl AgentTool for TodoTool {
         Ok(ToolOutput::Text(format!("ok: {task}")))
     }
 }
+
+mod nudge;
+pub use nudge::{NUDGE_TEXT, TodoNudge};
 
 #[cfg(test)]
 mod tests;

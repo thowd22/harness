@@ -256,6 +256,15 @@ impl Conversation {
         }
     }
 
+    /// Index of the first message not yet recorded in a `model_call_started`
+    /// event (0 before the first request). Hooks may change messages from
+    /// here on without invalidating the log or the prompt cache.
+    pub fn unlogged_from(&self) -> usize {
+        self.logged
+            .as_ref()
+            .map_or(0, |l| l.messages.min(self.messages.len()))
+    }
+
     /// Appends a user message.
     pub fn push_user(&mut self, text: impl Into<String>) {
         self.messages.push(Message::user(text));

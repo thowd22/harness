@@ -138,17 +138,20 @@ owning agent's node. On terminals too narrow for the pane next to 60
 columns of main view, it collapses to a `☰ 2/5 <current task>` indicator
 for the status line.
 
-Tasks come from `todo` tool calls, whose arguments carry the full list:
+Tasks come from the `todo` tool (`add`, `update`, `list`; see
+[subagents.md](subagents.md#todo-the-shared-task-list)), for example:
 
 ```json
-{"goal": "Fix header parsing bug (#142)",
- "todos": [{"id": "1", "content": "Reproduce with failing test", "status": "completed"},
-           {"id": "2", "content": "Fix parse_header", "status": "in_progress"}]}
+{"action": "add", "title": "Reproduce with failing test"}
+{"action": "update", "id": "t1", "status": "in_progress"}
 ```
 
-`status` is one of `pending`, `in_progress`, `blocked`, `done`/`completed`,
-`failed`, `cancelled`. The owner of a task is the node that last changed
-it. Workflows can set the goal and tasks directly.
+`status` is one of `pending`, `in_progress`, `blocked`, `done`, `failed`,
+`cancelled`. The owner of a task is the node that last claimed or created
+it. Workflows can set the goal and tasks directly. The built-in coder is
+asked to plan with `todo` for multi-step work and is reminded when it does
+not (`[general] todo_nudge_after`, see
+[subagents.md](subagents.md#planning-by-default)).
 
 Configuration (`[ui]` in `harness.ini`): `goal_bar = auto | off` and
 `goal_bar_width = 36`. The palette entry **Toggle goal bar** shows or hides
