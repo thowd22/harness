@@ -34,6 +34,29 @@ pub fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
+/// Points every config, data and cache location the `harness` binary
+/// could use at `root`: `HARNESS_CONFIG` (`root/harness.ini`), `HOME` and
+/// the XDG base directories, and drops variables that could redirect it
+/// elsewhere. Every test that runs the binary goes through this.
+pub fn hermetic(c: &mut Command, root: &Path) {
+    c.env("HARNESS_CONFIG", root.join("harness.ini"))
+        .env("HOME", root)
+        .env("XDG_CONFIG_HOME", root.join("xdg-config"))
+        .env("XDG_DATA_HOME", root.join("xdg-data"))
+        .env("XDG_CACHE_HOME", root.join("xdg-cache"))
+        .env("XDG_STATE_HOME", root.join("xdg-state"))
+        .env_remove("HARNESS_DATA_DIR")
+        .env_remove("HARNESS_LOG");
+}
+
+/// A temp root with an empty `harness.ini`, for [`hermetic`] commands that
+/// need no [`Env`].
+pub fn hermetic_root() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("harness.ini"), "").unwrap();
+    tmp
+}
+
 /// A test environment.
 pub struct Env {
     _tmp: tempfile::TempDir,
@@ -114,13 +137,8 @@ impl Env {
 
     pub fn cmd(&self, args: &[&str]) -> Command {
         let mut c = Command::new(env!("CARGO_BIN_EXE_harness"));
-        c.args(args)
-            .current_dir(&self.project)
-            .env("HARNESS_CONFIG", self.root.join("harness.ini"))
-            .env("XDG_CONFIG_HOME", self.root.join("xdg-config"))
-            .env("XDG_DATA_HOME", self.root.join("xdg-data"))
-            .env("HOME", &self.root)
-            .env_remove("HARNESS_LOG");
+        c.args(args).current_dir(&self.project);
+        hermetic(&mut c, &self.root);
         c
     }
 

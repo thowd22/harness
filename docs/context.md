@@ -130,3 +130,4 @@ harness CI: default agent `coder` with tools [...]: initial context 1308 tokens 
 | `compact_at` | 0.8 | Compact when the next request reaches this fraction of the window |
 | `keep_recent_turns` | 6 | Assistant turns kept verbatim, and the age at which results may be elided |
 | `elide_tool_results_over` | 4000 | Tool results above this many tokens can be elided |
+| `mcp_schema_budget` | 2000 | Estimated tokens of an agent's selected MCP tool schemas above which one `mcp_tools` search-and-call tool is offered instead (see [mcp.md](mcp.md#context-cost)) |

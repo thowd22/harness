@@ -897,6 +897,7 @@ dependencies = [
  "harness-eval",
  "harness-events",
  "harness-hygiene",
+ "harness-mcp",
  "harness-memory",
  "harness-policy",
  "harness-providers",
@@ -977,6 +978,7 @@ dependencies = [
  "harness-config",
  "harness-events",
  "harness-hygiene",
+ "harness-mcp",
  "harness-memory",
  "harness-policy",
  "harness-providers",
@@ -1040,6 +1042,33 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+]
+
+[[package]]
+name = "harness-mcp"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "base64 0.23.1",
+ "futures",
+ "harness-agent",
+ "harness-config",
+ "harness-events",
+ "harness-memory",
+ "harness-policy",
+ "harness-providers",
+ "harness-tools",
+ "nix 0.31.3",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]

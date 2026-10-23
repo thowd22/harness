@@ -92,6 +92,8 @@ pub enum ChatAction {
     Select(SelectAction),
     /// The `↓ new messages` button: jump to the bottom and follow.
     Follow,
+    /// The status line's MCP indicator: open `/mcp`.
+    Mcp,
 }
 
 /// What the chat screen asks the app or core to do.
@@ -729,6 +731,10 @@ impl ChatView {
                 self.transcript.follow();
                 self.interaction.set_focus(INPUT_ID);
             }
+            ChatAction::Mcp => {
+                out.push(ChatOutput::Submit("/mcp".into()));
+                self.interaction.set_focus(INPUT_ID);
+            }
             ChatAction::Select(a) => match a {
                 SelectAction::Copy => self.copy_selection(now, out),
                 SelectAction::Mark => self.transcript.select_mark(),
@@ -1062,11 +1068,26 @@ impl ChatView {
                 &ChatAction::Input,
             );
         }
-        // Status.
-        frame.render_widget(
-            Paragraph::new(self.status.line(&theme, &self.spinner, width as usize)),
-            status,
-        );
+        // Status, with the MCP indicator as a button when it shows.
+        let mut status_line = self.status.line(&theme, &self.spinner, width as usize);
+        if let Some(label) = self.status.mcp_label() {
+            let mut x = 0usize;
+            for span in &mut status_line.spans {
+                let w = unicode_width::UnicodeWidthStr::width(span.content.as_ref());
+                if span.content == label {
+                    let id = crate::status::MCP_INDICATOR_ID;
+                    if focus.as_deref() == Some(id) {
+                        span.style = span.style.patch(theme.focused());
+                    }
+                    let r =
+                        Rect::new(status.x + x as u16, status.y, w as u16, 1).intersection(status);
+                    hits.register(id, r, ChatAction::Mcp);
+                    break;
+                }
+                x += w;
+            }
+        }
+        frame.render_widget(Paragraph::new(status_line), status);
         // Overlays.
         hits.push_layer();
         self.notify
@@ -1480,6 +1501,88 @@ mod tests {
     }
 
     #[test]
+    fn mcp_cards_show_server_tool_duration_and_result_and_toggle_by_click_and_keyboard() {
+        let mut ui = Ui::with(ChatConfig {
+            settings: ViewSettings {
+                preview_lines: 2,
+                ..ViewSettings::default()
+            },
+            ..ChatConfig::default()
+        });
+        ui.event(
+            1,
+            None,
+            EventKind::ToolCall {
+                call_id: "m".into(),
+                tool: "mcp_tools".into(),
+                args: Payload::Json(
+                    json!({"call": "github/create_issue", "arguments": {"title": "Crash on start"}}),
+                ),
+            },
+        );
+        ui.event(
+            2,
+            None,
+            EventKind::McpCall {
+                call_id: "m".into(),
+                server: "github".into(),
+                tool: "create_issue".into(),
+            },
+        );
+        ui.event(
+            3,
+            None,
+            EventKind::ToolResult {
+                call_id: "m".into(),
+                ok: true,
+                output: Payload::text(
+                    "<tool_result tool=\"mcp_tools\" call_id=\"m\" trust=\"untrusted\" origin=\"mcp server\">\nissue #1\nurl a\nurl b\nurl c\n</tool_result>",
+                ),
+                duration_ms: 1234,
+            },
+        );
+        let text = ui.text();
+        assert!(
+            text.contains("╭ ✔ mcp github › create_issue  title=Crash on start"),
+            "{text}"
+        );
+        assert!(text.contains("1.2s"), "{text}");
+        // The body is the server's output, without the provenance marker.
+        assert!(text.contains("issue #1"), "{text}");
+        assert!(!text.contains("<tool_result"), "{text}");
+        assert!(text.contains("… 2 more lines"), "{text}");
+        ui.click_text("mcp github › create_issue");
+        assert!(ui.text().contains("Enter to collapse"));
+        ui.send(vec![key("esc")]);
+        ui.view.interaction.set_focus(INPUT_ID);
+        ui.send(vec![key("shift+tab")]);
+        assert_eq!(ui.view.focused(), Some(&ElementId::from("copy.out.m")));
+        ui.send(vec![key("shift+tab")]);
+        assert_eq!(ui.view.focused(), Some(&ElementId::from("card.m")));
+        ui.send(vec![key("enter")]);
+        assert!(ui.text().contains("… 2 more lines"));
+        ui.send(vec![key("esc")]);
+        assert_eq!(ui.view.focused(), Some(&ElementId::from(INPUT_ID)));
+        // A tool-list change shows as a notice.
+        ui.event(
+            4,
+            None,
+            EventKind::McpToolsChanged {
+                server: "github".into(),
+                added: vec!["create_pr".into()],
+                removed: vec![],
+                tools: 5,
+            },
+        );
+        assert!(
+            ui.text()
+                .contains("MCP server github changed its tools (5 selected available)"),
+            "{}",
+            ui.text()
+        );
+    }
+
+    #[test]
     fn global_keys_quit_interrupt_switch_view_and_cancel() {
         let mut ui = Ui::new();
         ui.send(vec![key("tab"), key("ctrl+c"), key("esc"), key("ctrl+q")]);
@@ -1682,6 +1785,47 @@ mod tests {
         assert_eq!(cell.style().bg, ui.view.cfg.theme.focused().bg);
         ui.send(vec![key("enter")]);
         assert_at_bottom(&ui);
+    }
+
+    #[test]
+    fn mcp_indicator_shows_failed_servers_and_opens_mcp_by_click_and_keyboard() {
+        let mut ui = Ui::new();
+        assert!(!ui.text().contains("⚠ mcp"), "hidden while nothing failed");
+        ui.view.status_mut().set_mcp_failed(vec!["docs".into()]);
+        ui.draw();
+        let (x, y) = ui.find("⚠ mcp docs");
+        assert_eq!(y, 29, "on the status line");
+        let cell = &ui.term.backend().buffer()[(x + 2, y)];
+        assert_eq!(
+            cell.style().fg,
+            ui.view.cfg.theme.fg(crate::theme::Token::Error).fg
+        );
+        // Mouse.
+        ui.click_text("⚠ mcp docs");
+        assert_eq!(ui.take(), vec![ChatOutput::Submit("/mcp".into())]);
+        // Keyboard: Shift+Tab from the input (Tab switches the view there)
+        // cycles the focus layer and reaches it; Enter activates it.
+        ui.send(vec![key("shift+tab")]);
+        assert_eq!(
+            ui.view.focused().map(|f| f.0.as_str()),
+            Some(crate::status::MCP_INDICATOR_ID)
+        );
+        let (x, y) = ui.find("⚠ mcp docs");
+        assert_eq!(
+            ui.term.backend().buffer()[(x, y)].style().bg,
+            ui.view.cfg.theme.focused().bg
+        );
+        ui.send(vec![key("enter")]);
+        assert_eq!(ui.take(), vec![ChatOutput::Submit("/mcp".into())]);
+        // Several failures are counted; none hides it again.
+        ui.view
+            .status_mut()
+            .set_mcp_failed(vec!["a".into(), "b".into()]);
+        ui.draw();
+        assert!(ui.text().contains("⚠ mcp 2 failed"));
+        ui.view.status_mut().set_mcp_failed(Vec::new());
+        ui.draw();
+        assert!(!ui.text().contains("⚠ mcp"));
     }
 
     #[test]

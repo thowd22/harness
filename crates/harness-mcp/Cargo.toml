@@ -1,0 +1,44 @@
+[package]
+name = "harness-mcp"
+description = "MCP (Model Context Protocol) client: stdio and streamable HTTP transports, lifecycle, restarts, and a bundled test server."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+# Minimal MCP server for tests (this crate's and later MCP tests).
+name = "harness-mcp-test-server"
+path = "src/bin/harness-mcp-test-server.rs"
+test = false
+doc = false
+
+[dependencies]
+async-trait.workspace = true
+base64.workspace = true
+futures.workspace = true
+harness-agent.workspace = true
+harness-config.workspace = true
+harness-events.workspace = true
+harness-policy.workspace = true
+harness-providers.workspace = true
+harness-tools.workspace = true
+nix.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+harness-memory.workspace = true
+tempfile.workspace = true
+tokio-util.workspace = true
+tracing-subscriber.workspace = true

@@ -848,6 +848,37 @@ impl Transcript {
                 let out = payload_text(output);
                 self.with_card(call_id, |c| c.finish(*ok, out, *duration_ms));
             }
+            EventKind::McpCall {
+                call_id,
+                server,
+                tool,
+            } => {
+                self.with_card(call_id, |c| c.set_mcp(server, tool));
+            }
+            EventKind::McpToolsChanged {
+                server,
+                added,
+                removed,
+                tools,
+            } => {
+                let mut detail = Vec::new();
+                if !added.is_empty() {
+                    detail.push(format!("added: {}", added.join(", ")));
+                }
+                if !removed.is_empty() {
+                    detail.push(format!("removed: {}", removed.join(", ")));
+                }
+                self.push_notice(
+                    Notice {
+                        level: NoticeLevel::Info,
+                        text: format!(
+                            "MCP server {server} changed its tools ({tools} selected available)"
+                        ),
+                        detail,
+                    },
+                    ts,
+                );
+            }
             EventKind::FileChanged { path, change, diff } => {
                 self.turn_changes += 1;
                 let diff = diff.as_ref().map(payload_text);
@@ -1055,6 +1086,9 @@ impl Transcript {
                             .map(|v| arg_summary(tool, &v))
                             .unwrap_or_default();
                         s.last_action = format!("{tool} {summary}").trim().to_owned();
+                    }
+                    EventKind::McpCall { server, tool, .. } => {
+                        s.last_action = format!("mcp {server} › {tool}");
                     }
                     EventKind::ModelCallStarted { model, .. } => {
                         s.model.get_or_insert_with(|| model.clone());

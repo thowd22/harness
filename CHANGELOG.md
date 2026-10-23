@@ -11,6 +11,82 @@ to built-in prompts, agents, workflows and `harness.ini` defaults.
 
 ## Unreleased
 
+### Added
+
+- MCP client core (`crates/harness-mcp`). `[mcp.<name>]` sections in
+  `harness.ini` define stdio servers (`command`, `args`, `env.*`, `cwd`)
+  or remote streamable-HTTP servers (`url`, `header.*`), with `enabled`,
+  `timeout`, `startup` and `startup_timeout`. `env.*` and `header.*`
+  values are credentials, resolved like `api_key` (`_cmd`, `_env`) and
+  redacted. The client speaks MCP 2026-07-28 and falls back to the
+  `initialize` handshake for 2025-11-25 and older servers. Stdio servers
+  start on first use, run in their own session and process group, restart
+  with backoff after a crash, and are always cleaned up. They get the same
+  environment scrubbing as the `bash` tool, and HTTP redirects are not
+  followed, so credentials reach only the configured server. Their stderr
+  goes to the log, redacted. `harness doctor` checks every server. See
+  [docs/mcp.md](docs/mcp.md).
+- OAuth for remote MCP servers (`auth = oauth` in `[mcp.<name>]`), following
+  the MCP authorization spec: protected resource and authorization server
+  discovery, pre-registered, client-metadata-document or dynamic client
+  registration, authorization code with PKCE `S256`, `resource` and `iss`
+  checks, and a loopback redirect. `harness login mcp <name>`, `/login mcp
+  [name]` and the palette's *Authorize MCP server* entries run the browser
+  flow; `harness logout mcp <name>` removes the tokens. Tokens live in
+  `<data_dir>/auth/mcp/<name>.json` (mode `0600`, a protected path, never in
+  harness.ini), are refreshed automatically and are redacted. Runs never open
+  a browser and say how to authorize first. Bearer tokens travel only over
+  TLS: `auth = oauth` with a plain `http://` url on a non-loopback host is a
+  load error, and login, runs and metadata discovery refuse it too. New keys: `auth`,
+  `oauth_client_id`, `oauth_client_metadata_url`, `oauth_scopes`. See
+  [docs/mcp.md](docs/mcp.md#authorization-oauth).
+- MCP tools for agents. Agent YAML selects them explicitly in `tools:`
+  (`mcp:github/create_issue`, `mcp:db/*`) and workflow agent steps can add
+  some with `tools:`; nothing from a server is offered otherwise, and only
+  servers defined in harness.ini can be named. Every call is decided by the
+  policy engine as `mcp:<server>/<tool>`: new `[policy] mcp.<server>.allow`,
+  `.ask`, `.deny` and `.trust_annotations` keys, MCP tools are outward
+  actions that ask in every mode by default, and session approvals,
+  "always" rules and `harness run --allow 'mcp:<server>/*'` work for them.
+  Results are labeled untrusted (`origin="mcp server"`), redacted,
+  size-capped with spill pointers and recorded with new `mcp_call` events
+  naming the server and tool. When the selected schemas exceed the new
+  `[context] mcp_schema_budget` (default 2000 tokens), one `mcp_tools`
+  search-and-call tool stands in for them. Tool-list change notifications
+  (stdio, HTTP `GET` streams and modern `subscriptions/listen`) refresh the
+  tools mid-session (`mcp_tools_changed` events) while the request prefix
+  stays fixed until the next session. Tool cards, the map's live pane and
+  node detail show MCP calls as `mcp <server> › <tool>` with duration and
+  result. See [docs/mcp.md](docs/mcp.md#tools-for-agents).
+- MCP in the TUI. `/mcp` lists every server with its status (connected,
+  starting, failed with the reason, disabled, idle), transport, tool count
+  and auth state, with buttons to restart a server, disable or enable it
+  for the session, and view its redacted stderr; all clickable and
+  keyboard-operable. Prompts of connected servers are slash commands and
+  palette entries namespaced by server (`/github:review-pr 123`), with
+  their arguments; a missing one is asked for in the palette. Resources
+  can be attached to the next message from the palette (`Attach MCP
+  resource: <server>/<name>`) and reach the model labeled as untrusted
+  content (`origin="mcp server"`). The status line shows `⚠ mcp <name>`
+  when a server has failed; it opens `/mcp`. See
+  [docs/mcp.md](docs/mcp.md#in-the-tui).
+
+### Fixed
+
+- Failed tool cards (for example an MCP call whose approval was denied) no
+  longer show the raw `<tool_result ...>` provenance wrapper around the
+  error message.
+- Tests no longer touch your real config or data. Some harness-eval runs
+  started the `harness` binary without isolating its data directory, which
+  left eval sessions (for example `/tmp/harness-eval-long-context-…`) in
+  your sessions list. `harness eval run` now gives every attempt its own
+  temporary data directory (`--shared-data-dir` opts back in to the
+  configured one), the new `HARNESS_DATA_DIR` environment variable
+  overrides `[general] data_dir` for one process, every test that runs the
+  binary points `HARNESS_CONFIG`, `HOME` and the XDG directories at a temp
+  dir, and `scripts/hermetic-guard.sh` (run in CI) fails if the harness or
+  harness-eval suites write anything under `HOME` or the XDG directories.
+
 ## [0.2.0] - 2026-10-23
 
 ### Changed
@@ -271,4 +347,11 @@ fingerprint. CI fails until the entry exists; `cargo test -p harness-eval
   no extra model call. Set a cheap model alias (for example `haiku`) to
   have it write them after each turn. Prompts, agents and model requests
   are unchanged.
+  defaults-fingerprint: 00feb6d0d4e5
+- New `[context] mcp_schema_budget` setting, default `2000` tokens: above
+  it an agent's selected MCP tools are offered through the `mcp_tools`
+  search-and-call tool instead of their full schemas. New `[policy]
+  mcp.<server>.*` rules, empty by default, so every MCP tool asks before
+  it runs. Built-in agents select no MCP tools, so prompts, agents and
+  model requests are unchanged.
   defaults-fingerprint: 00feb6d0d4e5

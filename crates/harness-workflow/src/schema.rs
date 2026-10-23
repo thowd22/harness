@@ -170,6 +170,10 @@ pub enum StepKind {
         model: Option<String>,
         /// Prompt template (the brief).
         prompt: Option<String>,
+        /// MCP tools (`tools: [mcp:<server>/<tool>]`) added to the
+        /// agent's own for this step.
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        tools: Vec<harness_config::mcp_tools::McpSelector>,
     },
     /// Runs a shell command.
     Shell {
@@ -469,6 +473,9 @@ pub struct CheckContext {
     /// Agents that declare a non-local `runs_on`: an agent step without
     /// its own `runs_on` is placed like its agent.
     pub agent_runs_on: BTreeMap<String, RunsOn>,
+    /// `[mcp.<name>]` servers, the only ones an agent step's `tools:` may
+    /// name.
+    pub mcp_servers: Option<BTreeSet<String>>,
 }
 
 impl CheckContext {
@@ -512,6 +519,7 @@ impl CheckContext {
                     )
                 })
                 .collect(),
+            mcp_servers: cfg.map(|c| c.mcp.keys().cloned().collect()),
         }
     }
 }
@@ -687,6 +695,8 @@ struct StepDoc {
     model: Option<String>,
     #[serde(default)]
     prompt: Option<String>,
+    #[serde(default)]
+    tools: Option<Vec<String>>,
     #[serde(default)]
     run: Option<String>,
     #[serde(default)]
@@ -1041,6 +1051,7 @@ fn step_from_doc(s: StepDoc, e: &mut Errs<'_>, ctx: &CheckContext) -> Option<Ste
         ("agent", s.agent.is_some()),
         ("model", s.model.is_some()),
         ("prompt", s.prompt.is_some()),
+        ("tools", s.tools.is_some()),
         ("run", s.run.is_some()),
         ("verify", s.verify.is_some()),
         ("test", s.test.is_some()),
@@ -1050,7 +1061,7 @@ fn step_from_doc(s: StepDoc, e: &mut Errs<'_>, ctx: &CheckContext) -> Option<Ste
         ("with", s.with.is_some()),
     ];
     let allowed: &[&str] = match ty {
-        "agent" => &["agent", "model", "prompt"],
+        "agent" => &["agent", "model", "prompt", "tools"],
         "shell" => &["run"],
         "verify" => &["verify"],
         "bugfix-proof" => &["test", "keep"],
@@ -1076,10 +1087,44 @@ fn step_from_doc(s: StepDoc, e: &mut Errs<'_>, ctx: &CheckContext) -> Option<Ste
                 {
                     e.step(&id, Some("agent"), format!("unknown agent `{agent}`"));
                 }
+                let mut tools = Vec::new();
+                for t in s.tools.unwrap_or_default() {
+                    if !t.starts_with(harness_config::mcp_tools::MCP_TOOL_PREFIX) {
+                        e.step(
+                            &id,
+                            Some("tools"),
+                            format!(
+                                "`{t}`: an agent step's `tools` can only add MCP tools (mcp:<server>/<tool>); built-in tools come from the agent's YAML"
+                            ),
+                        );
+                        continue;
+                    }
+                    match harness_config::mcp_tools::McpSelector::parse(&t) {
+                        Ok(sel) => {
+                            if let Some(known) = &ctx.mcp_servers
+                                && !known.contains(&sel.server)
+                            {
+                                e.step(
+                                    &id,
+                                    Some("tools"),
+                                    format!(
+                                        "`{t}` names MCP server `{}`, which harness.ini does not define; add a [mcp.{}] section",
+                                        sel.server, sel.server
+                                    ),
+                                );
+                            }
+                            if !tools.contains(&sel) {
+                                tools.push(sel);
+                            }
+                        }
+                        Err(m) => e.step(&id, Some("tools"), m),
+                    }
+                }
                 StepKind::Agent {
                     agent,
                     model: s.model,
                     prompt: s.prompt,
+                    tools,
                 }
             }
             None => {

@@ -74,8 +74,25 @@ cargo fmt --all -- --check
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets -- -D warnings
 cargo nextest run --workspace --locked --profile ci   # or: cargo test --workspace --locked
 cargo test --workspace --locked --doc
+scripts/hermetic-guard.sh                              # tests stay off HOME and XDG dirs
 cargo deny check
 ```
+
+### Hermetic tests
+
+Tests must never read or write a developer's real config, sessions,
+memory or credentials. Every test that starts the `harness` binary sets
+`HARNESS_CONFIG`, `HOME` and `XDG_CONFIG_HOME`/`XDG_DATA_HOME`/
+`XDG_CACHE_HOME`/`XDG_STATE_HOME` to a temp dir (`common::hermetic` in
+`crates/harness/tests/common`), and the eval process executor gives each
+attempt its own data directory. `scripts/hermetic-guard.sh` checks this:
+it runs the `harness` and `harness-eval` suites with `HOME` and every XDG
+base directory pointed at an empty sentinel directory (`CARGO_HOME` and
+`RUSTUP_HOME` keep the real toolchain) and fails, listing the files, if
+anything was created there. `XDG_RUNTIME_DIR` is redirected too but not
+checked, since it only holds per-boot SSH control sockets. CI runs the
+guard after the test step; pass other cargo arguments to narrow it, e.g.
+`scripts/hermetic-guard.sh test -p harness --test headless`.
 
 To catch macOS-only `cfg` errors and warnings from Linux, install the target
 (`rustup target add aarch64-apple-darwin`) and run

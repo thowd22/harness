@@ -464,3 +464,110 @@ async fn capped_gates_never_get_looser_than_the_agent_mode() {
         GateDecision::Deny { .. }
     ));
 }
+
+/// A tool that forwards to an MCP server tool named by its `call` argument.
+struct FakeMcp;
+
+#[async_trait]
+impl AgentTool for FakeMcp {
+    fn name(&self) -> &str {
+        "mcp__gh__x"
+    }
+    fn description(&self) -> &str {
+        "fake mcp"
+    }
+    fn schema(&self) -> Value {
+        json!({"type": "object", "properties": {"call": {"type": "string"}}})
+    }
+    fn read_only(&self) -> bool {
+        false
+    }
+    async fn call(&self, _ctx: &ToolContext, _args: Value) -> Result<ToolOutput, ToolError> {
+        Ok(ToolOutput::Text("done".into()))
+    }
+    fn mcp_target(&self, args: &Value) -> Option<McpTarget> {
+        Some(McpTarget {
+            server: "gh".into(),
+            tool: args["call"].as_str().unwrap_or("x").into(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn mcp_calls_are_decided_as_server_and_tool() {
+    use harness_events::redact::Redactor;
+    use harness_events::store::{RecorderOptions, read_run};
+    use harness_policy::rules::PolicyConfig;
+
+    let dir = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let rec = RunRecorder::create(
+        data.path(),
+        harness_events::schema::RunId::new(),
+        Arc::new(Redactor::default()),
+        RecorderOptions::default(),
+    )
+    .await
+    .unwrap();
+    let mut rules = harness_config::mcp_tools::McpPolicy::new();
+    rules.insert(
+        "gh".into(),
+        harness_config::mcp_tools::McpToolRules {
+            allow: vec!["get_*".into()],
+            ..Default::default()
+        },
+    );
+    let engine = PolicyEngine::new(&PolicyConfig::default(), dir.path())
+        .unwrap()
+        .with_mcp(harness_policy::mcp::McpRules::new(
+            rules,
+            Default::default(),
+        ));
+    let broker = ApprovalBroker::new(engine.grants().clone(), Arc::new(DenyUi), dir.path());
+    // Auto mode: the outward default still asks, and DenyUi refuses.
+    let gate = PolicyGate::new(engine, Arc::new(broker), Mode::Auto).with_recorder(rec.clone());
+    let tools = ToolSet::new().with(Arc::new(FakeMcp));
+    let mut msg = message(vec![
+        use_block("m1", "mcp__gh__x", json!({"call": "get_issue"})),
+        use_block("m2", "mcp__gh__x", json!({"call": "create_issue"})),
+    ]);
+    let calls = prepare_calls(&mut msg, &tools);
+    let d = Dispatcher::new(tools, Arc::new(gate));
+    let out = d.run(None, &calls, &CancellationToken::new(), &nop).await;
+    assert!(!out[0].is_error, "{}", out[0].text());
+    assert!(
+        out[1].is_error && out[1].text().contains("denied"),
+        "{}",
+        out[1].text()
+    );
+    rec.finish().await.unwrap();
+    let decisions: Vec<(String, String, String)> = read_run(rec.dir())
+        .unwrap()
+        .events
+        .iter()
+        .filter_map(|e| match &e.kind {
+            EventKind::PolicyDecision {
+                tool,
+                decision,
+                origin,
+                ..
+            } => Some((tool.clone(), decision.clone(), origin.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        decisions,
+        [
+            (
+                "mcp:gh/get_issue".to_owned(),
+                "allow".to_owned(),
+                "harness.ini [policy] mcp.gh.allow".to_owned()
+            ),
+            (
+                "mcp:gh/create_issue".to_owned(),
+                "ask".to_owned(),
+                "built-in outward guard".to_owned()
+            ),
+        ]
+    );
+}

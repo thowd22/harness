@@ -82,6 +82,8 @@ pub enum EntryKind {
     Remote,
     /// A setting.
     Setting,
+    /// An MCP prompt or resource.
+    Mcp,
 }
 
 impl EntryKind {
@@ -96,6 +98,7 @@ impl EntryKind {
             EntryKind::Session => "session",
             EntryKind::Remote => "remote",
             EntryKind::Setting => "setting",
+            EntryKind::Mcp => "mcp",
         }
     }
 }

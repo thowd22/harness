@@ -12,6 +12,9 @@
 //! 4. **Session approvals** ([`crate::approvals::SessionGrants`]): can turn an
 //!    `ask` into `allow`, never a `deny`.
 //!
+//! MCP tool calls (`Action::Tool` named `mcp:<server>/<tool>`) are decided
+//! by `[policy] mcp.<server>.*` and the outward default ([`crate::mcp`]).
+//!
 //! Anything no rule decides falls back to the autonomy [`Mode`].
 //! Every decision is reported to the engine's [`DecisionSink`] together with
 //! the rule that produced it.
@@ -31,6 +34,7 @@ pub use paths::{Access, BuiltInHit, BuiltInPaths, MAX_GLOB_EXPANSION, PathGlob};
 pub use pattern::CommandPattern;
 
 use crate::approvals::SessionGrants;
+use crate::mcp::{McpRules, McpVerdict};
 use crate::outward::{DEFAULT_OUTWARD, canonical_forms};
 use crate::shell::{self, SimpleCommand};
 
@@ -383,6 +387,7 @@ pub struct PolicyEngine {
     overlays: Vec<Rules>,
     grants: Arc<SessionGrants>,
     sink: Arc<dyn DecisionSink>,
+    mcp: McpRules,
 }
 
 impl std::fmt::Debug for PolicyEngine {
@@ -445,9 +450,22 @@ impl PolicyEngine {
             overlays: Vec::new(),
             grants: Arc::new(SessionGrants::default()),
             sink: Arc::new(NoDecisions),
+            mcp: McpRules::default(),
             root,
             home,
         })
+    }
+
+    /// Decide MCP tool calls with `rules` (`[policy] mcp.*`). Without it
+    /// every MCP tool is an outward action that asks.
+    pub fn with_mcp(mut self, rules: McpRules) -> Self {
+        self.mcp = rules;
+        self
+    }
+
+    /// The MCP rules.
+    pub fn mcp(&self) -> &McpRules {
+        &self.mcp
     }
 
     /// Report every decision to `sink`.
@@ -504,6 +522,9 @@ impl PolicyEngine {
             Action::Read { path, .. } => self.decide_path(path, Access::Read, mode, cwd),
             Action::Write { path, .. } => self.decide_path(path, Access::Write, mode, cwd),
             Action::Bash { command } => self.decide_bash(command, mode, cwd),
+            Action::Tool { name } if crate::mcp::parse_action_name(name).is_some() => {
+                self.decide_mcp(name)
+            }
             Action::Tool { name } => Verdict {
                 decision: Decision::Allow,
                 rule: mode_rule(mode, &format!("`{name}` has no policy rules")),
@@ -817,6 +838,78 @@ impl PolicyEngine {
             some_line(),
             false,
         )
+    }
+
+    fn decide_mcp(&self, name: &str) -> Verdict {
+        let (server, tool) = crate::mcp::parse_action_name(name).expect("checked by the caller");
+        let ini = |key: &str, pattern: String, reason: String| MatchedRule {
+            layer: Layer::Ini,
+            origin: format!("{INI_ORIGIN} mcp.{server}.{key}"),
+            rule: pattern,
+            reason,
+        };
+        let grant = || self.grants.matching_tool(name);
+        match self.mcp.decide(server, tool) {
+            McpVerdict::Deny(key, p) => verdict(
+                Decision::Deny,
+                ini(
+                    key,
+                    p.clone(),
+                    format!("MCP tool `{server}/{tool}` matches deny rule `{p}`."),
+                ),
+                None,
+                false,
+            ),
+            McpVerdict::Ask(key, p) => {
+                let rule = ini(
+                    key,
+                    p.clone(),
+                    format!("MCP tool `{server}/{tool}` matches ask rule `{p}`."),
+                );
+                match grant() {
+                    Some(g) => verdict(Decision::Allow, session_rule(&g), None, false),
+                    None => verdict(Decision::Ask, rule, None, false),
+                }
+            }
+            McpVerdict::Allow(key, p) => verdict(
+                Decision::Allow,
+                ini(
+                    key,
+                    p.clone(),
+                    format!("MCP tool `{server}/{tool}` matches allow rule `{p}`."),
+                ),
+                None,
+                false,
+            ),
+            McpVerdict::ReadOnly => verdict(
+                Decision::Allow,
+                ini(
+                    "trust_annotations",
+                    "readOnlyHint".into(),
+                    format!(
+                        "the server marks `{tool}` read-only and harness.ini trusts its annotations"
+                    ),
+                ),
+                None,
+                false,
+            ),
+            McpVerdict::Outward => match grant() {
+                Some(g) => verdict(Decision::Allow, session_rule(&g), None, true),
+                None => verdict(
+                    Decision::Ask,
+                    MatchedRule {
+                        layer: Layer::BuiltIn,
+                        origin: "built-in outward guard".into(),
+                        rule: "mcp tools".into(),
+                        reason: format!(
+                            "MCP tool `{server}/{tool}` can act outside the workspace, so it always needs approval; allow it with `[policy] mcp.{server}.allow` in harness.ini."
+                        ),
+                    },
+                    None,
+                    true,
+                ),
+            },
+        }
     }
 
     fn ask_or_grant(

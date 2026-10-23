@@ -100,7 +100,7 @@ fn file_local_errors_are_located() {
         (e.line, e.message.as_str()),
         (
             3,
-            "unknown tool `browse`; known tools: read, write, edit, bash, todo"
+            "unknown tool `browse`; known tools: read, write, edit, bash, todo, or mcp:<server>/<tool> for MCP tools"
         )
     );
     assert!(
@@ -488,4 +488,87 @@ fn builtin_agents_have_display_names_and_one_line_descriptions() {
         assert_eq!(d.lines().count(), 1, "{name}: {d}");
         assert_eq!(a.summary(), d);
     }
+}
+
+#[test]
+fn mcp_tools_are_selected_explicitly_and_kept_apart() {
+    let a =
+        load("name: a\nprompt: coder\ntools: [read, mcp:github/create_issue, edit, mcp:db/*]\n")
+            .unwrap();
+    assert_eq!(a.tools, ["read", "edit"]);
+    let sel: Vec<String> = a.mcp_tools.iter().map(ToString::to_string).collect();
+    assert_eq!(sel, ["mcp:github/create_issue", "mcp:db/*"]);
+    // Only built-in tools are request tools; MCP tools come from servers.
+    assert_eq!(a.request_tools(), ["read", "edit"]);
+    // Serialized like the YAML.
+    let json = serde_json::to_value(&a).unwrap();
+    assert_eq!(json["mcp_tools"][1], "mcp:db/*");
+    // No MCP entry, no `mcp_tools` key (config hashes stay the same).
+    let plain =
+        serde_json::to_value(load("name: b\nprompt: coder\ntools: [read]\n").unwrap()).unwrap();
+    assert!(plain.get("mcp_tools").is_none());
+
+    for (yaml, want) in [
+        ("tools: [mcp:github]", "mcp:github/*"),
+        ("tools: [mcp:git hub/x]", "not a valid MCP server name"),
+        ("tools: [mcp:db/*, mcp:db/*]", "listed twice"),
+        ("tools: [github/create_issue]", "mcp:<server>/<tool>"),
+    ] {
+        let e = err(&format!("name: a\nprompt: coder\n{yaml}\n")).to_string();
+        assert!(e.contains(want), "{yaml}: {e}");
+        assert!(e.contains("a.yaml:3:"), "{yaml}: {e}");
+    }
+}
+
+#[test]
+fn mcp_tools_may_only_name_servers_from_harness_ini() {
+    let (_t, c) = catalog_with(
+        &[],
+        &[(
+            "agents/gh.yaml",
+            "name: gh\nprompt: coder\ntools: [read, mcp:github/create_issue, mcp:ghost/*]\n",
+        )],
+    );
+    let mut cx = ctx();
+    cx.mcp_servers.insert("github".into());
+    let m: Vec<String> = c
+        .validate_agents(&cx)
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(m.len(), 1, "{m:?}");
+    assert!(m[0].contains("MCP server `ghost`"), "{m:?}");
+    assert!(m[0].contains("[mcp.ghost]"), "{m:?}");
+    assert!(m[0].contains("gh.yaml:3:1: "), "{m:?}");
+    // From harness.ini.
+    let cfg = crate::ini::load_str("[mcp.github]\ncommand = gh-mcp\n", None).unwrap();
+    assert!(
+        ValidationContext::from_config(&cfg)
+            .mcp_servers
+            .contains("github")
+    );
+}
+
+#[test]
+fn project_agent_may_not_add_mcp_tools_to_the_agent_it_shadows() {
+    let (_t, c) = catalog_with(
+        &[],
+        &[(
+            "agents/base.yaml",
+            "name: base\nprompt: coder\ntools: [read, mcp:github/*]\nmemory: off\nmax_turns: 10\n\
+             budget: { usd: 0.5, tokens: 500 }\nscope: [\"src/**\"]\npolicy:\n  bash.deny: [\"git push*\"]\n",
+        )],
+    );
+    let mut cx = ctx();
+    cx.mcp_servers.insert("github".into());
+    let m: Vec<String> = c
+        .validate_agents(&cx)
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert!(
+        m.iter()
+            .any(|x| x.contains("adds MCP tools [\"mcp:github/*\"]")),
+        "{m:?}"
+    );
 }

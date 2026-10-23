@@ -599,3 +599,92 @@ fn agent_policy_fragment_becomes_overlay() {
     assert_eq!(d(&e, &bash("git push"), Mode::Auto), Decision::Deny);
     assert_eq!(d(&e, &write("secrets/x"), Mode::Auto), Decision::Deny);
 }
+
+// ---- TASK-146.2: MCP tools ---------------------------------------------
+
+#[test]
+fn mcp_tools_follow_ini_rules_and_are_outward_by_default() {
+    use crate::mcp::{McpRules, ReadOnlyTools, action_name};
+    use harness_config::mcp_tools::{McpPolicy, McpToolRules};
+    let f = fx();
+    let mut p = McpPolicy::new();
+    p.insert(
+        "github".into(),
+        McpToolRules {
+            allow: vec!["get_*".into()],
+            ask: vec!["get_secret*".into()],
+            deny: vec!["delete_*".into()],
+            trust_annotations: false,
+        },
+    );
+    p.insert(
+        "docs".into(),
+        McpToolRules {
+            trust_annotations: true,
+            ..McpToolRules::default()
+        },
+    );
+    let ro = Arc::new(ReadOnlyTools::default());
+    ro.set("docs", ["search".to_owned()]);
+    ro.set("github", ["list_repos".to_owned()]);
+    let e = f.engine().with_mcp(McpRules::new(p, ro));
+    let mcp = |s: &str, t: &str| Action::Tool {
+        name: action_name(s, t),
+    };
+    for mode in Mode::ALL {
+        let v = decide(&e, &mcp("github", "delete_repo"), mode);
+        assert_eq!(v.decision, Decision::Deny, "{mode}");
+        assert_eq!(v.rule.origin, "harness.ini [policy] mcp.github.deny");
+        assert_eq!(v.rule.rule, "delete_*");
+        let v = decide(&e, &mcp("github", "get_issue"), mode);
+        assert_eq!((v.decision, v.rule.layer), (Decision::Allow, Layer::Ini));
+        assert_eq!(
+            d(&e, &mcp("github", "get_secret_value"), mode),
+            Decision::Ask
+        );
+        // No rule: an outward action that asks even in auto mode.
+        let v = decide(&e, &mcp("github", "create_issue"), mode);
+        assert_eq!((v.decision, v.outward), (Decision::Ask, true), "{mode}");
+        assert!(
+            v.rule.reason.contains("mcp.github.allow"),
+            "{}",
+            v.rule.reason
+        );
+        // Annotations count only where the user trusts them.
+        assert_eq!(d(&e, &mcp("docs", "search"), mode), Decision::Allow);
+        assert_eq!(d(&e, &mcp("docs", "publish"), mode), Decision::Ask);
+        assert_eq!(d(&e, &mcp("github", "list_repos"), mode), Decision::Ask);
+        // Unconfigured servers ask too.
+        assert_eq!(d(&e, &mcp("other", "x"), mode), Decision::Ask);
+    }
+    // Session grants turn asks into allows, never denies.
+    e.grants().allow_tool("mcp:github/*");
+    assert_eq!(
+        d(&e, &mcp("github", "create_issue"), Mode::Ask),
+        Decision::Allow
+    );
+    assert_eq!(
+        d(&e, &mcp("github", "get_secret_value"), Mode::Ask),
+        Decision::Allow
+    );
+    assert_eq!(
+        d(&e, &mcp("github", "delete_repo"), Mode::Auto),
+        Decision::Deny
+    );
+    // Without MCP rules every MCP tool asks; other tools stay mode-decided.
+    let plain = f.engine();
+    assert_eq!(
+        d(&plain, &mcp("github", "get_issue"), Mode::Auto),
+        Decision::Ask
+    );
+    assert_eq!(
+        d(
+            &plain,
+            &Action::Tool {
+                name: "todo".into()
+            },
+            Mode::Ask
+        ),
+        Decision::Allow
+    );
+}

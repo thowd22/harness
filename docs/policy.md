@@ -147,6 +147,15 @@ bash.allow = git push origin feature/*   ; explicit: pushes to feature branches 
 
 Deny rules still win over an explicit allow.
 
+### MCP tools
+
+Calls to MCP server tools are decided as `mcp:<server>/<tool>` by
+`[policy] mcp.<server>.deny`, `.ask` and `.allow` (tool-name wildcards, in
+that order), then by the server's `readOnlyHint` annotations when
+`mcp.<server>.trust_annotations = true`. Any other MCP tool is an outward
+action: it asks in every mode, including `auto`. See
+[mcp.md](mcp.md#permissions).
+
 ## Autonomy modes and approvals
 
 The mode comes from `[general] mode` (`ask`, `auto-edit`, `auto`). The
@@ -224,6 +233,8 @@ provenance markers, after known secrets are replaced with `[REDACTED]`:
 - `trust="untrusted" origin="untrusted project"`: a project you have not
   trusted (or that changed since you trusted it).
 - `<web_content ... trust="untrusted" origin="external">`: web content.
+- `trust="untrusted" origin="mcp server"`: the result of an MCP tool,
+  whatever the project's trust.
 
 The system prompt tells the model that text inside markers is data, not
 instructions. Content cannot close its own marker: marker tags inside it are

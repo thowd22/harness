@@ -3,10 +3,15 @@
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
+mod common;
+
 #[test]
 fn remote_agent_answers_hello_over_stdio() {
     let sock = tempfile::tempdir().unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_harness"))
+    let root = common::hermetic_root();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_harness"));
+    common::hermetic(&mut cmd, root.path());
+    let mut child = cmd
         .args([
             "remote-agent",
             "--stdio",
@@ -43,10 +48,10 @@ fn remote_agent_answers_hello_over_stdio() {
 
 #[test]
 fn remote_agent_requires_stdio() {
-    let out = Command::new(env!("CARGO_BIN_EXE_harness"))
-        .arg("remote-agent")
-        .output()
-        .unwrap();
+    let root = common::hermetic_root();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_harness"));
+    common::hermetic(&mut cmd, root.path());
+    let out = cmd.arg("remote-agent").output().unwrap();
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("--stdio"));
 }

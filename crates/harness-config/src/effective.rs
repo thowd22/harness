@@ -56,6 +56,7 @@ fn ini_section(field: &str, name: Option<&str>) -> String {
     match (field, name) {
         ("providers", Some(n)) => format!("provider.{n}"),
         ("remotes", Some(n)) => format!("remote.{n}"),
+        ("mcp", Some(n)) => format!("mcp.{n}"),
         (f, _) => f.to_owned(),
     }
 }
@@ -93,9 +94,13 @@ fn push_rows(cfg: &Config, out: &mut Vec<Row>, section: &str, value: &Value) {
                 if let Value::Object(inner) = v {
                     for (ik, iv) in inner {
                         let key = format!("{k}.{ik}");
+                        let mut source = source_of(cfg, section, &key);
+                        if source == DEFAULT_SOURCE {
+                            source = source_of(cfg, section, k);
+                        }
                         out.push(Row {
                             section: section.to_owned(),
-                            source: source_of(cfg, section, k),
+                            source,
                             key,
                             value: scalar(iv),
                         });
@@ -142,11 +147,12 @@ pub fn rows(cfg: &Config) -> Vec<Row> {
         "budget",
         "memory",
         "remotes",
+        "mcp",
     ];
     for field in order {
         let Some(v) = top.get(field) else { continue };
         match field {
-            "providers" | "remotes" => {
+            "providers" | "remotes" | "mcp" => {
                 if let Value::Object(m) = v {
                     for (name, inner) in m {
                         push_rows(cfg, &mut out, &ini_section(field, Some(name)), inner);
@@ -308,6 +314,37 @@ mod tests {
 
     fn cfg() -> Config {
         load_str(INI, Some(Path::new("/etc/harness.ini"))).unwrap()
+    }
+
+    #[test]
+    fn mcp_sections_render_with_ini_keys_and_redacted_secrets() {
+        let c = load_str(
+            "[mcp.gh]\ncommand = gh-mcp\nenv.TOKEN = tok-inline-secret\nenv.OTHER_cmd = pass show x\n[mcp.web]\nurl = https://h/mcp\nheader.Authorization_env = WEB_TOKEN\n",
+            Some(Path::new("/etc/harness.ini")),
+        )
+        .unwrap();
+        let rows = rows(&c);
+        let get = |s: &str, k: &str| {
+            rows.iter()
+                .find(|r| r.section == s && r.key == k)
+                .cloned()
+                .unwrap_or_else(|| panic!("{s} {k}: {rows:#?}"))
+        };
+        assert_eq!(get("mcp.gh", "command").value, "gh-mcp");
+        assert_eq!(get("mcp.gh", "command").source, "/etc/harness.ini:2");
+        let tok = get("mcp.gh", "env.TOKEN");
+        assert_eq!(tok.value, "[redacted]");
+        assert_eq!(tok.source, "/etc/harness.ini:3");
+        assert_eq!(get("mcp.gh", "env.OTHER_cmd").value, "pass show x");
+        assert_eq!(get("mcp.web", "url").value, "https://h/mcp");
+        assert_eq!(
+            get("mcp.web", "header.Authorization_env").value,
+            "WEB_TOKEN"
+        );
+        assert_eq!(get("mcp.web", "timeout").source, DEFAULT_SOURCE);
+        let text = render(&c, None);
+        assert!(text.contains("[mcp.gh]"), "{text}");
+        assert!(!text.contains("tok-inline-secret"));
     }
 
     #[test]

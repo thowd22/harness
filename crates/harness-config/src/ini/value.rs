@@ -175,6 +175,12 @@ impl<'a> SectionReader<'a> {
         }
     }
 
+    /// Returns the entry `key` (a key borrowed from this section, for
+    /// sections with user-chosen key names) and marks it read.
+    pub fn entry(&mut self, key: &'a str) -> Option<&'a Entry> {
+        self.take(key)
+    }
+
     /// Reads a string value as written.
     pub fn string(&mut self, key: &'static str) -> Option<String> {
         self.take(key).map(|e| e.value.clone())

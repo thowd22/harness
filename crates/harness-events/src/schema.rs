@@ -657,6 +657,34 @@ pub enum EventKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
     },
+    /// A tool call goes to an MCP server: names the server and the
+    /// server's own tool name for the `tool_call` with the same `call_id`
+    /// (whose `tool` is the name offered to the model). Duration and
+    /// result are on that call's `tool_result`.
+    McpCall {
+        /// Tool call id.
+        call_id: String,
+        /// `[mcp.<server>]` name.
+        server: String,
+        /// The tool's name on the server.
+        tool: String,
+    },
+    /// A server's tool list changed mid-session (after a
+    /// `notifications/tools/list_changed`). The tools offered to the model
+    /// in requests stay the same until the next session; calls and
+    /// `mcp_tools` searches use the new list at once.
+    McpToolsChanged {
+        /// `[mcp.<server>]` name.
+        server: String,
+        /// Selected tools the server added.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        added: Vec<String>,
+        /// Selected tools the server removed.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        removed: Vec<String>,
+        /// Selected tools available now.
+        tools: u32,
+    },
 }
 
 impl EventKind {
@@ -701,6 +729,8 @@ impl EventKind {
             Self::PolicyDecision { .. } => "policy_decision",
             Self::RemoteOp { .. } => "remote_op",
             Self::RemoteConnection { .. } => "remote_connection",
+            Self::McpCall { .. } => "mcp_call",
+            Self::McpToolsChanged { .. } => "mcp_tools_changed",
             Self::Tasks { .. } => "tasks",
         }
     }
@@ -876,6 +906,17 @@ mod tests {
                 host: "gpu".into(),
                 state: "reconnecting".into(),
                 detail: Some("attempt 1/3".into()),
+            },
+            EventKind::McpCall {
+                call_id: "t".into(),
+                server: "github".into(),
+                tool: "create_issue".into(),
+            },
+            EventKind::McpToolsChanged {
+                server: "github".into(),
+                added: vec!["create_pr".into()],
+                removed: Vec::new(),
+                tools: 4,
             },
             EventKind::Tasks {
                 goal: Some("ship".into()),

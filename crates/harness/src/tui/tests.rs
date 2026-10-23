@@ -1484,3 +1484,145 @@ async fn a_slow_summary_never_delays_turns_or_closing_and_cancelled_turns_skip_i
     h.d.finish_core().await;
     assert!(summary_events(&dir).is_empty(), "no summary after a cancel");
 }
+
+#[tokio::test]
+async fn login_mcp_authorizes_from_slash_palette_and_panel_buttons() {
+    // TASK-146.3: `/login mcp` lists remote servers with an authorize
+    // button each (Enter and click), `/login mcp <name>` and the palette
+    // entry start the OAuth flow, and tokens never reach the UI.
+    use harness_mcp::auth::mock::{MockBrowser, MockConfig, MockOAuthServer};
+    use harness_tui::app::{App, AppConfig};
+    use harness_tui::interaction::testing::{buffer_text, click, find_text, key};
+    use harness_tui::panel::PanelButton;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mock = MockOAuthServer::start(MockConfig::default()).await;
+    let env = Env::new();
+    let script = env.script(TEXT);
+    let ini_text = format!(
+        "[general]\ndata_dir = {}\n\n[mcp.docs]\nurl = {}\n",
+        env.root.join("data").display(),
+        mock.mcp_url()
+    );
+    let mut h = Harness::with_ini(&env, &script, false, &ini_text).await;
+    let ini = env.root.join("cfg").join("harness.ini");
+    std::fs::create_dir_all(ini.parent().unwrap()).unwrap();
+    std::fs::write(&ini, &ini_text).unwrap();
+    h.d.login_path = ini.clone();
+    let browser = Arc::new(MockBrowser::new());
+    h.d.browser = browser.clone();
+    let mut all = String::new();
+
+    // The palette has an entry per remote server.
+    let entries = match h
+        .until(|e| matches!(e, AppEvent::Core(CoreEvent::PaletteEntries(_))))
+        .await
+    {
+        AppEvent::Core(CoreEvent::PaletteEntries(v)) => v.clone(),
+        _ => unreachable!(),
+    };
+    let entry = entries
+        .iter()
+        .find(|e| e.id == "mcp.login.docs")
+        .expect("palette entry");
+    assert_eq!(entry.title, "Authorize MCP server: docs");
+
+    // `/login mcp` opens the panel with one button per remote server.
+    h.d.request(UiRequest::Submit("/login mcp".into())).await;
+    let (lines, buttons) = match h
+        .until(|e| matches!(e, AppEvent::Core(CoreEvent::Panel { title, .. }) if title == "MCP authorization"))
+        .await
+    {
+        AppEvent::Core(CoreEvent::Panel { lines, buttons, .. }) => (lines.clone(), buttons.clone()),
+        _ => unreachable!(),
+    };
+    assert_eq!(
+        buttons,
+        vec![PanelButton::new("mcp.login:docs", "authorize docs")]
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("docs") && l.contains("auth = none")),
+        "{lines:?}"
+    );
+
+    // Keyboard: Enter on the focused button asks the core to authorize.
+    let (tx, mut requests) = mpsc::unbounded_channel();
+    let mut app = App::new(AppConfig::default(), tx);
+    let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    app.handle(AppEvent::Core(CoreEvent::Panel {
+        title: "MCP authorization".into(),
+        lines,
+        buttons,
+    }));
+    term.draw(|f| app.render(f)).unwrap();
+    assert!(buffer_text(term.backend().buffer()).contains("[ authorize docs ]"));
+    app.handle(AppEvent::Terminal(key("enter")));
+    let req = requests.try_recv().expect("Enter activates the button");
+    assert_eq!(req, UiRequest::PanelAction("mcp.login:docs".into()));
+    h.d.request(req).await;
+    h.until(|e| matches!(e, AppEvent::Core(CoreEvent::Notify { title, .. }) if title == "authorize MCP server docs"))
+        .await;
+    match h
+        .until(|e| matches!(e, AppEvent::Core(CoreEvent::Notify { title, .. }) if title.contains("docs authorized") || title.contains("failed")))
+        .await
+    {
+        AppEvent::Core(CoreEvent::Notify { level, body, .. }) => {
+            assert_eq!(*level, Level::Success, "{body:?}");
+        }
+        _ => unreachable!(),
+    }
+    h.until(|e| matches!(e, AppEvent::Core(CoreEvent::PanelText { lines, .. }) if lines.iter().any(|l| l.contains("authorized") && !l.contains("not authorized"))))
+        .await;
+    assert!(
+        std::fs::read_to_string(&ini)
+            .unwrap()
+            .contains("auth = oauth")
+    );
+    assert_eq!(browser.opened().len(), 1);
+
+    // Mouse: clicking the button does the same.
+    term.draw(|f| app.render(f)).unwrap();
+    let (x, y) = find_text(term.backend().buffer(), "[ authorize docs ]").unwrap();
+    app.handle(AppEvent::Terminal(click(x + 2, y)));
+    let req = requests.try_recv().expect("a click activates the button");
+    assert_eq!(req, UiRequest::PanelAction("mcp.login:docs".into()));
+    all.push_str(&format!("{:?}", h.seen));
+    h.seen.clear();
+    h.d.request(req).await;
+    h.until(|e| matches!(e, AppEvent::Core(CoreEvent::Notify { title, .. }) if title == "MCP server docs authorized"))
+        .await;
+
+    // The palette entry and `/login mcp docs` run the flow too.
+    all.push_str(&format!("{:?}", h.seen));
+    h.seen.clear();
+    h.d.request(UiRequest::Run(Invocation {
+        id: "mcp.login.docs".into(),
+        args: Vec::new(),
+    }))
+    .await;
+    h.until(|e| matches!(e, AppEvent::Core(CoreEvent::Notify { title, .. }) if title == "MCP server docs authorized"))
+        .await;
+    all.push_str(&format!("{:?}", h.seen));
+    h.seen.clear();
+    h.d.request(UiRequest::Submit("/login mcp docs".into()))
+        .await;
+    h.until(|e| matches!(e, AppEvent::Core(CoreEvent::Notify { title, .. }) if title == "MCP server docs authorized"))
+        .await;
+    assert_eq!(browser.opened().len(), 4);
+
+    // An unknown server is an error toast; tokens never reach the UI.
+    h.d.request(UiRequest::Submit("/login mcp nope".into()))
+        .await;
+    h.until(|e| matches!(e, AppEvent::Core(CoreEvent::Notify { body: Some(b), .. }) if b.contains("`nope` is not a remote MCP server")))
+        .await;
+    let cfg = harness_config::ini::load_file(&ini).unwrap();
+    all.push_str(&format!("{:?}", h.seen));
+    for t in crate::wiring::mcp_token_store(&cfg).secrets() {
+        assert!(!all.contains(&t), "a token reached the UI");
+    }
+}
+
+mod mcp;

@@ -66,6 +66,17 @@ allows them. `--in-process` runs the agent loop in-process with the fake
 provider and the built-in defaults only, which needs no credentials (CI).
 Eval runs never read or write memory.
 
+Attempts never touch your data directory. Each binary attempt gets a
+fresh temporary data directory (`HARNESS_DATA_DIR`) and cache directory
+(`XDG_CACHE_HOME`), removed when the attempt ends, so eval sessions, runs,
+logs and memory never show up in your sessions list or `/runs`. Your
+`harness.ini` (providers and API keys) is still read. To run attempts
+against the configured data directory instead, for example because a
+provider login (`harness login openai --chatgpt`) is stored there, pass
+`--shared-data-dir`; the attempts' sessions and runs are then kept there.
+Library users get the same switch with
+`ProcessExecutor::with_shared_data_dir(true)`.
+
 ## What is recorded
 
 Per attempt, folded from the run's events: pass/fail and every check result,

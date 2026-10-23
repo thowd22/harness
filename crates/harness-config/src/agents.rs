@@ -8,7 +8,7 @@
 //! model: sonnet                 # alias or provider/model
 //! effort: medium                # low | medium | high
 //! prompt: coder                 # prompt name, or inline `prompt_text:`
-//! tools: [read, write, edit, bash, todo]
+//! tools: [read, write, edit, bash, todo, mcp:github/create_issue, mcp:db/*]
 //! subagents: [researcher]       # enables spawn_agent restricted to these
 //! memory: read-write            # off | read | read-write
 //! max_turns: 60
@@ -35,6 +35,7 @@ use serde::{Deserialize, Serialize};
 use crate::discovery::{Artifact, Catalog, Entry, Kind, Scope, SourceFile};
 use crate::ini::Config;
 use crate::ini::config::PROVIDER_IDS;
+use crate::mcp_tools::{MCP_TOOL_PREFIX, McpSelector};
 use crate::yaml::{YamlError, de};
 
 /// Tools an agent may list in `tools:`.
@@ -263,6 +264,11 @@ pub struct Agent {
     pub prompt: PromptRef,
     /// Tools in declared order (subset of [`TOOL_NAMES`]).
     pub tools: Vec<String>,
+    /// MCP tools selected in `tools:` (`mcp:<server>/<tool>` entries), in
+    /// declared order. Nothing from an MCP server is offered unless an
+    /// entry here selects it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub mcp_tools: Vec<McpSelector>,
     /// Agents this one may spawn.
     pub subagents: Vec<String>,
     /// Memory access.
@@ -375,7 +381,11 @@ impl Agent {
                 "effort": { "enum": ["low", "medium", "high"] },
                 "prompt": { "type": "string", "description": "Prompt name from prompts/." },
                 "prompt_text": { "type": "string", "description": "Inline system prompt (not templated)." },
-                "tools": { "type": "array", "uniqueItems": true, "items": { "enum": TOOL_NAMES } },
+                "tools": { "type": "array", "uniqueItems": true, "items": { "anyOf": [
+                    { "enum": TOOL_NAMES },
+                    { "type": "string", "pattern": "^mcp:[A-Za-z0-9_-]+/[A-Za-z0-9_.*-]+$",
+                      "description": "MCP tools: mcp:<server>/<tool>, `*` wildcards allowed; <server> is a [mcp.<server>] in harness.ini." }
+                ] } },
                 "subagents": { "type": "array", "uniqueItems": true, "items": { "type": "string" },
                                "description": "Enables spawn_agent restricted to these agents." },
                 "memory": { "enum": ["off", "read", "read-write"] },
@@ -457,14 +467,27 @@ impl Artifact for Agent {
             }
         };
         let mut seen = BTreeSet::new();
+        let mut tools = Vec::new();
+        let mut mcp_tools = Vec::new();
         for t in &d.tools {
+            if t.starts_with(MCP_TOOL_PREFIX) {
+                let sel = McpSelector::parse(t).map_err(|e| err(&["tools"], e))?;
+                if !seen.insert(t) {
+                    return Err(err(&["tools"], format!("tool `{t}` is listed twice")));
+                }
+                mcp_tools.push(sel);
+                continue;
+            }
             let hint = match t.as_str() {
                 SPAWN_AGENT_TOOL => " (spawn_agent is enabled by listing `subagents:`)".to_owned(),
                 MEMORY_TOOL => {
                     " (the memory tool is enabled by `memory: read` or `memory: read-write`)"
                         .to_owned()
                 }
-                _ => format!("; known tools: {}", TOOL_NAMES.join(", ")),
+                _ => format!(
+                    "; known tools: {}, or mcp:<server>/<tool> for MCP tools",
+                    TOOL_NAMES.join(", ")
+                ),
             };
             if !TOOL_NAMES.contains(&t.as_str()) {
                 return Err(err(&["tools"], format!("unknown tool `{t}`{hint}")));
@@ -472,6 +495,7 @@ impl Artifact for Agent {
             if !seen.insert(t) {
                 return Err(err(&["tools"], format!("tool `{t}` is listed twice")));
             }
+            tools.push(t.clone());
         }
         let mode = match d.mode.as_deref() {
             None => None,
@@ -594,7 +618,8 @@ impl Artifact for Agent {
             model: d.model,
             effort: d.effort,
             prompt,
-            tools: d.tools,
+            tools,
+            mcp_tools,
             subagents: d.subagents,
             memory: d.memory,
             mode,
@@ -675,6 +700,8 @@ pub struct ValidationContext {
     pub remotes: BTreeMap<String, Vec<String>>,
     /// `[budget] run_usd`: no agent budget may exceed it.
     pub max_budget_usd: Option<f64>,
+    /// `[mcp.<name>]` servers: the only servers `mcp:` tools may name.
+    pub mcp_servers: BTreeSet<String>,
 }
 
 impl ValidationContext {
@@ -688,6 +715,7 @@ impl ValidationContext {
                 .map(|(k, r)| (k.clone(), r.labels.clone()))
                 .collect(),
             max_budget_usd: config.budget.run_usd,
+            mcp_servers: config.mcp.keys().cloned().collect(),
         }
     }
 }
@@ -722,6 +750,17 @@ pub fn validate(
             &["prompt"],
             format!("unknown prompt `{p}`; no prompts/*.yaml has `name: {p}`"),
         );
+    }
+    for sel in &a.mcp_tools {
+        if !ctx.mcp_servers.contains(&sel.server) {
+            push(
+                &["tools"],
+                format!(
+                    "`{sel}` names MCP server `{}`, which harness.ini does not define; add a [mcp.{}] section (only harness.ini can grant MCP servers)",
+                    sel.server, sel.server
+                ),
+            );
+        }
     }
     for s in &a.subagents {
         if catalog.agents.get(s).is_none() {
@@ -804,6 +843,15 @@ pub fn tighten_violations(agent: &Agent, base: &Agent) -> Vec<(&'static str, Str
         .collect();
     if !extra.is_empty() {
         v.push(("tools", format!("adds tools {extra:?}")));
+    }
+    let extra: Vec<String> = agent
+        .mcp_tools
+        .iter()
+        .filter(|t| !base.mcp_tools.contains(t))
+        .map(ToString::to_string)
+        .collect();
+    if !extra.is_empty() {
+        v.push(("tools", format!("adds MCP tools {extra:?}")));
     }
     let extra: Vec<&String> = agent
         .subagents

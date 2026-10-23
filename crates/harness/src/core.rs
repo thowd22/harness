@@ -162,6 +162,8 @@ pub struct Core {
     /// The session's shared spend meter (the budget hook charges it too).
     meter: BudgetMeter,
     redactor: Arc<Redactor>,
+    /// MCP servers and the tools agents select from them.
+    mcp: crate::mcp::McpWiring,
 }
 
 /// The background summary of the last turn ([`Core::spawn_summary`]).
@@ -393,16 +395,20 @@ impl Core {
             )));
         }
 
+        // MCP servers (started on first use) and the tools agents select.
+        let mcp = crate::mcp::wire(&cfg, &secrets, &recorder);
+
         // Policy and approvals.
         let engine = PolicyEngine::new(&policy_config(&cfg, memory.as_ref()), &cwd)
             .map_err(|e| format!("[policy]: {e}"))?
+            .with_mcp(mcp.rules.clone())
             .with_overlay(
                 format!("agent {}", agent.name),
                 &PolicyOverlay::from(&agent.policy),
             )
             .map_err(|e| format!("agent {} policy: {e}", agent.name))?;
         for p in &opts.allow {
-            engine.grants().allow_command(p);
+            crate::mcp::grant(engine.grants(), p);
         }
         let broker = ApprovalBroker::new(engine.grants().clone(), opts.approvals.clone(), &cwd)
             .with_events(Arc::new(RecorderApprovalEvents(recorder.clone())));
@@ -421,6 +427,13 @@ impl Core {
                 .with_recorder(recorder.clone()),
         );
 
+        // Tool results are labeled the same way for the agent and its
+        // children (subagents, workflow agent steps).
+        let project_trust = match trust.status(&cwd) {
+            Ok(TrustStatus::Trusted { .. }) => ProjectTrust::Trusted,
+            _ => ProjectTrust::Untrusted,
+        };
+        let labeler = Labeler::new(redactor.clone(), project_trust);
         // Subagents.
         let builder = CatalogChildBuilder::new(
             catalog.clone(),
@@ -439,7 +452,12 @@ impl Core {
             SubagentLimits::from_config(&cfg),
         )
         .with_scheduler(scheduler.clone())
-        .with_board(board.clone());
+        .with_board(board.clone())
+        .with_extra_tools(Arc::new(mcp.toolbox.clone()))
+        .with_labeler(labeler.clone());
+        // The agent's MCP tools are read now and fixed for the session.
+        harness_agent::subagents::ExtraTools::prepare(&mcp.toolbox, &agent, &[]).await;
+        warnings.extend(mcp.toolbox.take_warnings());
         let missing: Vec<String> = {
             let place = AgentPlace {
                 node: NodeId::random(),
@@ -493,10 +511,6 @@ impl Core {
             max_usd: opts.budget_usd.or(agent.budget.usd).or(cfg.budget.run_usd),
         };
         config.max_fix_attempts = cfg.verify.max_fix_attempts;
-        let project_trust = match trust.status(&cwd) {
-            Ok(TrustStatus::Trusted { .. }) => ProjectTrust::Trusted,
-            _ => ProjectTrust::Untrusted,
-        };
         let (context, hooks, meter) = hooks(
             &cfg,
             &data,
@@ -548,7 +562,7 @@ impl Core {
             agent,
             model,
             recorder,
-            labeler: Labeler::new(redactor.clone(), project_trust),
+            labeler,
             conversation,
             warnings,
             scheduler,
@@ -569,7 +583,19 @@ impl Core {
             summary_task: None,
             meter,
             redactor: redactor.clone(),
+            mcp,
         })
+    }
+
+    /// The session's MCP servers (the TUI's `/mcp` panel, prompts and
+    /// resources).
+    pub(crate) fn mcp_servers(&self) -> Arc<harness_mcp::Servers> {
+        self.mcp.toolbox.servers().clone()
+    }
+
+    /// Labels untrusted content for the model (attached MCP resources).
+    pub(crate) fn labeler(&self) -> &Labeler {
+        &self.labeler
     }
 
     /// Records `run_started`. Call it once, after subscribing to the
@@ -697,6 +723,8 @@ impl Core {
     /// Runs one user turn on a new node and saves the session.
     pub async fn turn(&mut self, prompt: String, cancel: &CancellationToken) -> LoopOutcome {
         self.settle_summary(None).await;
+        // Pick up MCP tool-list changes announced since the last turn.
+        self.mcp.toolbox.refresh().await;
         let node = NodeId::random();
         self.checkpoint(&node).await;
         *self.memory_node.lock().unwrap_or_else(|e| e.into_inner()) = Some(node.clone());
@@ -842,6 +870,7 @@ impl Core {
     /// Records `run_finished` (status from the last turn) and closes the log.
     pub async fn finish(mut self) -> Result<(), String> {
         self.settle_summary(None).await;
+        self.mcp.shutdown().await;
         let (status, error) = match &self.last {
             Some(o) => (run_status(o), finished_error(o)),
             None => (RunStatus::Cancelled, None),

@@ -26,7 +26,7 @@ use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 
 use crate::cards::{arg_summary, payload_json, payload_text};
-use crate::chat::text::{sanitize, truncate, wrap_line};
+use crate::chat::text::{sanitize, truncate, truncate_line, wrap_line};
 use crate::theme::{Theme, Token};
 
 /// Bytes of stream text kept per node; older segments are dropped.
@@ -49,7 +49,7 @@ pub enum Segment {
     Tool {
         /// Call id.
         call_id: String,
-        /// Tool name.
+        /// Tool name (`mcp <server> › <tool>` for MCP calls).
         tool: String,
         /// Argument summary.
         summary: String,
@@ -57,6 +57,8 @@ pub enum Segment {
         output: String,
         /// `Some(ok)` once finished.
         ok: Option<bool>,
+        /// Wall time once finished.
+        duration_ms: Option<u64>,
     },
     /// A harness note, e.g. hidden reasoning.
     Note(String),
@@ -263,21 +265,42 @@ impl LiveStreams {
                         summary,
                         output: String::new(),
                         ok: None,
+                        duration_ms: None,
                     });
                 true
+            }
+            EventKind::McpCall {
+                call_id,
+                server,
+                tool: name,
+            } => {
+                let s = self.nodes.entry(node.clone()).or_default();
+                if let Some(Segment::Tool { tool, .. }) = s.tool_mut(call_id) {
+                    *tool = format!("mcp {server} › {name}");
+                    true
+                } else {
+                    false
+                }
             }
             EventKind::ToolResult {
                 call_id,
                 ok,
                 output,
-                ..
+                duration_ms,
             } => {
                 let s = self.nodes.entry(node.clone()).or_default();
                 let text = payload_text(output);
-                if let Some(Segment::Tool { output, ok: o, .. }) = s.tool_mut(call_id) {
+                if let Some(Segment::Tool {
+                    output,
+                    ok: o,
+                    duration_ms: d,
+                    ..
+                }) = s.tool_mut(call_id)
+                {
                     let old = output.len();
                     *output = text;
                     *o = Some(*ok);
+                    *d = Some(*duration_ms);
                     let new = output.len();
                     s.bytes = s.bytes.saturating_sub(old) + new;
                     s.trim();
@@ -436,6 +459,7 @@ impl LivePane<'_> {
                     summary,
                     output,
                     ok,
+                    duration_ms,
                     ..
                 } => {
                     let (icon, token) = match ok {
@@ -443,14 +467,21 @@ impl LivePane<'_> {
                         Some(true) => ('✔', Token::Ok),
                         Some(false) => ('✗', Token::Error),
                     };
-                    out.push(Line::from(vec![
+                    let mut spans = vec![
                         Span::styled(format!("{icon} "), t.fg(token)),
                         Span::styled(tool.clone(), t.fg(Token::Accent)),
                         Span::styled(
                             format!(" {}", truncate(&sanitize(summary), width.saturating_sub(4))),
                             t.fg(Token::Muted),
                         ),
-                    ]));
+                    ];
+                    if let Some(ms) = duration_ms.filter(|_| tool.starts_with("mcp ")) {
+                        spans.push(Span::styled(
+                            format!(" · {}", crate::chat::text::fmt_ms(ms)),
+                            t.fg(Token::Number),
+                        ));
+                    }
+                    out.push(truncate_line(Line::from(spans), width));
                     let lines: Vec<&str> = output.lines().collect();
                     for l in &lines[lines.len().saturating_sub(self.tool_lines)..] {
                         out.push(Line::from(Span::styled(

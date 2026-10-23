@@ -14,5 +14,8 @@ what the current build accepts.
 7. [Remote hosts](remotes.md)
 8. [The command palette](palette.md)
 
+MCP servers (stdio and remote, OAuth, tools, `/mcp`) are covered in
+[docs/mcp.md](../mcp.md).
+
 Reference material: the harness.ini reference and YAML spec in
 `backlog/docs/` (doc-2, doc-3), and the area docs in `docs/`.

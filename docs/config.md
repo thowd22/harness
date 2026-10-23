@@ -20,7 +20,7 @@ key = value            ; inline comment (a `;` after whitespace)
 # also a full-line comment
 ```
 
-- Section names may contain dots: `[provider.anthropic]`, `[remote.gpu-box]`.
+- Section names may contain dots: `[provider.anthropic]`, `[remote.gpu-box]`, `[mcp.github]`.
 - Keys may contain dots and model-ref characters: `bash.allow`,
   `anthropic/claude-sonnet-5-5`.
 - `#` inside a value is not a comment, so `accent = #bd93f9` works.
@@ -77,3 +77,11 @@ Rules:
 - **Not inherited.** Environment variables named by `api_key_env` are listed by
   `Config::secret_env_vars()` so tools can remove them from subprocess
   environments.
+
+## MCP servers
+
+`[mcp.<name>]` sections add MCP servers: a local server with `command`,
+`args`, `cwd` and `env.*`, or a remote one with `url` and `header.*`, plus
+`enabled`, `timeout`, `startup` and `startup_timeout`. `env.*` and
+`header.*` values are credentials, resolved like `api_key`
+(`env.TOKEN`, `env.TOKEN_cmd`, `env.TOKEN_env`). See [mcp.md](mcp.md).

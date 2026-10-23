@@ -51,6 +51,22 @@ use tokio_util::sync::CancellationToken;
 
 use crate::robustness::{self, Repair, ToolErrorMessage};
 
+/// The MCP server tool behind a call (see [`AgentTool::mcp_target`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpTarget {
+    /// `[mcp.<server>]` name.
+    pub server: String,
+    /// The tool's name on the server.
+    pub tool: String,
+}
+
+impl McpTarget {
+    /// The name the policy engine decides: `mcp:<server>/<tool>`.
+    pub fn action_name(&self) -> String {
+        harness_policy::mcp::action_name(&self.server, &self.tool)
+    }
+}
+
 /// A tool the agent can offer to the model.
 #[async_trait]
 pub trait AgentTool: Send + Sync {
@@ -65,6 +81,15 @@ pub trait AgentTool: Send + Sync {
     fn read_only(&self) -> bool;
     /// Runs the tool.
     async fn call(&self, ctx: &ToolContext, args: Value) -> Result<ToolOutput, ToolError>;
+
+    /// For tools that forward to an MCP server: the server tool a call
+    /// with `args` reaches. The policy gate then decides
+    /// `mcp:<server>/<tool>` instead of the tool's own name, and the agent
+    /// loop records an `mcp_call` event. `None` (the default) for
+    /// everything else.
+    fn mcp_target(&self, _args: &Value) -> Option<McpTarget> {
+        None
+    }
 
     /// The spec sent to the provider.
     fn spec(&self) -> ToolSpec {
@@ -540,6 +565,12 @@ impl PolicyGate {
 fn preview(tool: &str, args: &Value) -> Option<String> {
     let text = match tool {
         "bash" => args.get("command")?.as_str()?.to_owned(),
+        // The MCP search-and-call tool: show the arguments sent to the server.
+        t if t.starts_with(harness_policy::mcp::MCP_ACTION_PREFIX)
+            && args.get("call").is_some() =>
+        {
+            serde_json::to_string_pretty(args.get("arguments").unwrap_or(&Value::Null)).ok()?
+        }
         _ => serde_json::to_string_pretty(args).ok()?,
     };
     Some(robustness::truncate_chars(&text, 4000))
@@ -752,7 +783,12 @@ impl Dispatcher {
             .iter()
             .map(|&i| GateCall {
                 call_id: calls[i].id.clone(),
-                tool: calls[i].tool.clone(),
+                // MCP calls are decided as `mcp:<server>/<tool>`.
+                tool: self
+                    .tools
+                    .get(&calls[i].tool)
+                    .and_then(|t| t.mcp_target(&calls[i].args))
+                    .map_or_else(|| calls[i].tool.clone(), |m| m.action_name()),
                 args: calls[i].args.clone(),
             })
             .collect();

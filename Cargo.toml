@@ -11,6 +11,7 @@ members = [
     "crates/harness-hygiene",
     "crates/harness-memory",
     "crates/harness-remote",
+    "crates/harness-mcp",
     "crates/harness-tui",
     "crates/harness-eval",
     "crates/harness",
@@ -47,6 +48,7 @@ harness-workflow = { path = "crates/harness-workflow" }
 harness-hygiene = { path = "crates/harness-hygiene" }
 harness-memory = { path = "crates/harness-memory" }
 harness-remote = { path = "crates/harness-remote" }
+harness-mcp = { path = "crates/harness-mcp" }
 harness-tui = { path = "crates/harness-tui" }
 harness-eval = { path = "crates/harness-eval" }
 

@@ -97,6 +97,7 @@ timestamp. The card background is tinted by its state.
 | `edit` | path, `+3 −1` | unified diff with line numbers, `+`/`-` colours and syntax colours |
 | `bash` | `$ command`, `exit 101` / `timeout` / `killed` / `signal 9` | live output while running; `⋯ 212 lines truncated · full output saved as spill:…` when output was cut |
 | `todo`, `memory`, `spawn_agent` | one compact line (task counts, memory change, subagent and task) | the details when expanded |
+| MCP tools | `mcp <server> › <tool>` and the arguments sent to the server (also for calls through `mcp_tools`) | the server's output (`spill:…` pointer when it was cut) |
 
 Bodies longer than `[ui] tool_preview_lines` (default 8) are collapsed with
 `… N more lines · Enter to expand`. Click a card, or focus it with
@@ -104,6 +105,11 @@ Shift+Tab / arrows and press Enter, to expand or collapse it; Esc returns to
 the input. A failed call always shows the complete error message the model
 received. Calls made in parallel in one turn are grouped under
 `⧉ N parallel calls · 2 ok · 1 running`.
+
+The agent map's live pane (Space or a click on a node) lists a node's MCP
+calls the same way, with ✔/✗ and the duration, and node detail shows the
+full cards. A server that changes its tool list mid-session adds a notice
+to the chat (`MCP server github changed its tools ...`).
 
 ## Activity line
 
@@ -231,8 +237,10 @@ The footer always shows, in theme colours: working directory and git
 branch, model and autonomy mode, a context usage bar (green, orange above
 60 %, red above 85 %), session tokens with the cache hit rate, session cost
 (`$?` until known), the verify state (spinner, `✔` or `✗`), the number of
-running agents and the remote hosts in use. It updates from run events as
-they arrive. On narrow terminals the least important parts (remotes, path,
+running agents and the remote hosts in use. When an MCP server has
+failed, a red `⚠ mcp <name>` (`⚠ mcp <n> failed` for several) shows after
+the model; clicking it, or Shift+Tab to it and Enter, opens `/mcp`. It
+updates from run events as they arrive. On narrow terminals the least important parts (remotes, path,
 tokens, verify, agents) are dropped first.
 
 An open session with nothing in flight, including a fresh one waiting for

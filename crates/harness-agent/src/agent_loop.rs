@@ -1148,6 +1148,21 @@ impl AgentLoop {
                 args: Payload::Json(call.args.clone()),
             },
         );
+        if let Some(target) = self
+            .dispatcher
+            .tools()
+            .get(&call.tool)
+            .and_then(|t| t.mcp_target(&call.args))
+        {
+            self.emit(
+                node,
+                EventKind::McpCall {
+                    call_id: call.id.clone(),
+                    server: target.server,
+                    tool: target.tool,
+                },
+            );
+        }
         if !call.repairs.is_empty() {
             let list: Vec<String> = call.repairs.iter().map(ToString::to_string).collect();
             self.emit(

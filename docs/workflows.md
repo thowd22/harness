@@ -64,13 +64,15 @@ invalid one gets one correction turn. A missing output fails the step.
 | `budget` | `{usd, tokens, warn_at, on_exceed: stop\|warn}` for this step |
 | `outputs` | declared output names (`letters, digits, _`) |
 | `artifacts` | declared artifact names; on an approval step, the upstream artifacts to review |
+| `tools` | agent steps only: MCP tools added to the agent's own for this step, as `mcp:<server>/<tool>` (only `mcp:` entries; see [mcp.md](mcp.md#tools-for-agents)) |
 
 Load errors are reported as `file:line:col` and include unknown keys, keys
 that do not fit the step type, invalid types, duplicate ids, unknown
 `needs`, dependency cycles (with the cycle path, such as
 `a -> c -> b -> a`), a `retry_step` that is not upstream, `tasks` that name
 unknown steps, unresolved template references, and, when checked against
-the catalog and harness.ini, unknown agents, hosts and nested workflows.
+the catalog and harness.ini, unknown agents, hosts, nested workflows and
+MCP servers.
 
 ## Templates
 

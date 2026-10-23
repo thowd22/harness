@@ -20,11 +20,15 @@ use harness_providers::chatgpt::{Account, Browser, ChatGptError, Endpoints, Sign
 use harness_providers::login::{KeyCheck, VERIFY_TIMEOUT};
 use harness_providers::provider::ProviderError;
 
+pub mod mcp;
+
 /// Usage of `harness login` and `harness logout`.
 pub const USAGE: &str = "\
 usage: harness login <anthropic|openai|openrouter> [--api-key-cmd CMD | --api-key-env VAR]
        harness login openai --chatgpt
        harness logout <anthropic|openai|openrouter> [--yes]
+       harness login mcp <name>       (OAuth for a remote MCP server; see login mcp --help)
+       harness logout mcp <name> [--yes]
 
 login asks for an API key with masked input (or reads one line from stdin
 when it is not a terminal), checks it with one cheap authenticated request,
@@ -467,6 +471,13 @@ pub async fn login_main(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> i32 {
+    if args.first().is_some_and(|a| a == "mcp") {
+        if args.iter().any(|a| a == "--help" || a == "-h") {
+            let _ = writeln!(out, "{}", mcp::USAGE);
+            return 0;
+        }
+        return mcp::login_main(&args[1..], path, verifier.browser(), out, err).await;
+    }
     if args.iter().any(|a| a == "--help" || a == "-h") {
         let _ = writeln!(out, "{USAGE}");
         return 0;
@@ -582,6 +593,13 @@ pub fn logout_main(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> i32 {
+    if args.first().is_some_and(|a| a == "mcp") {
+        if args.iter().any(|a| a == "--help" || a == "-h") {
+            let _ = writeln!(out, "{}", mcp::USAGE);
+            return 0;
+        }
+        return mcp::logout_main(&args[1..], path, prompt, out, err);
+    }
     if args.iter().any(|a| a == "--help" || a == "-h") {
         let _ = writeln!(out, "{USAGE}");
         return 0;

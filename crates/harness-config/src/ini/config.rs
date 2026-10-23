@@ -305,6 +305,10 @@ pub struct Policy {
     pub paths_protected: Vec<String>,
     /// `outward.ask`.
     pub outward_ask: Vec<String>,
+    /// `mcp.<server>.allow`, `mcp.<server>.ask`, `mcp.<server>.deny` and
+    /// `mcp.<server>.trust_annotations`, by server.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub mcp: crate::mcp_tools::McpPolicy,
 }
 
 /// `[sandbox]`.
@@ -336,6 +340,18 @@ pub struct Context {
     pub keep_recent_turns: u32,
     /// Elide tool results larger than this many tokens. Default 4000.
     pub elide_tool_results_over: u64,
+    /// Token budget for the schemas of an agent's selected MCP tools; over
+    /// it they are offered through the `mcp_tools` search-and-call tool
+    /// instead. Default [`DEFAULT_MCP_SCHEMA_BUDGET`].
+    #[serde(skip_serializing_if = "is_default_mcp_budget")]
+    pub mcp_schema_budget: u64,
+}
+
+/// Default `[context] mcp_schema_budget` (tokens).
+pub const DEFAULT_MCP_SCHEMA_BUDGET: u64 = 2000;
+
+fn is_default_mcp_budget(v: &u64) -> bool {
+    *v == DEFAULT_MCP_SCHEMA_BUDGET
 }
 
 /// `[budget]`: spend caps in USD; `None` means no cap.
@@ -434,6 +450,11 @@ pub struct Config {
     pub memory: Memory,
     /// `[remote.<name>]`, keyed by name.
     pub remotes: BTreeMap<String, Remote>,
+    /// `[mcp.<name>]`: MCP servers, keyed by name. Omitted from the
+    /// serialized form when empty, so config hashes without MCP servers
+    /// are unchanged.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub mcp: BTreeMap<String, super::mcp::McpServer>,
     /// Where each set value came from, keyed `section.key` (for
     /// `harness config show`).
     #[serde(skip)]
@@ -496,6 +517,7 @@ impl Config {
                 compact_at: 0.8,
                 keep_recent_turns: 6,
                 elide_tool_results_over: 4000,
+                mcp_schema_budget: DEFAULT_MCP_SCHEMA_BUDGET,
             },
             budget: Budget {
                 session_usd: None,
@@ -512,6 +534,7 @@ impl Config {
                 headless_access: false,
             },
             remotes: BTreeMap::new(),
+            mcp: BTreeMap::new(),
             origins: BTreeMap::new(),
         }
     }
@@ -558,6 +581,20 @@ impl Config {
                         if let Some(rm) = read_remote(&mut r) {
                             cfg.remotes.insert(remote.to_owned(), rm);
                         }
+                    } else if let Some(server) = name.strip_prefix("mcp.") {
+                        if !super::mcp::valid_server_name(server) {
+                            drop(r);
+                            errors.push(IniError::Syntax {
+                                location: section.location.clone(),
+                                message: format!(
+                                    "invalid MCP server name `{server}` in [{name}] (use letters, digits, `_` and `-`)"
+                                ),
+                            });
+                            continue;
+                        }
+                        if let Some(m) = super::mcp::read_mcp(&mut r) {
+                            cfg.mcp.insert(server.to_owned(), m);
+                        }
                     } else {
                         drop(r);
                         errors.push(unknown_section(section));
@@ -583,15 +620,22 @@ impl Config {
             .providers
             .values()
             .filter_map(|p| p.api_key_env.clone())
+            .chain(
+                self.mcp
+                    .values()
+                    .flat_map(|m| m.secret_env_vars().map(str::to_owned)),
+            )
             .collect();
         v.sort();
         v.dedup();
         v
     }
 
-    /// True when any provider has an inline `api_key`.
+    /// True when any provider has an inline `api_key`, or any MCP server
+    /// an inline `env.*` / `header.*` value.
     pub fn has_inline_secrets(&self) -> bool {
         self.providers.values().any(|p| p.api_key.is_some())
+            || self.mcp.values().any(|m| m.has_inline_secrets())
     }
 }
 
@@ -605,7 +649,7 @@ fn unknown_section(section: &Section) -> IniError {
             FIXED_SECTIONS
                 .iter()
                 .copied()
-                .chain(["provider.<id>", "remote.<name>"]),
+                .chain(["provider.<id>", "remote.<name>", "mcp.<name>"]),
         )
     };
     IniError::UnknownSection {
@@ -794,6 +838,56 @@ fn read_policy(r: &mut SectionReader<'_>, p: &mut Policy) {
     set!(p.bash_deny, r.list("bash.deny"));
     set!(p.paths_protected, r.list("paths.protected"));
     set!(p.outward_ask, r.list("outward.ask"));
+    read_mcp_policy(r, &mut p.mcp);
+}
+
+/// `[policy] mcp.<server>.allow|ask|deny|trust_annotations`.
+fn read_mcp_policy<'a>(r: &mut SectionReader<'a>, rules: &mut crate::mcp_tools::McpPolicy) {
+    let section = r.section();
+    for e in &section.entries {
+        let Some(rest) = e.key.strip_prefix("mcp.") else {
+            continue;
+        };
+        let entry = r.entry(&e.key).expect("entry exists");
+        let Some((server, what)) = rest.rsplit_once('.') else {
+            r.invalid(
+                entry,
+                "expected `mcp.<server>.allow`, `.ask`, `.deny` or `.trust_annotations`",
+            );
+            continue;
+        };
+        if !super::mcp::valid_server_name(server) {
+            r.invalid(
+                entry,
+                format!("`{server}` is not an MCP server name (letters, digits, `_` and `-`)"),
+            );
+            continue;
+        }
+        let slot = rules.entry(server.to_owned()).or_default();
+        let list = match what {
+            "allow" => &mut slot.allow,
+            "ask" => &mut slot.ask,
+            "deny" => &mut slot.deny,
+            "trust_annotations" => {
+                match super::value::parse_bool(&entry.value) {
+                    Ok(b) => slot.trust_annotations = b,
+                    Err(m) => r.invalid(entry, m),
+                }
+                continue;
+            }
+            other => {
+                r.invalid(
+                    entry,
+                    format!(
+                        "unknown MCP rule `{other}`; use allow, ask, deny or trust_annotations"
+                    ),
+                );
+                continue;
+            }
+        };
+        list.extend(parse_list(&entry.value));
+    }
+    rules.retain(|_, v| *v != crate::mcp_tools::McpToolRules::default());
 }
 
 fn read_sandbox(r: &mut SectionReader<'_>, s: &mut Sandbox) {
@@ -820,6 +914,7 @@ fn read_context(r: &mut SectionReader<'_>, c: &mut Context) {
     }
     set!(c.keep_recent_turns, r.uint("keep_recent_turns"));
     set!(c.elide_tool_results_over, r.uint("elide_tool_results_over"));
+    set!(c.mcp_schema_budget, r.uint("mcp_schema_budget"));
 }
 
 fn read_budget(r: &mut SectionReader<'_>, b: &mut Budget) {

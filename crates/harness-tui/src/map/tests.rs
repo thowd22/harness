@@ -410,3 +410,49 @@ fn a_long_title_is_cut_before_the_header_metrics_at_80_columns() {
         assert!(header.contains(needle), "{needle} in {header}");
     }
 }
+
+#[test]
+fn mcp_calls_show_server_tool_duration_and_result_in_the_live_pane() {
+    let mut b = workflow();
+    b.model_call("fix", "c2", "sonnet");
+    b.tool_call(
+        "fix",
+        "t5",
+        "mcp__github__create_issue",
+        json!({"title": "Crash"}),
+    );
+    b.push(
+        Some("fix"),
+        None,
+        harness_events::schema::EventKind::McpCall {
+            call_id: "t5".into(),
+            server: "github".into(),
+            tool: "create_issue".into(),
+        },
+    );
+    b.tool_result("fix", "t5", true, "created issue #12", 1_234);
+    let mut h = H::new(100, 30);
+    h.feed(b.events());
+    h.draw();
+    // Keyboard opens the live pane of the selected node.
+    h.send(&key("space"));
+    assert!(h.map.live_open());
+    let text = h.draw();
+    assert!(
+        text.contains("✔ mcp github › create_issue title=Crash · 1.2s"),
+        "{text}"
+    );
+    assert!(text.contains("created issue #12"), "{text}");
+    let (x, y) = find_text(h.term.backend().buffer(), "github").unwrap();
+    assert_eq!(
+        h.term.backend().buffer()[(x, y)].fg,
+        h.map.cfg.theme.color(Token::Accent)
+    );
+    h.send(&key("esc"));
+    assert!(!h.map.live_open());
+    // Mouse opens it too.
+    let (x, y) = find_text(h.term.backend().buffer(), "◐ fix").unwrap();
+    h.send(&click(x + 2, y));
+    assert!(h.map.live_open());
+    assert!(h.draw().contains("mcp github › create_issue"));
+}

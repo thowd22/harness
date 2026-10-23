@@ -111,7 +111,7 @@ async fn bad_behaviour_is_caught_by_every_trap() {
 
 /// The same suite through the real binary (`harness run --json`). Build it
 /// first, then run
-/// `HARNESS_BIN=target/debug/harness cargo test -p harness-eval --test starter -- --ignored`.
+/// `HARNESS_BIN=$PWD/target/debug/harness cargo test -p harness-eval --test starter -- --ignored`.
 #[tokio::test]
 #[ignore = "needs a built harness binary in HARNESS_BIN"]
 async fn starter_suite_through_the_harness_binary() {
@@ -122,9 +122,21 @@ async fn starter_suite_through_the_harness_binary() {
         parallel: 6,
         ..Default::default()
     };
+    // Hermetic: the binary never sees the user's config, home or data.
+    let home = tempfile::tempdir().unwrap();
+    let ini = home.path().join("harness.ini");
+    std::fs::write(&ini, "").unwrap();
+    let path = |rel: &str| home.path().join(rel).display().to_string();
+    let env = vec![
+        ("HARNESS_CONFIG".to_owned(), ini.display().to_string()),
+        ("HOME".to_owned(), path("home")),
+        ("XDG_CONFIG_HOME".to_owned(), path("config")),
+        ("XDG_DATA_HOME".to_owned(), path("data")),
+        ("XDG_CACHE_HOME".to_owned(), path("cache")),
+    ];
     let r = run_suite(
         Arc::new(suite),
-        Arc::new(harness_eval::runner::exec::ProcessExecutor::new(bin)),
+        Arc::new(harness_eval::runner::exec::ProcessExecutor::new(bin).with_env(env)),
         &opts,
         &CancellationToken::new(),
     )

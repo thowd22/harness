@@ -38,7 +38,20 @@ Event types: `run_started`, `run_finished`, `node_started`, `node_running`,
 `node_retry`, `node_finished`, `model_call_started`, `delta`,
 `model_call_finished`, `tool_call`, `tool_result`, `approval_requested`,
 `approval_resolved`, `file_changed`, `verify_started`, `verify_finished`,
-`memory`, `cost` and `error`.
+`memory`, `cost` and `error` (plus `tool_output`, `policy_decision`,
+`remote_op`, `remote_connection`, `tasks`, `mcp_call` and
+`mcp_tools_changed`).
+
+An `mcp_call` event follows the `tool_call` of a call that goes to an MCP
+server: `call_id` (the same as the `tool_call`'s), `server` (the
+`[mcp.<name>]` name) and `tool` (the server's own tool name; the
+`tool_call` has the name the model used, such as `mcp__github__create_issue`
+or `mcp_tools`). The call's `policy_decision` names the tool
+`mcp:<server>/<tool>`, and its `tool_result` has the duration and output.
+An `mcp_tools_changed` run-level event records a server's tool-list change
+during the run: `server`, `added` and `removed` (selected tools, omitted
+when empty) and `tools` (how many selected tools are available now).
+See [mcp.md](mcp.md).
 
 A `run_started` event has `name`, and optionally `workflow`, `host`,
 `title` (a short title, set for workflow runs from their inputs; other runs

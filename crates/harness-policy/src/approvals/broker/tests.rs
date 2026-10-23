@@ -301,3 +301,66 @@ fn suggested_patterns() {
     assert_eq!(suggest_pattern("make"), "make*");
     assert_eq!(suggest_pattern(""), "*");
 }
+
+#[tokio::test]
+async fn mcp_tools_get_session_grants_and_always_rules_for_their_server() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let e = engine(root);
+    let mcp = |tool: &str| Action::Tool {
+        name: crate::mcp::action_name("github", tool),
+    };
+    let pend = |call: &str, tool: &str| {
+        let action = mcp(tool);
+        let verdict = e.check(&action, Mode::Auto, root);
+        assert_eq!(verdict.decision, Decision::Ask, "{tool}");
+        assert!(verdict.outward, "{tool}");
+        PendingApproval {
+            call_id: call.into(),
+            node_id: None,
+            action,
+            verdict,
+            preview: None,
+        }
+    };
+    let ui = ScriptedUi::new(|r| {
+        Some(match r.call_id.as_str() {
+            "session" => ApprovalAnswer::Approve(ApprovalScope::Session {
+                pattern: r.suggested_pattern.clone().unwrap(),
+            }),
+            _ => ApprovalAnswer::Approve(ApprovalScope::Always {
+                pattern: r.suggested_pattern.clone().unwrap(),
+            }),
+        })
+    });
+    let broker = ApprovalBroker::new(e.grants().clone(), ui.clone(), root);
+    let res = broker
+        .request(vec![
+            pend("session", "create_issue"),
+            pend("always", "create_pr"),
+        ])
+        .await;
+    assert_eq!(
+        ui.prompts()[0].requests[0].suggested_pattern.as_deref(),
+        Some("mcp:github/create_issue")
+    );
+    assert!(res.iter().all(|r| r.approved));
+    assert!(res[0].ini_rule.is_none());
+    // Both are allowed for the rest of the session, even in auto mode.
+    for t in ["create_issue", "create_pr"] {
+        let v = e.check(&mcp(t), Mode::Auto, root);
+        assert_eq!(v.decision, Decision::Allow, "{t}");
+        assert_eq!(v.rule.origin, "session approval");
+    }
+    // Other tools still ask.
+    assert_eq!(
+        e.check(&mcp("delete_repo"), Mode::Auto, root).decision,
+        Decision::Ask
+    );
+    let rule = res[1].ini_rule.clone().unwrap();
+    assert_eq!(
+        rule.describe(),
+        "Add `create_pr` to [policy] mcp.github.allow in harness.ini?"
+    );
+    assert_eq!(broker.metrics().session_grants, 2);
+}

@@ -96,6 +96,7 @@ fn every_builtin_has_a_description_and_argument_help() {
             "context",
             "config",
             "doctor",
+            "mcp",
             "login",
             "quit"
         ]

@@ -28,6 +28,7 @@ harness-memory.workspace = true
 harness-remote.workspace = true
 harness-tui.workspace = true
 harness-eval.workspace = true
+harness-mcp.workspace = true
 dirs.workspace = true
 tracing.workspace = true
 async-trait.workspace = true

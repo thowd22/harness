@@ -69,10 +69,19 @@ pub trait Executor: Send + Sync {
 const MAX_STDERR: usize = 8 * 1024;
 
 /// Spawns the `harness` binary for each attempt.
+///
+/// Each attempt gets its own temporary data directory by default
+/// (`$HARNESS_DATA_DIR`, plus `$XDG_CACHE_HOME`), removed when the attempt
+/// ends, so eval runs never add sessions, runs, memory notes or logs to the
+/// user's data directory. The user's `harness.ini` (providers, credentials)
+/// is still read. [`ProcessExecutor::with_shared_data_dir`] (`harness eval
+/// run --shared-data-dir`) opts in to the configured data directory, e.g.
+/// for a provider login stored there.
 #[derive(Debug, Clone)]
 pub struct ProcessExecutor {
     program: PathBuf,
     env: Vec<(String, String)>,
+    shared_data_dir: bool,
 }
 
 impl ProcessExecutor {
@@ -81,13 +90,28 @@ impl ProcessExecutor {
         Self {
             program: program.into(),
             env: Vec::new(),
+            shared_data_dir: false,
         }
     }
 
     /// Adds environment variables for every attempt (e.g. `HARNESS_CONFIG`).
+    /// They are applied after the isolation variables, so they win.
     pub fn with_env(mut self, env: Vec<(String, String)>) -> Self {
         self.env = env;
         self
+    }
+
+    /// Runs attempts against the configured data directory instead of a
+    /// fresh one per attempt. Sessions and runs of eval attempts then appear
+    /// in the user's lists.
+    pub fn with_shared_data_dir(mut self, shared: bool) -> Self {
+        self.shared_data_dir = shared;
+        self
+    }
+
+    /// Whether attempts share the configured data directory.
+    pub fn shares_data_dir(&self) -> bool {
+        self.shared_data_dir
     }
 
     /// The command-line arguments for `task` (without the program).
@@ -178,6 +202,18 @@ impl Executor for ProcessExecutor {
             .kill_on_drop(true);
         #[cfg(unix)]
         cmd.process_group(0);
+        // Lives until the attempt is over; dropping it removes the data.
+        let isolated = if self.shared_data_dir {
+            None
+        } else {
+            let dir = tempfile::Builder::new()
+                .prefix("harness-eval-data-")
+                .tempdir()
+                .map_err(|e| format!("attempt data directory: {e}"))?;
+            cmd.env(harness_config::paths::DATA_DIR_ENV, dir.path().join("data"))
+                .env("XDG_CACHE_HOME", dir.path().join("cache"));
+            Some(dir)
+        };
         for (k, v) in &self.env {
             cmd.env(k, v);
         }
@@ -213,7 +249,7 @@ impl Executor for ProcessExecutor {
         let wall = started.elapsed();
         // Leftover grandchildren could hold the pipes open; do not wait long.
         let grace = Duration::from_secs(2);
-        Ok(Execution {
+        let execution = Execution {
             exit_code: code,
             events: tokio::time::timeout(grace, read_out)
                 .await
@@ -227,7 +263,9 @@ impl Executor for ProcessExecutor {
                 .unwrap_or_default(),
             timed_out,
             wall,
-        })
+        };
+        drop(isolated);
+        Ok(execution)
     }
 }
 
@@ -566,6 +604,75 @@ mod tests {
         assert_eq!(out.events.len(), 1);
         assert_eq!(out.stderr.trim(), "oops");
         assert!(!out.timed_out);
+    }
+
+    /// A stub that reports its data and cache directories on stderr and
+    /// writes a session into the data directory, like `harness run` does.
+    const DATA_STUB: &str = "#!/bin/sh\nprintf '%s|%s' \"${HARNESS_DATA_DIR-unset}\" \"${XDG_CACHE_HOME-unset}\" >&2\nif [ \"${HARNESS_DATA_DIR-}\" ]; then mkdir -p \"$HARNESS_DATA_DIR/sessions\" && echo s > \"$HARNESS_DATA_DIR/sessions/eval.json\"; fi\n";
+
+    #[tokio::test]
+    async fn each_attempt_gets_its_own_data_dir_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = write_stub(dir.path(), DATA_STUB);
+        let ex = ProcessExecutor::new(&stub);
+        assert!(!ex.shares_data_dir());
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            let out = ex
+                .execute(&task(), dir.path(), &CancellationToken::new())
+                .await
+                .unwrap();
+            assert_eq!(out.exit_code, Some(0), "{}", out.stderr);
+            let (data, cache) = out.stderr.split_once('|').unwrap();
+            let data = PathBuf::from(data);
+            let cache = PathBuf::from(cache);
+            assert!(data.is_absolute(), "{data:?}");
+            let attempt = data.parent().unwrap();
+            assert!(
+                attempt
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("harness-eval-data-"),
+                "{data:?}"
+            );
+            assert_eq!(cache.parent(), Some(attempt), "cache is isolated too");
+            assert_ne!(data, harness_config::paths::default_data_dir());
+            assert!(!attempt.exists(), "the attempt's data is removed");
+            seen.push(data);
+        }
+        assert_ne!(seen[0], seen[1], "attempts never share a data dir");
+    }
+
+    #[tokio::test]
+    async fn shared_data_dir_is_opt_in_and_explicit_env_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = write_stub(dir.path(), DATA_STUB);
+        let out = ProcessExecutor::new(&stub)
+            .with_shared_data_dir(true)
+            .execute(&task(), dir.path(), &CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(
+            !out.stderr.contains("harness-eval-data-"),
+            "shared mode leaves the data dir alone: {}",
+            out.stderr
+        );
+        let chosen = dir.path().join("chosen");
+        let out = ProcessExecutor::new(&stub)
+            .with_env(vec![(
+                "HARNESS_DATA_DIR".into(),
+                chosen.display().to_string(),
+            )])
+            .execute(&task(), dir.path(), &CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(
+            out.stderr.starts_with(&format!("{}|", chosen.display())),
+            "{}",
+            out.stderr
+        );
+        assert!(chosen.join("sessions/eval.json").exists());
     }
 
     #[tokio::test]

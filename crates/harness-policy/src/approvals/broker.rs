@@ -343,7 +343,14 @@ impl ApprovalBroker {
             .enumerate()
             .map(|(i, p)| ApprovalRequest {
                 approval_id: format!("approval-{batch}-{}", i + 1),
-                suggested_pattern: p.verdict.command.as_deref().map(suggest_pattern),
+                suggested_pattern: p.verdict.command.as_deref().map(suggest_pattern).or_else(
+                    || match &p.action {
+                        Action::Tool { name } if crate::mcp::parse_action_name(name).is_some() => {
+                            Some(name.clone())
+                        }
+                        _ => None,
+                    },
+                ),
                 call_id: p.call_id,
                 node_id: p.node_id,
                 action: p.action,
@@ -416,12 +423,22 @@ impl ApprovalBroker {
                                 m.1.session_grants += 1;
                             }
                         }
-                        Action::Tool { .. } => {}
+                        Action::Tool { .. } => {
+                            if crate::mcp::parse_action_name(p).is_some() {
+                                self.grants.allow_tool(p);
+                                m.1.session_grants += 1;
+                            }
+                        }
                     }
                 }
-                if let (ApprovalScope::Always { pattern }, Action::Bash { .. }) =
-                    (&scope, &r.action)
-                {
+                let proposable = match &r.action {
+                    Action::Bash { .. } => true,
+                    Action::Tool { .. } => {
+                        matches!(&scope, ApprovalScope::Always { pattern } if crate::mcp::parse_action_name(pattern).is_some())
+                    }
+                    _ => false,
+                };
+                if let (ApprovalScope::Always { pattern }, true) = (&scope, proposable) {
                     res.ini_rule = Some(IniRuleProposal {
                         pattern: pattern.clone(),
                     });

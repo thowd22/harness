@@ -22,10 +22,12 @@ pub mod document;
 pub mod edit;
 pub mod error;
 pub mod load;
+pub mod mcp;
 pub mod value;
 
 pub use config::{Config, ProviderConfig, Remote};
 pub use document::{Document, Entry, Section, parse};
 pub use error::{IniError, IniErrors, Location};
 pub use load::{load, load_file, load_location, load_str, run_check};
+pub use mcp::{McpAuth, McpSecret, McpServer, McpStartup, McpTransport};
 pub use value::{ConfigEnum, SectionReader, expand_tilde, parse_bool, parse_duration, parse_list};

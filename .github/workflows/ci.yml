@@ -98,6 +98,12 @@ jobs:
         # SLOW lines nextest prints every 60 s name whatever is still running.
         timeout-minutes: 15
         run: cargo nextest run --workspace --locked --profile ci
+      # Reruns the harness and harness-eval suites with HOME and the XDG
+      # dirs pointed at a sentinel and fails if any test wrote there
+      # (tests must never touch a user's real config or data; docs/ci.md).
+      - name: Hermetic guard
+        timeout-minutes: 10
+        run: scripts/hermetic-guard.sh nextest run -p harness -p harness-eval --locked --profile ci
       - name: Doctests
         run: cargo test --workspace --locked --doc
       - name: Sandbox tests with skip reasons

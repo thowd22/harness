@@ -2,7 +2,7 @@
 
 **Ctrl+P** opens one fuzzy-searchable list of everything you can do:
 built-in commands, workflows, skills, agents, past runs, saved sessions,
-remote hosts and settings, including the autonomy modes (`ask`, `auto-edit`, `auto`). Each
+remote hosts, MCP prompts and resources, and settings, including the autonomy modes (`ask`, `auto-edit`, `auto`). Each
 row shows where it comes from (for example `skill · project`) and its key
 binding.
 
@@ -29,6 +29,11 @@ message, Copy last code block, Copy tool output, Copy diff, Select text). Workfl
 slash command, skills as `/name`, agents as their command with their
 display name and one-line description, for example
 `/coder  Switch to Coder: Default coding agent (built in)`.
+
+MCP prompts appear as `/<server>:<prompt>` with their arguments, and MCP
+resources as `Attach MCP resource: <server>/<name>`, which attaches the
+resource, marked as untrusted content, to your next message (see
+[MCP in the TUI](../mcp.md#in-the-tui)).
 
 Past runs read like `Coder · fix the header parser · 14:32 Oct 23 · ✔`:
 the agent (or workflow), a title taken from the first prompt (or the

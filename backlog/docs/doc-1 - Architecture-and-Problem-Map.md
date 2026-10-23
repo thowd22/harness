@@ -3,7 +3,7 @@ id: doc-1
 title: Architecture and Problem Map
 type: specification
 created_date: '2026-10-22 14:26'
-updated_date: '2026-10-22 14:26'
+updated_date: '2026-10-23 08:59'
 ---
 # Architecture & Problem Map
 
@@ -34,6 +34,7 @@ updated_date: '2026-10-22 14:26'
 | `harness-hygiene` | Change ledger, checkpoints (shadow git), scope, hygiene report, verify runner, review |
 | `harness-memory` | Memory drive (git), index/search, memory tool, extraction, dreaming |
 | `harness-remote` | SSH transport, remote helper protocol, remote Workspace impl, sync, host scheduling |
+| `harness-mcp` | MCP client: stdio and streamable HTTP transports, dual-era version negotiation, lazy start, restart with backoff, process-group cleanup, bundled test server; servers come only from `[mcp.<name>]` in harness.ini. Agent tools (`tools::McpToolbox`): explicit `mcp:<server>/<tool>` selection, the schema budget with the `mcp_tools` search-and-call fallback, redacted and size-capped results, tool-list refresh with a stable session prefix. Prompts and resources (`prompts`), which the TUI offers as `/<server>:<prompt>` commands and attachable untrusted context; `/mcp` shows each server's status, tools and auth with restart, disable-for-session and log actions |
 | `harness-tui` | ratatui app: chat, map, detail, palette, approvals, diff |
 | `harness-eval` | Eval suite format, runner, baseline comparison |
 | `harness` (bin) | CLI entry: `harness` (TUI), `harness run`, `harness wf`, `harness eval`, `harness doctor`, `harness remote-agent --stdio` |

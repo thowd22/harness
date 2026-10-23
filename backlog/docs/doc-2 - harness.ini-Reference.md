@@ -3,7 +3,7 @@ id: doc-2
 title: harness.ini Reference
 type: specification
 created_date: '2026-10-22 14:26'
-updated_date: '2026-10-23 03:24'
+updated_date: '2026-10-23 08:07'
 ---
 # harness.ini Reference
 
@@ -101,6 +101,11 @@ bash.ask   = git commit*, npm install*
 bash.deny  = git push --force*, rm -rf /*
 paths.protected = ~/.ssh/**, **/.env*, ~/.aws/**
 outward.ask = git push*, gh pr create*, cargo publish*, npm publish*
+; MCP tools, by server: tool-name wildcards; deny > ask > allow
+mcp.github.allow = get_*, list_*
+mcp.github.ask   = create_*
+mcp.github.deny  = delete_*
+mcp.github.trust_annotations = false ; true: readOnlyHint tools run without asking
 
 [sandbox]
 enabled = true                   ; landlock (fs) on Linux
@@ -127,6 +132,7 @@ spill_tail_lines = 40
 compact_at = 0.8                 ; fraction of model window
 keep_recent_turns = 6
 elide_tool_results_over = 4000   ; tokens
+mcp_schema_budget = 2000         ; tokens of selected MCP tool schemas before mcp_tools stands in
 
 [budget]
 session_usd = 10
@@ -154,6 +160,21 @@ sync = rsync                     ; rsync | git
 compression = auto               ; auto | yes | no (ssh channel compression)
 compression_below_mbps = 20      ; auto: compress links slower than this
 policy.bash.deny = sudo*
+
+[mcp.github]                     ; local MCP server over stdio
+command = npx
+args = -y, @modelcontextprotocol/server-github
+env.GITHUB_PERSONAL_ACCESS_TOKEN_cmd = gh auth token
+startup = lazy                   ; lazy | eager
+
+[mcp.docs]                       ; remote MCP server over streamable HTTP
+url = https://mcp.example.com/mcp
+header.Authorization_env = DOCS_MCP_TOKEN
+timeout = 30s
+
+[mcp.notes]                      ; remote MCP server with OAuth (harness login mcp notes)
+url = https://notes.example.com/mcp
+auth = oauth                     ; none | oauth
 ```
 
 ## Section reference (summary)
@@ -167,7 +188,7 @@ policy.bash.deny = sudo*
 | `keys` | keybindings for the handful of global actions |
 | `ui` | theme, animations, timestamps, tool previews, mouse, goal bar |
 | `theme` | per-token color overrides for the active theme |
-| `policy` | bash allow/ask/deny, protected paths, outward-action guard |
+| `policy` | bash allow/ask/deny, protected paths, outward-action guard, MCP tool rules |
 | `sandbox` | landlock/network sandbox |
 | `verify` | default verification command + gating |
 | `tools` | read caps, bash default/max timeout, output spill threshold |
@@ -175,6 +196,7 @@ policy.bash.deny = sudo*
 | `budget` | spend caps |
 | `memory` | memory drive and dreaming |
 | `remote.<name>` | SSH hosts available to `runs_on` |
+| `mcp.<name>` | MCP servers (stdio or streamable HTTP); the only place a server can be defined |
 ## Value syntax and validation (as implemented)
 
 - Inline comments start with `;` preceded by whitespace; full-line comments start with `;` or `#`. `#` inside a value is literal (`accent = #bd93f9`).
@@ -186,7 +208,10 @@ policy.bash.deny = sudo*
 - `provider.<id>` accepts `anthropic`, `openai`, `openrouter`. Every provider takes `api_key`, `api_key_cmd`, `api_key_env` and `base_url`. Only openrouter also takes `app_name`, `provider_order` and `allow_fallbacks`. Only openai also takes `auth` (`api_key`, the default, or `chatgpt`: Sign in with ChatGPT, using the user's ChatGPT plan; requests then never use the API key, with no fallback) and `chatgpt_headless` (boolean, default `false`; headless runs, workflows and evals refuse `auth = chatgpt` unless it is `true`, and refuse it whenever `CI` is set, because the credential is personal). Only anthropic also takes `gzip_requests` (`auto`, the default, or `off`) and `gzip_level` (1 to 9, default 3). With `auto`, request bodies of 4 KiB or more are gzipped only when `base_url` is `https://api.anthropic.com` on the default port and no proxy (`HTTPS_PROXY`, `ALL_PROXY`) or custom CA (`SSL_CERT_FILE`, `SSL_CERT_DIR`) is set. The environment variable `HARNESS_GZIP_REQUEST_BODIES=0` also turns it off. See docs/providers-anthropic.md.
 - `remote.<name>` requires `host`. Defaults: `port = 22`, `max_jobs = 1`, `sync = rsync`, `compression = auto`, `compression_below_mbps = 20`. A remote can only tighten policy, with `policy.bash.deny` and `policy.bash.ask`.
 - `remote.<name> compression` sets SSH channel compression for that host: `yes` adds `Compression=yes` to the host's ControlMaster, `no` adds `Compression=no`, and `auto` (the default) compresses only when the host's last measured link throughput is below `compression_below_mbps` (a positive number of Mbit/s). The link is measured by `/remote test` and, when no measurement younger than 24 hours exists, when a remote step connects; an unmeasured host is not compressed. Compressed connections use their own ControlMaster socket (`cmz-%C`). rsync sync uses `--compress-choice=zstd` when both rsyncs support zstd, and rsync's default compression otherwise. See docs/remote.md.
+- `mcp.<name>` (name: letters, digits, `_`, `-`) defines one MCP server and requires exactly one of `command` (stdio: with `args`, a comma-separated list, `cwd`, `~` expanded, and `env.<NAME>`) or `url` (`http://` or `https://`, streamable HTTP, with `header.<Name>`). Every server also takes `enabled` (default `true`), `timeout` (per request, default `60s`), `startup` (`lazy`, the default: start on first use, or `eager`: start with the session) and `startup_timeout` (start plus handshake, default `30s`); both timeouts must be greater than 0. `env.*` on a remote server, `header.*`, `args` or `cwd` on the wrong kind of server, and unknown keys are load errors. Every `env.<NAME>` / `header.<Name>` value is a credential with the provider-key sources: inline `env.NAME`, `env.NAME_cmd` (a command, like `api_key_cmd`) and `env.NAME_env` (an environment variable, like `api_key_env`), first non-empty wins in that order; a key ending in `_cmd` / `_env` always names a source. Values never print (`config show` shows `[redacted]`), are added to the server's redactor, and an inline value makes the file subject to the `0600` rule like an inline `api_key`. Stdio servers get the bash tool's environment scrubbing (default provider key names, `HARNESS_*`, provider `api_key_env` variables, variables named by `env.*_env` / `header.*_env`, and values containing a resolved provider key) before their own `env.*` is added. HTTP redirects are not followed, so `header.*` credentials reach only `url`. A remote server also takes `auth` (`none`, the default, or `oauth`: OAuth per the MCP authorization spec, with tokens from `harness login mcp <name>` or the TUI `/login mcp <name>` kept in `<data_dir>/auth/mcp/<name>.json`, mode `0600`, inside the protected `auth/` directory, never in harness.ini, refreshed automatically; runs never open a browser and fail with a message naming the login command) and, with `auth = oauth` only, `oauth_client_id` (a pre-registered client, used instead of dynamic registration), `oauth_client_metadata_url` (an `https://` Client ID Metadata Document URL, used when the authorization server supports them) and `oauth_scopes` (comma-separated scopes instead of the ones the server asks for). `auth = oauth` together with `header.Authorization`, `auth = oauth` with a plain `http://` url on a non-loopback host (only `127.0.0.1`, `localhost` and `[::1]` may use `http://`; bearer tokens travel only over TLS, per RFC 6750 section 5.3 and OAuth 2.1 section 1.5, and login, runs and discovery refuse it as well), or any of these keys on a stdio server, is a load error. `harness login mcp <name>` sets `auth = oauth` itself. Project YAML can reference a server by name but never define one. See docs/mcp.md.
+- `[policy] mcp.<server>.allow`, `mcp.<server>.ask` and `mcp.<server>.deny` are lists of the server's tool names with `*` wildcards; `mcp.<server>.trust_annotations` is a boolean (default `false`). An MCP call is decided as `mcp:<server>/<tool>`: deny, then ask, then allow, then (with trusted annotations) `readOnlyHint: true` tools run without asking; any other MCP tool is an outward action that asks in every mode, including `auto`. Session approvals and "always" (`mcp.<server>.allow = <tool>`, written after confirmation) apply as for commands. Only harness.ini loosens MCP policy. A key under `mcp.` that is not `mcp.<server>.allow|ask|deny|trust_annotations` is a load error. See docs/mcp.md.
+- `[context] mcp_schema_budget` (tokens, default `2000`): when the definitions of an agent's selected MCP tools are estimated above it, the agent gets the single `mcp_tools` search-and-call tool instead. `0` always uses `mcp_tools`.
 - `api_key_cmd` runs under `sh -c` with a 10 s timeout, stdin closed and stderr discarded. It leads its own process group, and a timeout kills the whole group.
 - A file that holds an inline `api_key` and is group- or world-readable is refused with a `chmod 600` hint.
-- Defaults when a key is absent: `default_model = sonnet`, `mode = auto-edit`, `data_dir = $XDG_DATA_HOME/harness` (`~/.local/share/harness`), `max_subagent_depth = 2`, `max_concurrent_agents = 4`, `model_list_ttl = 24h` (live model lists for the model catalog are cached in `<data_dir>/model-lists/` and refetched in the background when older; see docs/models.md), `identity_prompt = on` (every built-in prompt starts with the built-in identity layer, at most 120 tokens, which names harness and its features and points the model to docs/guide/, backlog/docs/ and https://github.com/thowd22/harness before it answers questions about them; `off` removes it from every prompt, including custom prompts that use `- builtin: identity`; also accepts `true`/`false`; see docs/defaults.md), `session_summary_model = off` (session names and descriptions are derived locally from the conversation with no model call; set a cheap model alias such as `haiku` to have it write the description, and the name unless the user chose one with `/rename`, after every turn; see docs/sessions.md). `[ui]` defaults are the values in the example above. `[policy]` lists are empty (the engine adds built-ins). `sandbox.enabled = true`, `network = allow`. `verify.command` is auto-detected, `baseline = true`, `max_fix_attempts = 3`. `[context]` defaults are as in the example. Budgets have no cap and `on_exceed = ask`. Memory defaults are as in the example, with `drive = <data_dir>/memory`.
+- Defaults when a key is absent: `default_model = sonnet`, `mode = auto-edit`, `data_dir = $XDG_DATA_HOME/harness` (`~/.local/share/harness`; the `HARNESS_DATA_DIR` environment variable overrides `data_dir` for one process: `harness eval run` sets it to a fresh directory per attempt unless `--shared-data-dir`, and tests use it to stay off the user's data, see docs/data-dir.md), `max_subagent_depth = 2`, `max_concurrent_agents = 4`, `model_list_ttl = 24h` (live model lists for the model catalog are cached in `<data_dir>/model-lists/` and refetched in the background when older; see docs/models.md), `identity_prompt = on` (every built-in prompt starts with the built-in identity layer, at most 120 tokens, which names harness and its features and points the model to docs/guide/, backlog/docs/ and https://github.com/thowd22/harness before it answers questions about them; `off` removes it from every prompt, including custom prompts that use `- builtin: identity`; also accepts `true`/`false`; see docs/defaults.md), `session_summary_model = off` (session names and descriptions are derived locally from the conversation with no model call; set a cheap model alias such as `haiku` to have it write the description, and the name unless the user chose one with `/rename`, after every turn; see docs/sessions.md). `[ui]` defaults are the values in the example above. `[policy]` lists are empty (the engine adds built-ins). `sandbox.enabled = true`, `network = allow`. `verify.command` is auto-detected, `baseline = true`, `max_fix_attempts = 3`. `[context]` defaults are as in the example. Budgets have no cap and `on_exceed = ask`. Memory defaults are as in the example, with `drive = <data_dir>/memory`.
 - `harness config check [path]` validates the file and exits 1 on any error.

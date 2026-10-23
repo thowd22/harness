@@ -19,6 +19,7 @@ harness-config.workspace = true
 harness-events.workspace = true
 harness-hygiene.workspace = true
 harness-memory.workspace = true
+harness-mcp.workspace = true
 harness-policy.workspace = true
 harness-providers.workspace = true
 harness-remote.workspace = true

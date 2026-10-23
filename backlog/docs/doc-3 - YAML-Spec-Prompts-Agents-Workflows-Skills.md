@@ -45,6 +45,7 @@ model: sonnet                 # alias or provider/model — explicit, no hidden 
 effort: medium                # provider-mapped reasoning effort
 prompt: coder                 # prompt name, or inline `prompt_text:`
 tools: [read, write, edit, bash, todo]   # todo = shared run task list shown in the goal bar
+                              # MCP tools: mcp:<server>/<tool>, e.g. mcp:github/create_issue, mcp:db/*
 subagents: [researcher, reviewer]   # enables spawn_agent restricted to these
 memory: read-write            # off | read | read-write
 max_turns: 60
@@ -111,7 +112,7 @@ steps:
     message: "Ship this change?"
 ```
 
-Step types: `agent` (default when `agent:` present), `shell` (`run:`), `verify`, `bugfix-proof`, `approval`, `workflow` (nested `uses:`). Step keys: `id`, `needs`, `if`, `for_each`/`matrix`, `loop`, `retries`, `timeout`, `on_failure: abort|continue`, `runs_on`, `scope`, `budget`, `outputs`, `artifacts`.
+Step types: `agent` (default when `agent:` present), `shell` (`run:`), `verify`, `bugfix-proof`, `approval`, `workflow` (nested `uses:`). Step keys: `id`, `needs`, `if`, `for_each`/`matrix`, `loop`, `retries`, `timeout`, `on_failure: abort|continue`, `runs_on`, `scope`, `budget`, `outputs`, `artifacts`. Agent steps also take `tools:` with MCP entries only (`[mcp:github/create_issue]`), added to the agent's own MCP tools for that step.
 
 Goal and tasks: `goal` and `tasks` seed the goal bar. A task with `step:` takes its status and owning agent from that step automatically; agents add or update other tasks through the `todo` tool. The goal bar is hidden when a run has no tasks.
 
@@ -138,8 +139,8 @@ Without frontmatter: name = file stem, description = first non-heading line. `/r
 
 - YAML is parsed with `serde_norway` (maintained serde_yaml fork). Errors are `file:line:col: message`; unknown keys are errors; integers may use `_` separators.
 - Prompt templates may only use variables declared in `vars`, and `vars` must be a subset of `cwd, os, date, git_branch`. Templates have no functions or filters. A session renders its prompt once from a frozen snapshot of these variables.
-- Agent `model` is optional (defaults to `[general] default_model`). Exactly one of `prompt` / `prompt_text` is required. `tools` accepts `read, write, edit, bash, todo`; `spawn_agent` is added when `subagents` is non-empty and `memory` when `memory` is not `off`. Agent `policy` keys: `bash.deny`, `bash.ask`, `paths.protected`, `outward.ask` (`bash.allow` is rejected as loosening).
-- A project agent shadowing a lower-scope agent of the same name may not add tools or subagents, raise memory, max_turns or budgets, widen scope, or drop policy rules. No agent budget may exceed `[budget] run_usd`.
+- Agent `model` is optional (defaults to `[general] default_model`). Exactly one of `prompt` / `prompt_text` is required. `tools` accepts `read, write, edit, bash, todo` and MCP entries `mcp:<server>/<tool>` (`*` wildcards in the tool part; the server must be a `[mcp.<server>]` in harness.ini, checked at load). Nothing from an MCP server is offered unless an entry selects it; selected tools within `[context] mcp_schema_budget` are offered as `mcp__<server>__<tool>`, otherwise through one `mcp_tools` search-and-call tool (docs/mcp.md). `spawn_agent` is added when `subagents` is non-empty and `memory` when `memory` is not `off`. Agent `policy` keys: `bash.deny`, `bash.ask`, `paths.protected`, `outward.ask` (`bash.allow` is rejected as loosening).
+- A project agent shadowing a lower-scope agent of the same name may not add tools (MCP tools included) or subagents, raise memory, max_turns or budgets, widen scope, or drop policy rules. No agent budget may exceed `[budget] run_usd`.
 - Hot reload of `.harness/` files re-checks trust: an edit makes the project untrusted until reviewed again.
 - Skills without frontmatter: name = file stem (directory name for `SKILL.md`), description = first non-empty non-heading line. If a body has no `$ARGUMENTS`/`$N` placeholder, given arguments are appended after a blank line.
 

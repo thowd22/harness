@@ -69,10 +69,11 @@ pub fn validation_context(cfg: &Config) -> ValidationContext {
 }
 
 /// Every resolvable credential from `[provider.*]`, plus the stored
-/// ChatGPT tokens, for redaction and env scrubbing. Failures are reported
-/// and skipped.
+/// ChatGPT tokens and MCP OAuth tokens, for redaction and env scrubbing.
+/// Failures are reported and skipped.
 pub fn credentials(cfg: &Config) -> Vec<String> {
     let mut out = chatgpt_secrets(&chatgpt_store(cfg));
+    out.extend(mcp_token_store(cfg).secrets());
     for (name, provider) in &cfg.providers {
         match provider.resolve_api_key() {
             Ok(Some(secret)) => out.push(secret.expose().to_owned()),
@@ -157,6 +158,12 @@ pub fn anthropic_config(cfg: &Config) -> AnthropicConfig {
         conf.gzip_level = level;
     }
     conf
+}
+
+/// The MCP OAuth token store: `<data_dir>/auth/mcp`, inside the built-in
+/// protected `auth` directory.
+pub fn mcp_token_store(cfg: &Config) -> harness_mcp::auth::McpTokenStore {
+    harness_mcp::auth::McpTokenStore::new(DataDir::from_config(cfg).mcp_auth())
 }
 
 /// The Sign in with ChatGPT token store: `<data_dir>/auth`, a built-in

@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use harness_config::agents::ValidationContext;
 use harness_config::discovery::{Catalog, Roots};
+use harness_config::ini::McpServer;
 use harness_config::ini::{Config, load_location};
 use harness_config::lint::{self, LintOptions, Severity};
 use harness_config::paths::{ConfigLocation, DataDir, config_location};
@@ -143,6 +144,16 @@ pub trait Probes: Send + Sync {
     async fn provider(&self, name: &str, base_url: &str) -> Result<Duration, String>;
     /// Runs a trivial command on a remote host; returns the round trip.
     async fn remote(&self, host: &RemoteHost) -> Result<Duration, String>;
+    /// Starts an MCP server, completes the handshake, lists its tools and
+    /// stops it. The default runs the real check.
+    async fn mcp(
+        &self,
+        name: &str,
+        server: &McpServer,
+        opts: harness_mcp::ClientOptions,
+    ) -> Result<harness_mcp::doctor::Report, harness_mcp::McpError> {
+        harness_mcp::doctor::check(name, server, opts).await
+    }
     /// Probes sandbox support (`None` = cannot probe here).
     fn sandbox(&self, cfg: &Config, root: &Path) -> Option<SandboxStatus>;
 }
@@ -434,6 +445,33 @@ async fn remote_checks(cfg: &Config, probes: &dyn Probes, out: &mut Vec<Check>) 
     }
 }
 
+async fn mcp_checks(cfg: &Config, probes: &dyn Probes, out: &mut Vec<Check>) {
+    // Resolves provider keys (for scrubbing and redaction) once, and only
+    // when a server is checked.
+    let mut client_opts: Option<harness_mcp::ClientOptions> = None;
+    for (name, server) in &cfg.mcp {
+        let area = format!("mcp {name}");
+        if !server.enabled {
+            out.push(Check::new(
+                &area,
+                Status::Skip,
+                "disabled (enabled = false)",
+            ));
+            continue;
+        }
+        let opts = client_opts
+            .get_or_insert_with(|| harness_mcp::ClientOptions::from_config(cfg))
+            .clone();
+        match probes.mcp(name, server, opts).await {
+            Ok(report) => out.push(Check::new(&area, Status::Ok, report.summary())),
+            Err(e) => out.push(
+                Check::new(&area, Status::Fail, e.to_string())
+                    .fix(harness_mcp::doctor::fix_hint(name, &e)),
+            ),
+        }
+    }
+}
+
 fn catalog_checks(cfg: &Config, input: &Input, out: &mut Vec<Check>) {
     let data = DataDir::from_config(cfg);
     let trust = TrustStore::from_data_dir(&data);
@@ -500,6 +538,7 @@ pub async fn diagnose(input: &Input, probes: &dyn Probes) -> Report {
     provider_checks(&cfg, probes, &mut checks).await;
     sandbox_checks(&cfg, &root, probes, &mut checks);
     remote_checks(&cfg, probes, &mut checks).await;
+    mcp_checks(&cfg, probes, &mut checks).await;
     catalog_checks(&cfg, input, &mut checks);
     Report { checks }
 }
@@ -605,6 +644,47 @@ mod tests {
         assert_eq!(r.area("definitions")[0].status, Status::Ok);
         assert_eq!(r.exit_code(), 1);
         assert!(text.contains("fix: chmod 600"));
+    }
+
+    #[tokio::test]
+    async fn checks_each_mcp_server() {
+        let srv = harness_mcp::test_server::HttpServer::start(
+            harness_mcp::test_server::Options::default(),
+        )
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data").display().to_string();
+        let ini = format!(
+            "[general]\ndata_dir = {data}\n[mcp.web]\nurl = {}\n[mcp.missing]\ncommand = /nonexistent/mcp-server\n[mcp.off]\ncommand = x\nenabled = false\n",
+            srv.url
+        );
+        let p = write_ini(dir.path(), &ini, 0o600);
+        let fake = Fake {
+            provider_ok: true,
+            remote_ok: true,
+            sandbox: None,
+        };
+        let r = diagnose(&input(dir.path(), p), &fake).await;
+        let text = r.render();
+        let web = r.area("mcp web")[0];
+        assert_eq!(web.status, Status::Ok, "{text}");
+        assert!(web.message.contains("harness-mcp-test-server"), "{text}");
+        assert!(web.message.contains("MCP 2026-07-28 (modern)"), "{text}");
+        assert!(web.message.contains("11 tool(s)"), "{text}");
+        let missing = r.area("mcp missing")[0];
+        assert_eq!(missing.status, Status::Fail, "{text}");
+        assert!(
+            missing
+                .message
+                .contains("could not start `/nonexistent/mcp-server`"),
+            "{text}"
+        );
+        assert!(
+            missing.fix.as_deref().unwrap().contains("[mcp.missing]"),
+            "{text}"
+        );
+        assert_eq!(r.area("mcp off")[0].status, Status::Skip, "{text}");
+        assert_eq!(r.exit_code(), 1);
     }
 
     #[tokio::test]

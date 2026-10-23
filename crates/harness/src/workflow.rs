@@ -16,11 +16,13 @@ use harness_config::discovery::Catalog;
 use harness_config::ini::Config;
 use harness_config::paths::DataDir;
 use harness_config::prompts::PromptVars;
+use harness_config::trust::{TrustStatus, TrustStore};
 use harness_events::redact::Redactor;
 use harness_events::schema::RunId;
 use harness_events::store::{RecorderOptions, RunRecorder, run_dir};
 use harness_hygiene::checkpoints::CheckpointStore;
 use harness_policy::approvals::{ApprovalBroker, RecorderApprovalEvents};
+use harness_policy::provenance::{Labeler, ProjectTrust};
 use harness_policy::rules::{Mode, PolicyEngine};
 use harness_tools::bash::EnvScrubber;
 use harness_workflow::commands;
@@ -263,6 +265,19 @@ pub struct Built {
     pub recorder: RunRecorder,
     /// Warnings (sandbox).
     pub warnings: Vec<String>,
+    /// MCP servers and tools of the run.
+    pub(crate) mcp: crate::mcp::McpWiring,
+}
+
+/// The provenance labeler for agent steps, as the interactive agent has:
+/// MCP results are always untrusted; other tool results follow the
+/// project's trust.
+fn labeler(data: &DataDir, cwd: &Path, redactor: Arc<Redactor>) -> Labeler {
+    let trust = match TrustStore::from_data_dir(data).status(cwd) {
+        Ok(TrustStatus::Trusted { .. }) => ProjectTrust::Trusted,
+        _ => ProjectTrust::Untrusted,
+    };
+    Labeler::new(redactor, trust)
 }
 
 /// Builds the executor: agent steps as subagents with the policy gate,
@@ -329,10 +344,12 @@ pub async fn build(setup: Setup<'_>) -> Result<Built, String> {
     let scrubber = EnvScrubber::new(cfg.secret_env_vars(), secrets.clone());
     let env = scrubber.scrub(std::env::vars());
 
+    let mcp = crate::mcp::wire(cfg, &secrets, &recorder);
     let engine = PolicyEngine::new(&core::policy_config(cfg, None), cwd)
-        .map_err(|e| format!("[policy]: {e}"))?;
+        .map_err(|e| format!("[policy]: {e}"))?
+        .with_mcp(mcp.rules.clone());
     for p in &allow {
-        engine.grants().allow_command(p);
+        crate::mcp::grant(engine.grants(), p);
     }
     let grants = engine.grants().clone();
     let broker = Arc::new(
@@ -375,7 +392,9 @@ pub async fn build(setup: Setup<'_>) -> Result<Built, String> {
     };
     let runtime = SubagentRuntime::new(recorder.clone(), builder, SubagentLimits::from_config(cfg))
         .with_scheduler(scheduler.clone())
-        .with_board(board.clone());
+        .with_board(board.clone())
+        .with_extra_tools(Arc::new(mcp.toolbox.clone()))
+        .with_labeler(labeler(data, cwd, recorder.redactor().clone()));
 
     let checkpoints = data.checkpoints();
     let store = {
@@ -450,6 +469,7 @@ pub async fn build(setup: Setup<'_>) -> Result<Built, String> {
         executor,
         recorder,
         warnings,
+        mcp,
     })
 }
 
@@ -523,13 +543,17 @@ async fn run(
         let _ = writeln!(err, "harness: warning: {w}");
     }
     let Built {
-        executor, recorder, ..
+        executor,
+        recorder,
+        mcp,
+        ..
     } = built;
 
     let printer = args.json.then(|| JsonPrinter::spawn(&recorder));
     let cancel = CancellationToken::new();
     spawn_signal_cancel(cancel.clone());
     let outcome = executor.run(&wf, &inputs, reuse, &cancel).await;
+    mcp.shutdown().await;
     let dir = recorder.dir().to_owned();
     if let Err(e) = recorder.finish().await {
         let _ = writeln!(err, "harness: warning: run log: {e}");

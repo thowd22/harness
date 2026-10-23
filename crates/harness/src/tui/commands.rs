@@ -81,6 +81,7 @@ pub fn palette_entries(registry: &CommandRegistry, core: &Core) -> Vec<PaletteEn
         now,
     ));
     v.extend(harness_tui::palette::remote_entries(&core.cfg));
+    v.extend(super::mcp_login::palette_entries(&core.cfg));
     if let Ok(list) = SessionStore::new(core.data.sessions()).list() {
         v.extend(crate::sessions::palette_entries(
             &list,
@@ -184,6 +185,12 @@ pub(super) async fn invocation(d: &mut Driver, inv: Invocation) {
     {
         return resume(d, id).await;
     }
+    if let Some(server) = inv.id.strip_prefix(super::mcp_login::PALETTE_PREFIX) {
+        return super::mcp_login::open(d, Some(server)).await;
+    }
+    if super::mcp::invocation(d, &inv.id, &inv.args).await {
+        return;
+    }
     if let Some(host) = inv
         .id
         .strip_prefix(harness_tui::palette::ids::REMOTE_PREFIX)
@@ -202,6 +209,9 @@ pub(super) async fn invocation(d: &mut Driver, inv: Invocation) {
 
 /// Runs a `/command` line.
 pub(super) async fn slash(d: &mut Driver, line: &str) {
+    if let Some((server, prompt, raw)) = super::mcp::prompt_target(d, line) {
+        return super::mcp::run_prompt(d, &server, &prompt, &raw).await;
+    }
     let cmd = match d.registry.parse(line) {
         Ok(c) => c,
         Err(harness_agent::commands::CommandError::MissingArg { .. })
@@ -364,6 +374,9 @@ async fn builtin(d: &mut Driver, b: Builtin, cmd: &Command) {
             }
         },
         Builtin::Model => model(d, cmd.get("model")).await,
+        Builtin::Login if cmd.get("provider") == Some("mcp") => {
+            super::mcp_login::open(d, cmd.get("server")).await
+        }
         Builtin::Login => {
             d.send(CoreEvent::Login {
                 provider: cmd.get("provider").map(str::to_owned),
@@ -484,6 +497,7 @@ async fn builtin(d: &mut Driver, b: Builtin, cmd: &Command) {
                 .await;
             }
         }
+        Builtin::Mcp => super::mcp::open(d).await,
         Builtin::Doctor => {
             let input = harness_eval::doctor::Input {
                 config: None,
@@ -1287,6 +1301,12 @@ pub(super) async fn panel_action(d: &mut Driver, id: &str) {
                 .await
             }
         };
+    }
+    if let Some(server) = id.strip_prefix(super::mcp_login::BUTTON_PREFIX) {
+        return super::mcp_login::start(d, server).await;
+    }
+    if super::mcp::is_action(id) {
+        return super::mcp::action(d, id).await;
     }
     let Some(name) = id.strip_prefix(REMOTE_TEST) else {
         return;

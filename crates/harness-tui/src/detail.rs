@@ -49,9 +49,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use time::OffsetDateTime;
 
-use crate::cards::{
-    CardCtx, CardStatus, ToolCard, arg_summary, payload_json, payload_text, str_arg,
-};
+use crate::cards::{CardCtx, CardStatus, ToolCard, payload_json, payload_text, str_arg};
 use crate::chat::text::{
     fmt_cost, fmt_ms, fmt_tokens, right_align, sanitize, truncate, truncate_line, wrap_line,
 };
@@ -535,6 +533,11 @@ impl DetailView {
                     }
                 });
             }
+            EventKind::McpCall {
+                call_id,
+                server,
+                tool,
+            } => self.with_card(call_id, |c| c.set_mcp(server, tool)),
             EventKind::FileChanged { path, change, diff } => {
                 let diff = diff.as_ref().map(payload_text);
                 self.file_changed(path, *change, diff);
@@ -721,7 +724,7 @@ impl DetailView {
                 for c in &t.cards {
                     s.push_str(&format!(
                         "{} {}\n{}\n",
-                        c.tool,
+                        c.display_name(),
                         c.summary(),
                         c.output_text(false)
                     ));
@@ -836,7 +839,7 @@ impl DetailView {
             let c = self.turns[t].cards.iter().find(|c| c.call_id == id)?;
             return Some(format!(
                 "{} {}\n{}",
-                c.tool,
+                c.display_name(),
                 c.summary(),
                 c.output_text(false)
             ));
@@ -1367,11 +1370,8 @@ impl DetailView {
                             Line::from(vec![
                                 Span::raw("  "),
                                 Span::styled(format!("{icon} "), th.fg(card.status.token())),
-                                Span::styled(card.tool.clone(), th.fg(Token::Accent)),
-                                Span::styled(
-                                    format!(" {}", arg_summary(&card.tool, &card.args)),
-                                    th.fg(Token::Muted),
-                                ),
+                                Span::styled(card.display_name(), th.fg(Token::Accent)),
+                                Span::styled(format!(" {}", card.summary()), th.fg(Token::Muted)),
                             ]),
                             DetailAction::JumpCard(card.call_id.clone()),
                         ));

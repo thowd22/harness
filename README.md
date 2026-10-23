@@ -24,6 +24,7 @@ Research and real-world bug reports agree: most failures of AI coding tools come
 - **An agent map.** A live graph of every agent and workflow step, with node logs in the style of GitHub Actions, real-time output and reasoning, a request inspector and run replay.
 - **A goal bar.** An opencode-style task pane showing the goal, each task's status and which agent is working on it. It only appears when tasks exist.
 - **Local memory, modeled on Devin.** A git-backed Markdown "memory drive" with a nightly *Dreaming* pass that cleans it up.
+- **MCP servers.** Connect stdio or remote streamable-HTTP [MCP](https://modelcontextprotocol.io) servers in `harness.ini`, with OAuth for remote ones (`harness login mcp <name>`). Agents get only the MCP tools their YAML selects, every call goes through the permission rules (asking by default), results are labeled untrusted and redacted, and `/mcp` shows each server's status. Server prompts become slash commands and resources can be attached to a message. See [docs/mcp.md](docs/mcp.md).
 - **SSH remotes.** Send an agent's tools to a bigger box with `runs_on:`. Model calls and credentials stay local. Traffic to the helper is zstd-compressed, repeated file contents are sent once, and SSH's own compression is skipped on fast links.
 - **Verification and hygiene enforced in code.** Verify runs before and after a change, the agent can't declare "done" until verify passes, bug fixes can be proven to fail before and pass after, an independent reviewer can check the work, checkpoints back `/undo`, and broad `git add -A` is blocked.
 - **Safe by default.** Permission rules are checked in code. A repo's project config only loads after you trust it, can only tighten rules, never loosen them, and agents cannot read the credentials file. There is a Landlock sandbox and secret redaction everywhere.
@@ -75,7 +76,7 @@ Change any of them in `[keys]` in `harness.ini`. The mouse works on everything v
 
 ### Slash commands
 
-Built-ins include `/help`, `/new`, `/resume`, `/rename`, `/model`, `/login`, `/mode`, `/agents`, `/workflows`, `/skills`, `/memory`, `/runs`, `/remote`, `/cost`, `/compact`, `/undo`, `/diff`, `/context`, `/config`, `/doctor` and `/quit`. Every workflow and skill adds its own command. See [docs/commands.md](docs/commands.md).
+Built-ins include `/help`, `/new`, `/resume`, `/rename`, `/model`, `/login`, `/mode`, `/agents`, `/workflows`, `/skills`, `/memory`, `/runs`, `/remote`, `/mcp`, `/cost`, `/compact`, `/undo`, `/diff`, `/context`, `/config`, `/doctor` and `/quit`. Every workflow and skill adds its own command, and so does every prompt of a connected MCP server (`/<server>:<prompt>`). See [docs/commands.md](docs/commands.md).
 
 ### Command line
 
@@ -87,6 +88,7 @@ Built-ins include `/help`, `/new`, `/resume`, `/rename`, `/model`, `/login`, `/m
 | `harness runs show <id> [--json]` | summarize a run |
 | `harness eval run <suite.yaml>` | run an eval suite |
 | `harness login <provider>` / `harness logout <provider>` | save and check an API key, or Sign in with ChatGPT; remove saved credentials |
+| `harness login mcp <name>` / `harness logout mcp <name>` | authorize a remote MCP server with OAuth; remove its tokens |
 | `harness config check \| show` | validate the config, or show the effective config |
 | `harness lint` | prompt lint (blanket prohibitions, contradictions, size) |
 | `harness schema` | JSON Schema for prompt, agent and workflow YAML |
@@ -100,7 +102,7 @@ Every command is described in [docs/cli.md](docs/cli.md).
 
 | What | Where |
 |---|---|
-| Everything user-owned: providers, keys, models, keybinds, UI, policy, budgets, memory, remotes | `~/.config/harness/harness.ini` |
+| Everything user-owned: providers, keys, models, keybinds, UI, policy, budgets, memory, remotes, MCP servers | `~/.config/harness/harness.ini` |
 | Global prompts, agents, workflows, skills | `~/.config/harness/{prompts,agents,workflows,skills}/` |
 | Project prompts, agents, workflows, skills (loaded only after you trust the project) | `<repo>/.harness/…` |
 
@@ -131,7 +133,7 @@ Run it with `/fix "header parsing drops the last field"`.
 ## Documentation
 
 - **User guide:** [docs/guide/](docs/guide/README.md) covers install, harness.ini, YAML, skills, workflows, memory, remotes and the palette. Every example in it is checked by a test.
-- **Area docs:** [docs/](docs/) covers providers, tools, policy, hygiene, verification, context, cost, sessions, visibility and more.
+- **Area docs:** [docs/](docs/) covers providers, tools, [MCP servers](docs/mcp.md), policy, hygiene, verification, context, cost, sessions, visibility and more.
 - **Design specs:** [backlog/docs/](backlog/docs/) has the architecture and problem map, the harness.ini reference, the YAML spec, memory, the agent map, SSH remotes and the visual design.
 
 ## Development
@@ -160,6 +162,7 @@ CI (`.github/workflows/ci.yml`) runs fmt, clippy, tests and cargo-deny on every 
 | `harness-hygiene` | Change ledger, checkpoints, scope, hygiene report, verify, bug-fix proof, review |
 | `harness-memory` | Memory drive, search, memory tool, extraction, dreaming |
 | `harness-remote` | SSH transport, remote helper protocol, remote workspace, sync, probes |
+| `harness-mcp` | MCP client: stdio and streamable HTTP transports, lifecycle, restarts, test server |
 | `harness-tui` | ratatui app: chat, map, detail, goal bar, palette, approvals, diff, theme |
 | `harness-eval` | Eval suites, runner, baselines, doctor |
 | `harness` | The binary that wires it all together |

@@ -265,6 +265,7 @@ fn context_checks_agents_hosts_and_nested_workflows() {
         remotes: Some([("gpu-box".to_owned(), vec!["gpu".to_owned()])].into()),
         workflows: Some(["fix-bug".to_owned()].into()),
         agent_runs_on: Default::default(),
+        mcp_servers: None,
     };
     let ok = "name: c\nsteps:\n  - id: a\n    agent: implementer\n    runs_on: gpu-box\n  - id: b\n    run: x\n    runs_on: { labels: [gpu] }\n  - id: n\n    uses: fix-bug\n";
     parse_with(ok, None, &ctx).unwrap();
@@ -307,6 +308,7 @@ fn agent_steps_without_runs_on_are_placed_like_their_agent() {
         remotes: Some([("gpu-box".to_owned(), vec!["gpu".to_owned()])].into()),
         workflows: None,
         agent_runs_on: [("trainer".to_owned(), RunsOn::Host("gpu-box".into()))].into(),
+        mcp_servers: None,
     };
     let wf = parse_with(
         "name: c\nsteps:\n  - id: a\n    agent: trainer\n  - id: b\n    agent: trainer\n    runs_on: local\n  - id: c\n    agent: writer\n  - id: d\n    run: x\n",
@@ -325,4 +327,32 @@ fn agent_steps_without_runs_on_are_placed_like_their_agent() {
     );
     assert_eq!(wf.step("c").unwrap().runs_on, None);
     assert_eq!(wf.step("d").unwrap().runs_on, None);
+}
+
+#[test]
+fn agent_steps_may_add_mcp_tools_from_servers_in_harness_ini() {
+    let ctx = CheckContext {
+        agents: Some(["implementer".to_owned()].into()),
+        mcp_servers: Some(["github".to_owned()].into()),
+        ..CheckContext::default()
+    };
+    let wf = parse_with(
+        "name: c\nsteps:\n  - id: a\n    agent: implementer\n    tools: [mcp:github/create_issue, mcp:github/list_*]\n",
+        None,
+        &ctx,
+    )
+    .unwrap();
+    let StepKind::Agent { tools, .. } = &wf.steps[0].kind else {
+        panic!("agent step")
+    };
+    let tools: Vec<String> = tools.iter().map(ToString::to_string).collect();
+    assert_eq!(tools, ["mcp:github/create_issue", "mcp:github/list_*"]);
+    let e = errs_with(
+        "name: c\nsteps:\n  - id: a\n    agent: implementer\n    tools: [read, mcp:ghost/*, mcp:github]\n  - id: b\n    run: x\n    tools: [mcp:github/x]\n",
+        &ctx,
+    );
+    assert!(e.contains("can only add MCP tools"), "{e}");
+    assert!(e.contains("[mcp.ghost]"), "{e}");
+    assert!(e.contains("mcp:github/*"), "{e}");
+    assert!(e.contains("`tools` is not valid in a `shell` step"), "{e}");
 }

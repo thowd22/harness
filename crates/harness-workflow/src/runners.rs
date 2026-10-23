@@ -99,6 +99,7 @@ impl StepRunner for AgentStepRunner {
             agent,
             model,
             brief,
+            mcp_tools,
         } = &req.action
         else {
             return Err(StepFailure::new("internal: not an agent step"));
@@ -120,6 +121,7 @@ impl StepRunner for AgentStepRunner {
         child.node = Some(NodeId::from(format!("{}.agent", req.node.as_str())));
         child.node_kind = NodeKind::Agent;
         child.model.clone_from(model);
+        child.mcp_tools.clone_from(mcp_tools);
         child.limits = Some(LoopLimits {
             max_turns: None,
             max_tokens: req.limits.tokens,

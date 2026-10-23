@@ -310,6 +310,21 @@ impl Redactor {
                 ro(error);
             }
             EventKind::RemoteConnection { detail, .. } => ro(detail),
+            EventKind::McpCall { server, tool, .. } => {
+                r(server);
+                r(tool);
+            }
+            EventKind::McpToolsChanged {
+                server,
+                added,
+                removed,
+                ..
+            } => {
+                r(server);
+                for t in added.iter_mut().chain(removed.iter_mut()) {
+                    r(t);
+                }
+            }
             EventKind::Tasks { goal, tasks, .. } => {
                 ro(goal);
                 for t in tasks {

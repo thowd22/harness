@@ -79,6 +79,8 @@ pub enum StepAction {
         model: Option<String>,
         /// The brief (rendered prompt plus inlined artifacts).
         brief: String,
+        /// MCP tools the step adds to the agent's own.
+        mcp_tools: Vec<harness_config::mcp_tools::McpSelector>,
     },
     /// Run a shell command.
     Shell {
@@ -1618,6 +1620,7 @@ impl WfRun {
                 agent,
                 model,
                 prompt,
+                tools,
             } => {
                 let mut brief = match prompt {
                     Some(p) => r("prompt", p)?,
@@ -1654,6 +1657,7 @@ impl WfRun {
                         None => None,
                     },
                     brief,
+                    mcp_tools: tools.clone(),
                 }
             }
             StepKind::Shell { run } => StepAction::Shell {

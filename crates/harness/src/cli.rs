@@ -78,7 +78,8 @@ Options:
   --approvals deny|allowlist
                           calls that need approval: deny them all (default),
                           or allow only those matching --allow patterns
-  --allow PATTERN         command pattern allowed in allowlist mode (repeatable)
+  --allow PATTERN         command pattern (or mcp:<server>/<tool>) allowed in
+                          allowlist mode (repeatable)
   --mode ask|auto-edit|auto
                           autonomy mode for this run
   --max-turns N           stop after N model turns

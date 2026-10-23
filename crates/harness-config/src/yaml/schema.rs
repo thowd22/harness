@@ -132,6 +132,11 @@ fn workflow_schema() -> Value {
             "agent": { "type": "string" },
             "model": { "type": "string" },
             "prompt": { "type": "string" },
+            "tools": {
+                "type": "array", "uniqueItems": true,
+                "items": { "type": "string", "pattern": "^mcp:[A-Za-z0-9_-]+/[A-Za-z0-9_.*-]+$" },
+                "description": "Agent steps: MCP tools (mcp:<server>/<tool>) added to the agent's own for this step; <server> must be a [mcp.<server>] in harness.ini."
+            },
             "run": { "type": "string" },
             "verify": {
                 "oneOf": [

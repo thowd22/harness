@@ -44,7 +44,9 @@ pub enum Builtin {
     Config,
     /// `/doctor`.
     Doctor,
-    /// `/login [provider]`.
+    /// `/mcp`: MCP servers, their status and actions.
+    Mcp,
+    /// `/login [provider]`, `/login mcp [server]`.
     Login,
     /// `/quit`.
     Quit,
@@ -52,7 +54,7 @@ pub enum Builtin {
 
 impl Builtin {
     /// Every built-in, in help order.
-    pub const ALL: [Builtin; 21] = [
+    pub const ALL: [Builtin; 22] = [
         Builtin::Help,
         Builtin::New,
         Builtin::Resume,
@@ -72,6 +74,7 @@ impl Builtin {
         Builtin::Context,
         Builtin::Config,
         Builtin::Doctor,
+        Builtin::Mcp,
         Builtin::Login,
         Builtin::Quit,
     ];
@@ -98,6 +101,7 @@ impl Builtin {
             Self::Context => "context",
             Self::Config => "config",
             Self::Doctor => "doctor",
+            Self::Mcp => "mcp",
             Self::Login => "login",
             Self::Quit => "quit",
         }
@@ -130,7 +134,10 @@ impl Builtin {
             Self::Context => "Show what the next request carries, by layer",
             Self::Config => "Show the effective configuration or check harness.ini",
             Self::Doctor => "Check the setup: config, providers, sandbox, remotes",
-            Self::Login => "Add, check and save an API key for a provider",
+            Self::Mcp => "MCP servers: status, tools and auth; restart, disable or view logs",
+            Self::Login => {
+                "Add, check and save an API key for a provider, or authorize an MCP server"
+            }
             Self::Quit => "Quit harness",
         }
     }
@@ -180,8 +187,9 @@ impl Builtin {
             Self::Diff => vec![ArgSpec::optional("path").with_help("limit to one file")],
             Self::Login => vec![
                 ArgSpec::optional("provider")
-                    .with_help("provider to log in to")
-                    .with_choices(&["anthropic", "openai", "openrouter"]),
+                    .with_help("provider to log in to, or mcp to authorize a remote MCP server")
+                    .with_choices(&["anthropic", "openai", "openrouter", "mcp"]),
+                ArgSpec::optional("server").with_help("with mcp: a remote [mcp.<name>] server"),
             ],
             Self::Config => vec![
                 ArgSpec::optional("action")
@@ -196,6 +204,7 @@ impl Builtin {
             | Self::Undo
             | Self::Context
             | Self::Doctor
+            | Self::Mcp
             | Self::Quit => Vec::new(),
         }
     }

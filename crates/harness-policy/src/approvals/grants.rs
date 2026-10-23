@@ -9,6 +9,8 @@ use crate::rules::{CommandPattern, PathGlob};
 enum Grant {
     Command(CommandPattern),
     Path(PathGlob),
+    /// A tool-name pattern (`mcp:github/create_*`).
+    Tool(String),
 }
 
 /// Approvals that last for the session. Shared between the policy engine
@@ -31,6 +33,20 @@ impl SessionGrants {
         let g = PathGlob::new(pattern, None, root)?;
         self.write().push(Grant::Path(g));
         Ok(())
+    }
+
+    /// Allow tools whose name matches `pattern` (`*` wildcards), such as
+    /// `mcp:github/create_*`, for the rest of the session.
+    pub fn allow_tool(&self, pattern: &str) {
+        self.write().push(Grant::Tool(pattern.trim().to_owned()));
+    }
+
+    /// The first tool grant matching `name`.
+    pub fn matching_tool(&self, name: &str) -> Option<String> {
+        self.read().iter().find_map(|g| match g {
+            Grant::Tool(p) if harness_config::mcp_tools::wildcard_match(p, name) => Some(p.clone()),
+            _ => None,
+        })
     }
 
     /// The first command grant matching any of `forms`.
@@ -56,6 +72,7 @@ impl SessionGrants {
             .map(|g| match g {
                 Grant::Command(p) => format!("command: {}", p.as_str()),
                 Grant::Path(p) => format!("path: {}", p.as_str()),
+                Grant::Tool(p) => format!("tool: {p}"),
             })
             .collect()
     }
@@ -97,6 +114,14 @@ mod tests {
             None
         );
         assert_eq!(g.list(), ["command: cargo test*", "path: src/**"]);
+        g.allow_tool("mcp:github/create_*");
+        assert_eq!(
+            g.matching_tool("mcp:github/create_issue"),
+            Some("mcp:github/create_*".into())
+        );
+        assert_eq!(g.matching_tool("mcp:github/delete_repo"), None);
+        assert_eq!(g.matching_tool("mcp:other/create_issue"), None);
+        assert_eq!(g.list()[2], "tool: mcp:github/create_*");
         g.clear();
         assert!(g.list().is_empty());
     }

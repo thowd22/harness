@@ -11,6 +11,8 @@
 | `harness login <anthropic\|openai\|openrouter> [--api-key-cmd CMD\|--api-key-env VAR]` | check an API key with the provider and save it to harness.ini (mode 0600) ([providers.md](providers.md#logging-in)) | 0, 1 rejected or failed, 2 usage |
 | `harness login openai --chatgpt` | Sign in with ChatGPT in the browser; tokens go to `<data_dir>/auth` (0600) and `auth = chatgpt` is set ([providers-openai.md](providers-openai.md)) | 0, 1 denied or failed, 2 usage |
 | `harness logout <provider> [--yes]` | remove the provider's `api_key`, `api_key_cmd`, `api_key_env` and `auth` after confirmation; for openai also delete the ChatGPT tokens | 0, 1 cancelled, 2 usage |
+| `harness login mcp <name>` | authorize a remote MCP server with OAuth in the browser; tokens go to `<data_dir>/auth/mcp` (0600) and `auth = oauth` is set ([mcp.md](mcp.md#authorization-oauth)) | 0, 1 declined or failed, 2 usage |
+| `harness logout mcp <name> [--yes]` | delete the MCP server's stored OAuth tokens and registration after confirmation | 0, 1 cancelled, 2 usage |
 | `harness doctor` | every health check with fixes ([doctor.md](doctor.md)) | 0, 1 when a check fails |
 | `harness models [--all] [--json] [--refresh\|--offline]` | usable models from every provider, with prices, capabilities and auth method ([models.md](models.md#harness-models)) | 0, 1 config error, 2 usage |
 | `harness lint` | prompt lint over prompts, agents, skills and the memory index | 0, 1 on errors |

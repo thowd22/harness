@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! harness eval run SUITE [--out FILE] [--parallel N] [--filter ID] [--repeats N]
-//!                        [--model REF] [--keep-failed] [--in-process]
+//!                        [--model REF] [--keep-failed] [--in-process] [--shared-data-dir]
 //!                        [--baseline FILE] [--max-pass-drop PTS] [--max-cost-rise PCT]
 //! harness eval compare BASELINE CURRENT [--json] [--max-pass-drop PTS] [--max-cost-rise PCT]
 //! ```
@@ -41,6 +41,8 @@ run options:
   --model REF           run every task on this model instead of its fake script
   --keep-failed         keep the workspaces of failed attempts
   --in-process          run in-process with the fake provider (no subprocess)
+  --shared-data-dir     attempts use the configured data dir instead of a
+                        fresh one each (their sessions and runs are kept)
   --baseline FILE       compare with a stored baseline; exit 1 on regression
 thresholds:
   --max-pass-drop PTS   allowed pass-rate drop in percentage points (default 0)
@@ -67,6 +69,7 @@ struct Args {
     model: Option<String>,
     keep_failed: bool,
     in_process: bool,
+    shared_data_dir: bool,
     baseline: Option<PathBuf>,
     json: bool,
     thresholds: Thresholds,
@@ -101,6 +104,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
             }
             "--keep-failed" => a.keep_failed = true,
             "--in-process" => a.in_process = true,
+            "--shared-data-dir" => a.shared_data_dir = true,
             "--json" => a.json = true,
             f if f.starts_with("--") => return Err(format!("unknown option `{f}`")),
             _ => a.positional.push(arg.clone()),
@@ -137,6 +141,12 @@ pub async fn main(args: &[String], ctx: &Context, out: &mut dyn Write, err: &mut
     }
 }
 
+/// The subprocess executor for `harness eval run`: a fresh data directory
+/// per attempt unless `--shared-data-dir`.
+fn process_executor(a: &Args, ctx: &Context) -> ProcessExecutor {
+    ProcessExecutor::new(&ctx.harness_bin).with_shared_data_dir(a.shared_data_dir)
+}
+
 async fn run(a: Args, ctx: &Context, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
     let [suite_path] = a.positional.as_slice() else {
         let _ = writeln!(err, "harness eval run: expected one SUITE file\n{USAGE}");
@@ -161,7 +171,7 @@ async fn run(a: Args, ctx: &Context, out: &mut dyn Write, err: &mut dyn Write) -
     let executor: Arc<dyn Executor> = if a.in_process {
         Arc::new(InProcessExecutor::new())
     } else {
-        Arc::new(ProcessExecutor::new(&ctx.harness_bin))
+        Arc::new(process_executor(&a, ctx))
     };
     let opts = RunOptions {
         parallel: a.parallel.unwrap_or(4),
@@ -246,6 +256,15 @@ mod tests {
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| (*x).to_owned()).collect()
+    }
+
+    #[test]
+    fn attempts_get_their_own_data_dir_unless_shared_is_asked_for() {
+        let a = parse(&s(&["suite.yaml"])).unwrap();
+        assert!(!process_executor(&a, &ctx()).shares_data_dir());
+        let a = parse(&s(&["suite.yaml", "--shared-data-dir"])).unwrap();
+        assert!(process_executor(&a, &ctx()).shares_data_dir());
+        assert!(USAGE.contains("--shared-data-dir"));
     }
 
     #[tokio::test]

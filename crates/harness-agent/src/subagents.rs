@@ -30,9 +30,11 @@ use async_trait::async_trait;
 use harness_config::agents::{Agent, Effort, PromptRef, SPAWN_AGENT_TOOL};
 use harness_config::discovery::Catalog;
 use harness_config::ini::Config;
+use harness_config::mcp_tools::McpSelector;
 use harness_config::prompts::PromptVars;
 use harness_events::schema::{EventKind, NodeId, NodeKind};
 use harness_events::store::{EventDraft, RunRecorder};
+use harness_policy::provenance::Labeler;
 use harness_providers::model::{ReasoningEffort, ThinkingConfig};
 use harness_providers::provider::Provider;
 use harness_tools::tool::{ToolContext, ToolError, ToolErrorKind, ToolOutput};
@@ -114,6 +116,22 @@ impl std::fmt::Debug for ChildParts {
             .field("tools", &self.tools)
             .finish_non_exhaustive()
     }
+}
+
+/// Tools from outside harness that agents select explicitly: MCP tools
+/// (`mcp:<server>/<tool>` in `tools:`). The runtime asks for them after
+/// the built-in selection, so they are never filtered out by name.
+#[async_trait]
+pub trait ExtraTools: Send + Sync {
+    /// Makes sure everything [`ExtraTools::tools`] needs for `agent` (plus
+    /// `extra` selectors from a workflow step) is loaded, such as the tool
+    /// lists of the servers it names. Failures become warnings; the
+    /// affected tools are left out.
+    async fn prepare(&self, agent: &Agent, extra: &[McpSelector]);
+    /// The tools for `agent` plus `extra`. The same agent and selectors
+    /// get the same tools (and specs) for the whole session, so the
+    /// request prefix stays stable.
+    fn tools(&self, agent: &Agent, extra: &[McpSelector]) -> Vec<Arc<dyn AgentTool>>;
 }
 
 /// Turns an agent name into a runnable child.
@@ -341,6 +359,9 @@ pub struct ChildRequest {
     /// Run the child's tools on this host instead of the builder's
     /// workspace. Its own subagents inherit it.
     pub host: Option<ChildHost>,
+    /// MCP tools selected for this run on top of the agent's own (a
+    /// workflow agent step's `tools:`).
+    pub mcp_tools: Vec<McpSelector>,
 }
 
 impl ChildRequest {
@@ -366,6 +387,7 @@ impl ChildRequest {
             output_schema: None,
             slot: None,
             host: None,
+            mcp_tools: Vec::new(),
         }
     }
 }
@@ -495,6 +517,8 @@ pub struct SubagentRuntime {
     limits: SubagentLimits,
     scheduler: Scheduler,
     board: Option<Arc<TaskBoard>>,
+    extra: Option<Arc<dyn ExtraTools>>,
+    labeler: Option<Labeler>,
 }
 
 impl std::fmt::Debug for SubagentRuntime {
@@ -537,7 +561,28 @@ impl SubagentRuntime {
             limits,
             scheduler,
             board: None,
+            extra: None,
+            labeler: None,
         }
+    }
+
+    /// Labels every child's tool results with provenance tags (MCP results
+    /// as untrusted) before its model sees them, as the top agent does.
+    /// Without one, children only redact.
+    pub fn with_labeler(mut self, labeler: Labeler) -> Self {
+        self.labeler = Some(labeler);
+        self
+    }
+
+    /// Adds the MCP tools agents select ([`ExtraTools`]).
+    pub fn with_extra_tools(mut self, extra: Arc<dyn ExtraTools>) -> Self {
+        self.extra = Some(extra);
+        self
+    }
+
+    /// The extra tool source, if any.
+    pub fn extra_tools(&self) -> Option<&Arc<dyn ExtraTools>> {
+        self.extra.as_ref()
     }
 
     /// Shares `scheduler` (e.g. with the workflow executor).
@@ -577,8 +622,11 @@ impl SubagentRuntime {
     /// `spawn_agent` restricted to its `subagents:` while below the depth
     /// limit. Tools the agent does not list are removed, so the request
     /// carries exactly [`Agent::request_tools`] (minus unavailable ones).
+    ///
+    /// The agent's MCP tools ([`ExtraTools`]) are added after that; call
+    /// [`ExtraTools::prepare`] first so they are loaded.
     pub fn tools_for(&self, agent: &Agent, base: &ToolSet, place: &AgentPlace) -> ToolSet {
-        self.tools_on(agent, base, place, None)
+        self.tools_on(agent, base, place, None, &[])
     }
 
     /// [`SubagentRuntime::tools_for`] for an agent whose tools run on
@@ -590,6 +638,7 @@ impl SubagentRuntime {
         base: &ToolSet,
         place: &AgentPlace,
         host: Option<&ChildHost>,
+        extra: &[McpSelector],
     ) -> ToolSet {
         let mut set = match host {
             Some(h) => (h.tools)(agent, base.clone()),
@@ -616,7 +665,13 @@ impl SubagentRuntime {
             }));
         }
         let wanted = agent.request_tools();
-        set.select(&wanted).0
+        let mut set = set.select(&wanted).0;
+        if let Some(x) = &self.extra {
+            for t in x.tools(agent, extra) {
+                set.register(t);
+            }
+        }
+        set
     }
 
     fn emit(&self, draft: EventDraft) {
@@ -689,7 +744,16 @@ impl SubagentRuntime {
             cancel: req.cancel.clone(),
             slot: Some(slot.clone()),
         };
-        let tools = self.tools_on(&parts.agent, &parts.tools, &place, req.host.as_ref());
+        if let Some(x) = &self.extra {
+            x.prepare(&parts.agent, &req.mcp_tools).await;
+        }
+        let tools = self.tools_on(
+            &parts.agent,
+            &parts.tools,
+            &place,
+            req.host.as_ref(),
+            &req.mcp_tools,
+        );
         let gate = match req.host.as_ref().and_then(|h| h.gate.as_ref()) {
             Some(f) => f(&parts.agent),
             None => parts.gate.clone(),
@@ -719,6 +783,9 @@ impl SubagentRuntime {
         )
         .with_parent(req.parent.clone())
         .with_node(node.clone());
+        if let Some(l) = &self.labeler {
+            lp = lp.with_labeler(l.clone());
+        }
         if let Some(c) = &parts.cost {
             lp = lp.with_cost(c.clone());
         }

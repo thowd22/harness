@@ -9,6 +9,10 @@
 //! git branch, context window and autonomy mode are set by the owner when
 //! they change. When the line is too narrow, the least important segments
 //! are dropped first (remotes, path, tokens, verify, agents).
+//!
+//! When an MCP server has failed, a compact indicator (`⚠ mcp docs`, or
+//! `⚠ mcp 2 failed`) shows near the front; the chat registers it as a
+//! button that opens `/mcp` ([`MCP_INDICATOR_ID`]).
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -34,6 +38,9 @@ pub enum VerifyState {
     /// Last run failed.
     Failed,
 }
+
+/// Interaction id of the MCP indicator (clicking it opens `/mcp`).
+pub const MCP_INDICATOR_ID: &str = "status.mcp";
 
 /// Width of the context usage bar in cells.
 pub const CONTEXT_BAR_CELLS: usize = 8;
@@ -62,6 +69,8 @@ pub struct StatusLine {
     /// Goal-bar progress, shown when the bar is collapsed
     /// (`GoalBar::indicator`).
     pub goal: Option<Vec<Span<'static>>>,
+    /// MCP servers that failed (from the core), by name.
+    pub mcp_failed: Vec<String>,
     running: BTreeMap<NodeId, Option<String>>,
 }
 
@@ -79,7 +88,23 @@ impl StatusLine {
             cost: None,
             verify: VerifyState::None,
             goal: None,
+            mcp_failed: Vec::new(),
             running: BTreeMap::new(),
+        }
+    }
+
+    /// Sets the MCP servers that failed (empty hides the indicator).
+    pub fn set_mcp_failed(&mut self, failed: Vec<String>) {
+        self.mcp_failed = failed;
+    }
+
+    /// The MCP indicator text, when a server has failed: `⚠ mcp <name>`
+    /// for one server, `⚠ mcp <n> failed` for several.
+    pub fn mcp_label(&self) -> Option<String> {
+        match self.mcp_failed.as_slice() {
+            [] => None,
+            [one] => Some(format!("⚠ mcp {}", truncate(one, 16))),
+            many => Some(format!("⚠ mcp {} failed", many.len())),
         }
     }
 
@@ -187,6 +212,9 @@ impl StatusLine {
                 Span::styled(self.mode.as_str().to_owned(), theme.fg(Token::Accent)),
             ],
         ));
+        if let Some(label) = self.mcp_label() {
+            segs.push((9, vec![Span::styled(label, theme.fg(Token::Error))]));
+        }
         if let Some(pct) = self.context_pct() {
             let filled = (pct as usize * CONTEXT_BAR_CELLS)
                 .div_ceil(100)
@@ -473,6 +501,22 @@ mod tests {
             .unwrap();
         assert_eq!(bar.style, theme.fg(Token::Ok));
         assert!(text(&line).contains("ctx ▓▓░░░░░░ 20%"));
+    }
+
+    #[test]
+    fn mcp_indicator_is_compact_red_and_survives_narrow_terminals() {
+        let theme = Theme::default();
+        let mut s = sample();
+        assert!(!text(&s.line(&theme, &Spinner::new(false), 200)).contains("mcp"));
+        s.set_mcp_failed(vec!["a-very-long-server-name-indeed".into()]);
+        let label = s.mcp_label().unwrap();
+        assert!(width(&label) <= 22, "{label}");
+        let line = s.line(&theme, &Spinner::new(false), 60);
+        let span = line.spans.iter().find(|x| x.content == label).unwrap();
+        assert_eq!(span.style, theme.fg(Token::Error));
+        assert!(text(&line).contains(&label), "kept at 60 cells");
+        s.set_mcp_failed(vec!["a".into(), "b".into(), "c".into()]);
+        assert_eq!(s.mcp_label().as_deref(), Some("⚠ mcp 3 failed"));
     }
 
     #[test]

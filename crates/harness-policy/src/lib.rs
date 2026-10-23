@@ -3,6 +3,7 @@
 //! See `backlog/docs/doc-1 - Architecture-and-Problem-Map.md` for crate boundaries.
 
 pub mod approvals;
+pub mod mcp;
 pub mod outward;
 pub mod provenance;
 pub mod rules;

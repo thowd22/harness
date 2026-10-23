@@ -77,6 +77,7 @@ mod tests {
             remotes: Some(Default::default()),
             workflows: Some(NAMES.iter().map(|s| (*s).to_owned()).collect()),
             agent_runs_on: Default::default(),
+            mcp_servers: None,
         }
     }
 

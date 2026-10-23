@@ -23,6 +23,7 @@ mod dream;
 mod headless;
 mod ledger;
 mod login;
+mod mcp;
 mod memory;
 mod remote;
 mod remote_agent;
@@ -49,7 +50,7 @@ Commands:
   run [OPTIONS] <PROMPT>     run an agent headlessly (harness run --help)
   wf list|help|run           list, describe or run workflows (harness wf --help)
   eval run|compare           run eval suites, compare results (harness eval --help)
-  doctor                     check config, credentials, providers, sandbox, remotes, prompts
+  doctor                     check config, credentials, providers, sandbox, remotes, MCP servers, prompts
   lint                       lint prompts, agents, skills and memory
   models [--all] [--json]    list usable models from every provider (--refresh, --offline)
   login <PROVIDER>           check and save an API key for anthropic, openai or openrouter
@@ -172,6 +173,14 @@ fn cmd_tui(args: &[String]) -> ExitCode {
 }
 
 fn main() -> ExitCode {
+    let code = run_main();
+    // MCP servers are normally stopped with their session; this catches
+    // paths that skipped it.
+    harness_mcp::kill_all();
+    code
+}
+
+fn run_main() -> ExitCode {
     // Before any thread exists: the OS refuses the lookup afterwards.
     sessions::init_local_offset();
     let raw: Vec<OsString> = std::env::args_os().collect();

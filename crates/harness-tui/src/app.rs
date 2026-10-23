@@ -301,6 +301,12 @@ pub enum CoreEvent {
     /// The outcome of a [`UiRequest::Login`]: a one-line summary or an
     /// actionable error. Never contains the key.
     LoginResult(Result<String, String>),
+    /// The MCP servers that failed, by name (empty: none). The status
+    /// line shows a compact indicator that opens `/mcp`.
+    McpStatus {
+        /// Failed server names.
+        failed: Vec<String>,
+    },
     /// Clear the views for a new session (`/new`, `/resume`).
     Reset,
 }
@@ -1053,6 +1059,7 @@ impl App {
                 self.chat.set_palette_entries(all);
             }
             CoreEvent::SlashCommands(v) => self.chat.set_slash_commands(v),
+            CoreEvent::McpStatus { failed } => self.chat.status_mut().set_mcp_failed(failed),
             CoreEvent::PromptArgs(entry) => {
                 self.screen = None;
                 self.view = View::Chat;

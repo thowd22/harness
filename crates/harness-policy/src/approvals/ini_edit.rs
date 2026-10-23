@@ -1,8 +1,10 @@
 //! "Always" approvals: adding an allow rule to harness.ini.
 //!
 //! The harness (never an agent: harness.ini is a protected path) appends
-//! the pattern to `[policy] bash.allow`, keeping the rest
-//! of the file, its comments and its permission bits unchanged.
+//! the pattern to `[policy] bash.allow` (or, for an MCP tool pattern
+//! `mcp:<server>/<tool>`, the tool to `[policy] mcp.<server>.allow`),
+//! keeping the rest of the file, its comments and its permission bits
+//! unchanged.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -25,17 +27,24 @@ pub struct IniRuleProposal {
 }
 
 impl IniRuleProposal {
+    /// The `[policy]` key and value this proposal writes.
+    fn target(&self) -> (String, &str) {
+        match crate::mcp::parse_action_name(&self.pattern) {
+            Some((server, tool)) => (format!("mcp.{server}.allow"), tool),
+            None => (ALWAYS_KEY.to_owned(), &self.pattern),
+        }
+    }
+
     /// What will be written, for the confirmation prompt.
     pub fn describe(&self) -> String {
-        format!(
-            "Add `{}` to [policy] {ALWAYS_KEY} in harness.ini?",
-            self.pattern
-        )
+        let (key, value) = self.target();
+        format!("Add `{value}` to [policy] {key} in harness.ini?")
     }
 
     /// The user confirmed: append the rule to the ini file at `path`.
     pub fn confirm(self, path: &Path) -> Result<(), IniEditError> {
-        append_rule(path, &self.pattern)
+        let (key, value) = self.target();
+        append_rule_to(path, &key, value)
     }
 }
 
@@ -61,6 +70,11 @@ pub enum IniEditError {
 /// is not added twice. The file is replaced atomically and keeps its mode
 /// (new files are created `0600`).
 pub fn append_rule(path: &Path, pattern: &str) -> Result<(), IniEditError> {
+    append_rule_to(path, ALWAYS_KEY, pattern)
+}
+
+/// Like [`append_rule`] for any `[policy]` list `key`.
+fn append_rule_to(path: &Path, key: &str, pattern: &str) -> Result<(), IniEditError> {
     let pattern = pattern.trim();
     if pattern.is_empty() || pattern.contains([',', '\n', '\r']) || pattern.contains(" ;") {
         return Err(IniEditError::BadPattern(pattern.into()));
@@ -74,7 +88,7 @@ pub fn append_rule(path: &Path, pattern: &str) -> Result<(), IniEditError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(io(e)),
     };
-    let Some(new) = edit(&text, ALWAYS_KEY, pattern) else {
+    let Some(new) = edit(&text, key, pattern) else {
         return Ok(());
     };
     write_atomic(path, &new).map_err(io)
@@ -237,6 +251,19 @@ mod tests {
             append_rule(&p, "a, b"),
             Err(IniEditError::BadPattern(_))
         ));
+        // An MCP tool pattern goes to `mcp.<server>.allow`.
+        let mcp = IniRuleProposal {
+            pattern: "mcp:github/create_issue".into(),
+        };
+        assert_eq!(
+            mcp.describe(),
+            "Add `create_issue` to [policy] mcp.github.allow in harness.ini?"
+        );
+        mcp.confirm(&p).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            "[policy]\nbash.allow = cargo test*\nmcp.github.allow = create_issue\n"
+        );
         let fresh = dir.path().join("new.ini");
         append_rule(&fresh, "ls*").unwrap();
         assert_eq!(

@@ -378,6 +378,64 @@ pub fn credential_keys(text: &str, provider: &str) -> Vec<&'static str> {
         .collect()
 }
 
+/// Returns `text` with `key = value` set in the existing section
+/// `[section]`: an existing line for `key` is replaced in place, otherwise
+/// the line is added after the section's last entry. `None` when the
+/// section does not exist.
+pub fn set_section_key(text: &str, section: &str, key: &str, value: &str) -> Option<String> {
+    let nl = newline_of(text);
+    let ls = lines(text);
+    let (start, end) = section_range(&ls, section)?;
+    let last_entry = (start + 1..end)
+        .rfind(|i| entry_key(ls[*i]).is_some())
+        .unwrap_or(start);
+    let present = ls[start + 1..end].iter().any(|l| entry_key(l) == Some(key));
+    let mut out = String::with_capacity(text.len() + key.len() + value.len() + 4);
+    let mut written = false;
+    for (i, l) in ls.iter().enumerate() {
+        match entry_key(l) {
+            Some(k) if i > start && i < end && k == key => {
+                if !written {
+                    let indent = &l[..l.len() - l.trim_start().len()];
+                    out.push_str(&format!("{indent}{key} = {value}{nl}"));
+                    written = true;
+                }
+            }
+            _ => out.push_str(l),
+        }
+        if i == last_entry && !present {
+            if !out.ends_with('\n') {
+                out.push_str(nl);
+            }
+            out.push_str(&format!("{key} = {value}{nl}"));
+        }
+    }
+    Some(out)
+}
+
+/// Sets `key = value` in the existing `[section]` of the file at `path`
+/// (which keeps or gets mode `0600`). Fails when the section is missing.
+pub fn save_section_key(
+    path: &Path,
+    section: &str,
+    key: &str,
+    value: &str,
+) -> Result<(), EditError> {
+    let old = read_or_empty(path)?;
+    ensure_parses(&old, path)?;
+    let new = set_section_key(&old, section, key, value).ok_or_else(|| {
+        EditError::InvalidValue(format!("[{section}] is not in {}", path.display()))
+    })?;
+    ensure_parses(&new, path)?;
+    if new != old {
+        write_private(path, &new).map_err(|source| EditError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    }
+    Ok(())
+}
+
 /// Writes `text` to `path` atomically with mode `0600`.
 ///
 /// A symlinked `path` is resolved so the link's target is replaced, not the
@@ -423,6 +481,40 @@ fn set_private(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn set_section_key_adds_or_replaces_in_place() {
+        let text = "[mcp.docs] ; remote\nurl = https://h/mcp\n\n[mcp.other]\nurl = https://o/mcp\n";
+        let out = set_section_key(text, "mcp.docs", "auth", "oauth").unwrap();
+        assert_eq!(
+            out,
+            "[mcp.docs] ; remote\nurl = https://h/mcp\nauth = oauth\n\n[mcp.other]\nurl = https://o/mcp\n"
+        );
+        let again = set_section_key(&out, "mcp.docs", "auth", "none").unwrap();
+        assert!(
+            again.contains("auth = none\n") && !again.contains("auth = oauth"),
+            "{again}"
+        );
+        assert!(set_section_key(text, "mcp.missing", "auth", "oauth").is_none());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("harness.ini");
+        std::fs::write(&path, text).unwrap();
+        save_section_key(&path, "mcp.other", "auth", "oauth").unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            saved.ends_with("url = https://o/mcp\nauth = oauth\n"),
+            "{saved}"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        let e = save_section_key(&path, "mcp.none", "auth", "oauth").unwrap_err();
+        assert!(e.to_string().contains("[mcp.none] is not in"), "{e}");
+    }
 
     fn key(v: &str) -> Credential {
         Credential::ApiKey(Secret::new(v.into()))

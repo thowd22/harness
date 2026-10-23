@@ -3,8 +3,8 @@
 //! Config file lookup: `$HARNESS_CONFIG`, else
 //! `$XDG_CONFIG_HOME/harness/harness.ini`, else `~/.config/harness/harness.ini`.
 //!
-//! Data directory (`[general] data_dir`, default `$XDG_DATA_HOME/harness`,
-//! else `~/.local/share/harness`):
+//! Data directory (`$HARNESS_DATA_DIR`, else `[general] data_dir`, default
+//! `$XDG_DATA_HOME/harness`, else `~/.local/share/harness`):
 //!
 //! ```text
 //! <data_dir>/
@@ -33,6 +33,11 @@ use crate::ini::Config;
 
 /// Environment variable naming an explicit config file.
 pub const CONFIG_ENV: &str = "HARNESS_CONFIG";
+
+/// Environment variable that overrides `[general] data_dir` for one
+/// process. `harness eval run` sets it so each attempt gets its own data
+/// directory; tests and scripts use it to keep runs off the user's.
+pub const DATA_DIR_ENV: &str = "HARNESS_DATA_DIR";
 
 /// Current data directory layout version.
 pub const LAYOUT_VERSION: u32 = 1;
@@ -107,6 +112,13 @@ pub fn default_data_dir_with(
         .or_else(|| home.map(|h| h.join(".local").join("share")))
         .unwrap_or_else(|| PathBuf::from(".local/share"))
         .join("harness")
+}
+
+/// The `$HARNESS_DATA_DIR` override, if set and non-empty. A relative path
+/// is resolved against the current directory.
+pub fn data_dir_override(env: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    let p = PathBuf::from(env(DATA_DIR_ENV).filter(|v| !v.is_empty())?);
+    Some(std::path::absolute(&p).unwrap_or(p))
 }
 
 /// Errors from opening or migrating the data directory.
@@ -317,6 +329,12 @@ impl DataDir {
     pub fn auth(&self) -> PathBuf {
         self.root.join("auth")
     }
+    /// `auth/mcp/`: OAuth tokens for remote MCP servers
+    /// (`harness_mcp::auth::store`), one `0600` file per server. It lies
+    /// inside [`DataDir::auth`], so it is a protected path too.
+    pub fn mcp_auth(&self) -> PathBuf {
+        self.auth().join("mcp")
+    }
     /// `logs/` (same as `harness_events::logging::log_dir`).
     pub fn logs(&self) -> PathBuf {
         self.root.join("logs")
@@ -390,6 +408,18 @@ mod tests {
             ),
             ConfigLocation::Default("/home/me/.config/harness/harness.ini".into())
         );
+    }
+
+    #[test]
+    fn data_dir_env_overrides_and_resolves_relative_paths() {
+        assert_eq!(data_dir_override(env(&[])), None);
+        assert_eq!(data_dir_override(env(&[("HARNESS_DATA_DIR", "")])), None);
+        assert_eq!(
+            data_dir_override(env(&[("HARNESS_DATA_DIR", "/d/x")])),
+            Some(PathBuf::from("/d/x"))
+        );
+        let rel = data_dir_override(env(&[("HARNESS_DATA_DIR", "rel")])).unwrap();
+        assert!(rel.is_absolute() && rel.ends_with("rel"), "{rel:?}");
     }
 
     #[test]
@@ -511,5 +541,11 @@ mod tests {
                 "{expected} missing from {p:?}"
             );
         }
+        // The MCP OAuth token store lies inside the protected auth dir.
+        assert!(d.mcp_auth().starts_with(d.auth()));
+        assert!(
+            p.iter()
+                .any(|q| d.mcp_auth().starts_with(q) && q == &d.auth())
+        );
     }
 }

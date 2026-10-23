@@ -9,6 +9,7 @@ pub mod effective;
 pub mod ini;
 pub mod lint;
 pub mod login;
+pub mod mcp_tools;
 pub mod paths;
 pub mod prompts;
 pub mod secrets;

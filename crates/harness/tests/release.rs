@@ -10,6 +10,8 @@ use std::process::{Command, Output};
 
 use serde_norway::Value;
 
+mod common;
+
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -32,6 +34,16 @@ fn run(dir: &Path, name: &str, args: &[&str], env: &[(&str, &str)]) -> Output {
     c.output().unwrap()
 }
 
+/// [`run`] for scripts that start the `harness` binary: hermetic, so it
+/// never reads or writes the user's config or data.
+fn run_hermetic(dir: &Path, name: &str, args: &[&str]) -> Output {
+    let home = common::hermetic_root();
+    let mut c = Command::new(script(name));
+    c.args(args).current_dir(dir);
+    common::hermetic(&mut c, home.path());
+    c.output().unwrap()
+}
+
 fn out(o: &Output) -> String {
     String::from_utf8_lossy(&o.stdout).into_owned()
 }
@@ -48,10 +60,10 @@ fn read(p: &Path) -> String {
 
 #[test]
 fn version_flag_reports_version_and_commit() {
-    let o = Command::new(env!("CARGO_BIN_EXE_harness"))
-        .arg("--version")
-        .output()
-        .unwrap();
+    let home = common::hermetic_root();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_harness"));
+    common::hermetic(&mut cmd, home.path());
+    let o = cmd.arg("--version").output().unwrap();
     assert!(o.status.success());
     let commit = env!("HARNESS_GIT_COMMIT");
     assert_eq!(
@@ -65,7 +77,7 @@ fn version_flag_reports_version_and_commit() {
     );
     // The release smoke test accepts exactly this output.
     let tmp = tempfile::tempdir().unwrap();
-    let ok = run(
+    let ok = run_hermetic(
         tmp.path(),
         "release-smoke.sh",
         &[
@@ -73,14 +85,12 @@ fn version_flag_reports_version_and_commit() {
             commit,
             env!("CARGO_BIN_EXE_harness"),
         ],
-        &[],
     );
     assert!(ok.status.success(), "{}", err(&ok));
-    let bad = run(
+    let bad = run_hermetic(
         tmp.path(),
         "release-smoke.sh",
         &["9.9.9", commit, env!("CARGO_BIN_EXE_harness")],
-        &[],
     );
     assert!(!bad.status.success());
     assert!(err(&bad).contains("want 'harness 9.9.9"), "{}", err(&bad));

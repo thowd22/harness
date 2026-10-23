@@ -11,6 +11,8 @@
 
 mod commands;
 pub mod demo;
+mod mcp;
+mod mcp_login;
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -219,6 +221,8 @@ struct Driver {
     /// The action of the last stopped turn, run by the panel's primary
     /// button ([`commands::ERROR_ACTION`]).
     error_action: Option<harness_events::schema::ErrorAction>,
+    /// MCP servers of the session: `/mcp`, prompts, resources.
+    mcp: mcp::McpUi,
 }
 
 impl Driver {
@@ -257,6 +261,7 @@ impl Driver {
             login_verifier: Arc::new(crate::login::LiveVerifier::default()),
             browser: Arc::new(harness_providers::chatgpt::SystemBrowser),
             error_action: None,
+            mcp: mcp::McpUi::default(),
         }
     }
 
@@ -333,15 +338,11 @@ impl Driver {
             branch: harness_config::prompts::git_branch(&core.cwd),
         })
         .await;
-        self.send(CoreEvent::PaletteEntries(commands::palette_entries(
-            &self.registry,
-            &core,
-        )))
-        .await;
-        self.send(CoreEvent::SlashCommands(commands::slash_commands(
-            &self.registry,
-        )))
-        .await;
+        let palette = commands::palette_entries(&self.registry, &core);
+        let slash = commands::slash_commands(&self.registry);
+        self.send(CoreEvent::PaletteEntries(palette.clone())).await;
+        self.send(CoreEvent::SlashCommands(slash.clone())).await;
+        mcp::session_started(self, &core, palette, slash).await;
         for w in &core.warnings {
             self.notify(Level::Warning, "warning", Some(w.clone()))
                 .await;
@@ -388,6 +389,7 @@ impl Driver {
 
     /// Ends the current session's run (after the running turn, if any).
     async fn finish_core(&mut self) {
+        self.mcp.stop();
         if let Some(c) = &self.cancel {
             c.cancel();
         }
@@ -436,6 +438,7 @@ impl Driver {
 
     /// Sends `text` to the agent now, or after the running turn.
     async fn prompt(&mut self, text: String) {
+        let text = self.mcp.with_attachments(text);
         if self.busy() || self.core.is_none() {
             self.queue.push_back(text);
             self.notify(
@@ -512,12 +515,15 @@ impl Driver {
     }
 
     async fn run(mut self, mut requests: mpsc::UnboundedReceiver<UiRequest>) {
+        // MCP prompts run in the background; their text arrives here.
+        let mut mcp_turns = self.mcp.take_turns();
         loop {
             tokio::select! {
                 r = requests.recv() => match r {
                     Some(r) => if !self.request(r).await { break },
                     None => break,
                 },
+                Some(text) = mcp_turns.recv() => self.prompt(text).await,
                 done = async { self.turn.as_mut().expect("turn").await }, if self.turn.is_some() => {
                     self.turn = None;
                     match done {

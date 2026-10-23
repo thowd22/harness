@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use super::config::Config;
 use super::document::parse;
 use super::error::{IniError, IniErrors};
-use crate::paths::{ConfigLocation, config_location, home_dir};
+use crate::paths::{ConfigLocation, config_location, data_dir_override, home_dir};
 
 /// Loads the config from `$HARNESS_CONFIG` or the XDG default path.
 ///
@@ -18,13 +18,27 @@ pub fn load() -> Result<Config, IniErrors> {
 }
 
 /// Loads the config from an already-resolved location.
+///
+/// `$HARNESS_DATA_DIR`, when set, replaces `[general] data_dir` (see
+/// [`crate::paths::DATA_DIR_ENV`]).
 pub fn load_location(location: &ConfigLocation) -> Result<Config, IniErrors> {
     let path = location.path();
-    if !location.is_explicit() && !path.exists() {
+    let mut config = if !location.is_explicit() && !path.exists() {
         tracing::debug!(path = %path.display(), "no harness.ini; using defaults");
-        return Ok(Config::defaults());
+        Config::defaults()
+    } else {
+        load_file(path)?
+    };
+    apply_env_overrides(&mut config, |k| std::env::var_os(k));
+    Ok(config)
+}
+
+/// Applies environment overrides (`$HARNESS_DATA_DIR`) to a loaded config.
+pub fn apply_env_overrides(config: &mut Config, env: impl Fn(&str) -> Option<std::ffi::OsString>) {
+    if let Some(dir) = data_dir_override(env) {
+        tracing::debug!(data_dir = %dir.display(), "data_dir from $HARNESS_DATA_DIR");
+        config.general.data_dir = dir;
     }
-    load_file(path)
 }
 
 /// Loads and validates the file at `path`, which must exist.
@@ -112,6 +126,19 @@ mod tests {
         }
         let _ = mode;
         p
+    }
+
+    #[test]
+    fn data_dir_env_replaces_the_configured_data_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(dir.path(), "[general]\ndata_dir = /configured\n", 0o600);
+        let mut c = load_file(&p).unwrap();
+        apply_env_overrides(&mut c, |_| None);
+        assert_eq!(c.general.data_dir, PathBuf::from("/configured"));
+        apply_env_overrides(&mut c, |k| {
+            (k == "HARNESS_DATA_DIR").then(|| "/isolated".into())
+        });
+        assert_eq!(c.general.data_dir, PathBuf::from("/isolated"));
     }
 
     #[test]

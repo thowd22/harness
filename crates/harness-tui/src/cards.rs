@@ -20,6 +20,9 @@
 //! lines; [`ToolCard::toggle`] (Enter or a click in the chat) expands them.
 //! Errors always show the full message the model received. `todo`,
 //! `memory` and `spawn_agent` render as compact one-line summaries.
+//! MCP calls ([`ToolCard::mcp`], from `mcp_call` events) show
+//! `mcp <server> › <tool>` instead of the name offered to the model, with
+//! the arguments sent to the server and its output.
 //! Parallel calls from one model turn are grouped by [`CardGroup`] under one
 //! header with a count.
 //!
@@ -189,6 +192,15 @@ pub struct CardButton {
     pub width: usize,
 }
 
+/// The MCP server tool behind a call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpLabel {
+    /// `[mcp.<server>]` name.
+    pub server: String,
+    /// The tool's name on the server.
+    pub tool: String,
+}
+
 /// One tool call.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolCard {
@@ -212,6 +224,8 @@ pub struct ToolCard {
     pub approval: Option<ApprovalNote>,
     /// Expanded past the preview.
     pub expanded: bool,
+    /// The MCP server tool, for MCP calls.
+    pub mcp: Option<McpLabel>,
     version: u64,
 }
 
@@ -234,7 +248,40 @@ impl ToolCard {
             change: None,
             approval: None,
             expanded: false,
+            mcp: None,
             version: 0,
+        }
+    }
+
+    /// Marks the card as a call of `tool` on MCP server `server`.
+    pub fn set_mcp(&mut self, server: &str, tool: &str) {
+        self.mcp = Some(McpLabel {
+            server: server.to_owned(),
+            tool: tool.to_owned(),
+        });
+        self.bump();
+    }
+
+    /// The name shown in the header: `mcp <server> › <tool>` for MCP calls,
+    /// else the tool name.
+    pub fn display_name(&self) -> String {
+        match &self.mcp {
+            Some(m) => format!("mcp {} › {}", m.server, m.tool),
+            None => self.tool.clone(),
+        }
+    }
+
+    /// The header name as styled spans.
+    fn name_spans(&self, theme: &Theme) -> Vec<Span<'static>> {
+        let accent = theme.fg(Token::Accent).add_modifier(Modifier::BOLD);
+        match &self.mcp {
+            Some(m) => vec![
+                Span::styled("mcp ", theme.fg(Token::Muted)),
+                Span::styled(m.server.clone(), theme.fg(Token::Agent)),
+                Span::styled(" › ", theme.fg(Token::Muted)),
+                Span::styled(m.tool.clone(), accent),
+            ],
+            None => vec![Span::styled(self.tool.clone(), accent)],
         }
     }
 
@@ -305,8 +352,13 @@ impl ToolCard {
     }
 
     /// Header summary after the tool name, e.g. `src/parse.rs` or `$ cargo test`.
+    /// For an MCP call through `mcp_tools`, the arguments sent to the server.
     pub fn summary(&self) -> String {
-        arg_summary(&self.tool, &self.args)
+        match (&self.mcp, self.args.get("call"), self.args.get("arguments")) {
+            (Some(_), Some(_), Some(a)) => arg_summary("", a),
+            (Some(_), Some(_), None) => String::new(),
+            _ => arg_summary(&self.tool, &self.args),
+        }
     }
 
     /// Header badges (left side, after the summary).
@@ -479,7 +531,7 @@ impl ToolCard {
         let fg = theme.fg(Token::Fg);
         if self.status == CardStatus::Error {
             return self
-                .output
+                .output_text(false)
                 .lines()
                 .map(|l| Line::from(Span::styled(sanitize(l), theme.fg(Token::Error))))
                 .collect();
@@ -534,6 +586,11 @@ impl ToolCard {
             }
             "edit" => diff_lines(&self.diff_rows(), lang, theme),
             "bash" => bash_body(&self.output, theme),
+            _ if self.mcp.is_some() => self
+                .output_text(false)
+                .lines()
+                .map(|l| Line::from(Span::styled(sanitize(l), fg)))
+                .collect(),
             _ => self
                 .output
                 .lines()
@@ -567,11 +624,8 @@ impl ToolCard {
                 format!("{} ", self.status.icon(&ctx.spinner)),
                 theme.fg(self.status.token()),
             ),
-            Span::styled(
-                self.tool.clone(),
-                theme.fg(Token::Accent).add_modifier(Modifier::BOLD),
-            ),
         ];
+        left.extend(self.name_spans(theme));
         let summary = self.summary();
         if !summary.is_empty() {
             let token = if self.tool == "bash" {
@@ -631,7 +685,7 @@ impl ToolCard {
                 border,
             ));
         }
-        if let Some(p) = (self.tool == "bash")
+        if let Some(p) = (self.tool == "bash" || self.mcp.is_some())
             .then(|| spill_pointer(&self.output))
             .flatten()
         {
@@ -1306,6 +1360,69 @@ mod tests {
         assert!(text(&l[0]).contains("⏸ read"));
         assert!(text(&l[0]).contains("outward action"));
         assert!(text(&l[1]).contains("rule: outward.ask = git push*"));
+    }
+
+    #[test]
+    fn error_bodies_drop_the_provenance_wrapper() {
+        let theme = Theme::default();
+        let mut card = ToolCard::new("c1", "mcp__t__write_note", json!({"text": "x"}), TS);
+        card.set_mcp("t", "write_note");
+        card.finish(
+            false,
+            "<tool_result tool=\"mcp__t__write_note\" call_id=\"c1\" status=\"error\" trust=\"untrusted\" origin=\"mcp server\">\nnot run: the approval was denied\n</tool_result>".into(),
+            3,
+        );
+        let body = lines(&card, &theme).join("\n");
+        assert!(body.contains("not run: the approval was denied"), "{body}");
+        assert!(!body.contains("tool_result"), "{body}");
+    }
+
+    #[test]
+    fn mcp_calls_name_server_and_tool_with_semantic_tokens() {
+        let theme = Theme::default();
+        let mut card = ToolCard::new(
+            "c1",
+            "mcp__github__create_issue",
+            json!({"title": "Crash", "body": "x"}),
+            TS,
+        );
+        assert_eq!(card.display_name(), "mcp__github__create_issue");
+        let v = card.version();
+        card.set_mcp("github", "create_issue");
+        assert!(card.version() > v, "render caches see the change");
+        assert_eq!(card.display_name(), "mcp github › create_issue");
+        card.finish(
+            false,
+            "`create_issue` reported an error: rate limited".into(),
+            42,
+        );
+        let l = card.render(&ctx(&theme));
+        let h = text(&l[0]);
+        assert!(
+            h.starts_with("╭ ✗ mcp github › create_issue  body=x title=Crash"),
+            "{h}"
+        );
+        assert!(h.contains("42ms"), "{h}");
+        let span = |t: &str| l[0].spans.iter().find(|s| s.content == t).unwrap().style;
+        assert_eq!(span("github").fg, theme.fg(Token::Agent).fg);
+        assert_eq!(span("create_issue").fg, theme.fg(Token::Accent).fg);
+        assert_eq!(span("mcp ").fg, theme.fg(Token::Muted).fg);
+        assert_eq!(l[0].style.bg, theme.bg(Token::CardError).bg);
+        // Errors show the full message.
+        assert!(
+            lines(&card, &theme)
+                .iter()
+                .any(|x| x.contains("rate limited"))
+        );
+        // Through `mcp_tools`, the summary is the arguments sent to the server.
+        let mut gw = ToolCard::new(
+            "c2",
+            "mcp_tools",
+            json!({"call": "db/query", "arguments": {"sql": "select 1"}}),
+            TS,
+        );
+        gw.set_mcp("db", "query");
+        assert_eq!(gw.summary(), "sql=select 1");
     }
 
     #[test]

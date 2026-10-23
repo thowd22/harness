@@ -355,3 +355,59 @@ fn snapshot_detail() {
     h.draw();
     insta::assert_snapshot!("detail_gallery", styled_snapshot(h.term.backend().buffer()));
 }
+
+#[test]
+fn mcp_calls_show_server_tool_duration_and_result_and_toggle() {
+    let mut b = EventBuilder::new();
+    b.start(NodeSpec::step("fix").agent("implementer").model("sonnet"));
+    b.model_call("fix", "c1", "sonnet");
+    b.finish_call("fix", "c1", usage(10, 0, 5, 0), 500);
+    b.tool_call(
+        "fix",
+        "m1",
+        "mcp__github__create_issue",
+        json!({"title": "Crash"}),
+    );
+    b.push(
+        Some("fix"),
+        None,
+        EventKind::McpCall {
+            call_id: "m1".into(),
+            server: "github".into(),
+            tool: "create_issue".into(),
+        },
+    );
+    b.advance(1_234);
+    b.tool_result(
+        "fix",
+        "m1",
+        true,
+        "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10",
+        1_234,
+    );
+    let mut h = H::new(b.events(), 120, 40);
+    let text = h.draw();
+    // The sidebar names the server tool too.
+    assert!(text.contains("✔ mcp github › create_issue"), "{text}");
+    assert!(
+        text.contains("╭ ✔ mcp github › create_issue  title=Crash"),
+        "{text}"
+    );
+    assert!(text.contains("1.2s"), "{text}");
+    let card = |h: &H| h.d.turns[0].cards[0].expanded;
+    let before = card(&h);
+    // Keyboard.
+    for _ in 0..40 {
+        if h.d.interaction.focused().is_some_and(|f| f.0 == "card.m1") {
+            break;
+        }
+        h.send(&key("tab"));
+    }
+    assert_eq!(h.d.interaction.focused().unwrap().0, "card.m1");
+    h.send(&key("enter"));
+    assert_ne!(card(&h), before);
+    // Mouse, on the card header.
+    h.click_on("╭ ✔ mcp github");
+    assert_eq!(card(&h), before);
+    assert_eq!(h.send(&key("esc")), Some(DetailOutput::Back));
+}
