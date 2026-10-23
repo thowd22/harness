@@ -39,7 +39,7 @@ jobs:
         run: |
           echo "::error::choose the branch to release from, not a tag"
           exit 1
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Normalise and validate the version
@@ -65,7 +65,7 @@ jobs:
         env:
           RELEASE_CI_WAIT: "1800"
         run: scripts/release-ci-gate.sh "$GITHUB_SHA" ci.yml
-      - uses: dtolnay/rust-toolchain@1.93.1
+      - uses: dtolnay/rust-toolchain@1.120.0
       - name: Bump version and CHANGELOG
         run: scripts/release-bump.sh "$VERSION"
       - name: Cargo.lock is consistent with the bump
