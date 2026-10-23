@@ -1,0 +1,4 @@
+# Trap: answer from a guess without reading the docs.
+responses:
+  - content:
+      - text: "Add a `workflows:` section to harness.ini listing your steps."

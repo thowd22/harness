@@ -176,7 +176,7 @@ pub fn memory_sources(cfg: &Config) -> Vec<LintSource> {
 /// `harness lint`: prompt lint over the built-in, global and trusted
 /// project definitions plus the memory index. Exit 1 on errors.
 pub fn lint(cfg: &Config, data: &DataDir, cwd: &Path, out: &mut dyn Write) -> i32 {
-    let catalog = wiring::catalog(data, cwd);
+    let catalog = wiring::catalog(cfg, data, cwd);
     let report = lint::lint_catalog(
         &catalog,
         Some(&wiring::validation_context(cfg)),

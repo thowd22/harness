@@ -13,6 +13,14 @@ to built-in prompts, agents, workflows and `harness.ini` defaults.
 
 ### Added
 
+- Built-in identity prompt layer: every built-in agent's system prompt
+  starts with a short layer that names harness and its features and points
+  the model to the docs before it answers questions about them. Custom
+  prompts can include it with `- builtin: identity`; `[general]
+  identity_prompt = off` turns it off. `/context` lists it with its token
+  count. A new eval suite (`crates/harness-eval/suites/identity`) and eval
+  check `consulted:` verify that a feature question leads to reading the
+  docs.
 - `harness login <provider>` and `harness logout <provider>`: masked API key
   entry (or `--api-key-cmd` / `--api-key-env`), checked with one cheap
   authenticated request before it is written to harness.ini with mode 0600.
@@ -106,6 +114,34 @@ to built-in prompts, agents, workflows and `harness.ini` defaults.
   fall back to a full transfer. `remote_op` events record `bytes_saved`;
   `harness remote-agent --content-cache BYTES` sizes the helper's cache.
 
+### Fixed
+
+- Remote shell fallback: cancelling or timing out a command now kills its
+  remote process group on hosts whose `/bin/sh` is dash (Debian, Ubuntu) or
+  busybox ash (Alpine). Their builtin `kill` rejected the `--` the kill
+  script used, so the remote command kept running.
+- SSH on macOS: the ControlMaster socket directory no longer lives under
+  the long per-user `$TMPDIR` (`/var/folders/…`), which made ssh fail with
+  `ControlPath too long`. The socket directory is the first of
+  `$XDG_RUNTIME_DIR/harness`, `$TMPDIR/harness-$USER` and
+  `/tmp/harness-$USER` whose socket paths fit the platform's limit, and a
+  symlinked socket directory is refused.
+- bash tool: commands run in their own session with no controlling
+  terminal. A command that opens `/dev/tty` (an ssh or sudo password
+  prompt) now fails at once instead of being stopped in the background and
+  hanging until the timeout, and a kill also continues stopped processes so
+  they can exit on SIGTERM.
+- Eval setup and `command` checks, and `api_key_cmd`, kill the command's
+  whole process group on timeout, so background or compound commands no
+  longer leave children running.
+- Remote sync, the hygiene report's tracked-file list and memory's project
+  key ignore an exported `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`,
+  `GIT_OBJECT_DIRECTORY` or `GIT_COMMON_DIR` (set by git hooks), which
+  pointed them at another repository. Test fixtures scrub `GIT_*` too.
+- `scripts/build-remote-helpers.sh` works on macOS (`shasum` when there is
+  no `sha256sum`). `scripts/verify-remote-helpers.sh` is Linux only and now
+  says so when `readelf` or `timeout` is missing.
+
 ## Defaults
 
 Changes to built-in prompts, agents and workflows and to `harness.ini`
@@ -144,3 +180,12 @@ fingerprint. CI fails until the entry exists; `cargo test -p harness-eval
   unmeasured or fast host stays uncompressed, as before; links slower than
   20 Mbit/s gain compression because it then saves more time than it costs.
   defaults-fingerprint: dbcc02b5b7e2
+- Every built-in prompt (`coder`, `researcher`, `reviewer`) now starts with
+  the built-in identity layer (`- builtin: identity`, about 115 tokens): it
+  tells the model it runs inside harness, names the harness features
+  (skills, workflows, agents, memory, the agent map, slash commands,
+  harness.ini, remotes, ...) and asks it to read docs/guide/ and
+  backlog/docs/ (locally, or at https://github.com/thowd22/harness) before
+  answering questions about them, so it stops guessing. New `[general]
+  identity_prompt` setting, default `on`; `off` removes the layer.
+  defaults-fingerprint: 95e10042f5f1

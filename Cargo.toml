@@ -105,9 +105,9 @@ nix = { version = "0.31.3", features = ["signal", "process"] }
 # Linux Landlock LSM bindings for the harness-policy bash sandbox
 landlock = "0.4.4"
 # Binary payloads in the harness-remote JSON-RPC protocol
-base64 = "0.22.1"
+base64 = "0.23.1"
 # Negotiated frame compression in the harness-remote helper protocol
-zstd = { version = "0.13.3", default-features = false }
+zstd = { version = "0.14.3", default-features = false }
 
 # Testing
 tempfile = "3.27.0"

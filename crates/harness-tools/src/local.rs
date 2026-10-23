@@ -213,8 +213,8 @@ impl Workspace for LocalWorkspace {
 
 /// [`Exec`] that runs processes on this machine.
 ///
-/// Each process is the leader of a new process group (`setpgid(0, 0)`), with
-/// stdin attached to `/dev/null`. On timeout, kill or drop of the handle the
+/// Each process leads a new session and process group (`setsid`), with
+/// stdin attached to `/dev/null` and no controlling terminal. On timeout, kill or drop of the handle the
 /// group receives SIGTERM, then SIGKILL after [`KILL_GRACE`]. When the leader
 /// exits on its own, any processes left in its group are killed too, so
 /// stray background jobs cannot outlive a tool call.
@@ -233,8 +233,35 @@ fn signal_group(pgid: i32, sig: Signal) {
     let _ = killpg(Pid::from_raw(pgid), sig);
 }
 
+/// Starts the child in a new session (`setsid`), which also makes it the
+/// leader of a new process group, so its pid is the group id to signal.
+///
+/// A plain `setpgid` group would still belong to the TUI's session and be a
+/// *background* group of the user's terminal: anything that opens
+/// `/dev/tty` (an ssh or sudo password prompt, pinentry-tty) would be
+/// stopped by SIGTTIN/SIGTTOU and hang until the timeout. In its own session
+/// the child has no controlling terminal, so such an open fails at once
+/// with ENXIO and the prompt errors out instead.
+#[allow(unsafe_code)]
+fn new_session(cmd: &mut Command) {
+    // SAFETY: the closure runs in the forked child before exec and only
+    // calls setsid(2), which is async-signal-safe; it allocates nothing and
+    // touches no locks. (`process_group(0)` cannot be combined with it:
+    // setsid fails with EPERM in a process that already leads a group.)
+    unsafe {
+        cmd.pre_exec(|| {
+            nix::unistd::setsid()
+                .map(|_| ())
+                .map_err(std::io::Error::from)
+        });
+    }
+}
+
 async fn terminate_group(pgid: i32, child: &mut Child) -> std::io::Result<ExitStatus> {
     signal_group(pgid, Signal::SIGTERM);
+    // Stopped members (SIGSTOP, job-control stops) act on TERM only once
+    // they are continued.
+    signal_group(pgid, Signal::SIGCONT);
     match tokio::time::timeout(KILL_GRACE, child.wait()).await {
         Ok(status) => status,
         Err(_) => {
@@ -320,8 +347,8 @@ impl Exec for LocalExec {
             .current_dir(&req.cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0);
+            .stderr(Stdio::piped());
+        new_session(&mut cmd);
         if req.clear_env {
             cmd.env_clear();
         }
@@ -372,6 +399,77 @@ mod tests {
     async fn local_exec_passes_conformance_suite() {
         let dir = tempfile::tempdir().unwrap();
         conformance::exec_suite(&LocalExec::new(), dir.path()).await;
+    }
+
+    async fn run(cmd: &str, timeout: Duration) -> (ExitOutcome, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let req =
+            ExecRequest::new("sh", vec!["-c".into(), cmd.into()], dir.path()).with_timeout(timeout);
+        let h = LocalExec::new().spawn(req).await.unwrap();
+        let mut out = Vec::new();
+        let st = h.drive(|c| out.extend_from_slice(&c.data)).await.unwrap();
+        (st, String::from_utf8_lossy(&out).into_owned())
+    }
+
+    /// A command that opens `/dev/tty` (a password prompt) fails at once
+    /// instead of being stopped as a background job of the user's terminal.
+    #[tokio::test]
+    async fn tty_open_fails_fast_instead_of_stopping() {
+        let started = std::time::Instant::now();
+        let (st, out) = run(
+            "if ( : < /dev/tty ) 2>/dev/null; then echo opened; else echo no-tty; fi",
+            Duration::from_secs(20),
+        )
+        .await;
+        assert!(!st.timed_out, "{st:?} {out}");
+        assert!(out.contains("no-tty"), "{out}");
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    /// The child leads its own session (so it has no controlling terminal)
+    /// and its own process group (so killpg reaches its children).
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn exec_child_leads_its_own_session() {
+        // /proc/<pid>/stat fields after the command name: state ppid pgrp session.
+        let ids = |stat: &str| -> (String, String) {
+            let f: Vec<&str> = stat
+                .rsplit_once(')')
+                .unwrap()
+                .1
+                .split_whitespace()
+                .collect();
+            (f[2].to_string(), f[3].to_string())
+        };
+        let (st, out) = run("echo $$; cat /proc/$$/stat", Duration::from_secs(20)).await;
+        assert_eq!(st.code, Some(0), "{out}");
+        let (pid, stat) = out.split_once('\n').unwrap();
+        let (pgrp, sid) = ids(stat);
+        assert_eq!(pgrp, pid.trim(), "group leader");
+        assert_eq!(sid, pid.trim(), "session leader");
+        let own = std::fs::read_to_string("/proc/self/stat").unwrap();
+        assert_ne!(ids(&own).1, sid, "not the caller's session");
+    }
+
+    /// A stopped command still ends at the TERM of a kill, not only at the
+    /// SIGKILL after the grace period.
+    #[tokio::test]
+    async fn kill_continues_a_stopped_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let req = ExecRequest::new(
+            "sh",
+            vec!["-c".into(), "echo up; kill -STOP $$; sleep 30".into()],
+            dir.path(),
+        );
+        let mut h = LocalExec::new().spawn(req).await.unwrap();
+        h.next_output().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let started = std::time::Instant::now();
+        h.kill();
+        let st = h.drive(|_| {}).await.unwrap();
+        assert!(st.killed, "{st:?}");
+        assert_eq!(st.signal, Some(15), "ended by TERM: {st:?}");
+        assert!(started.elapsed() < KILL_GRACE, "{:?}", started.elapsed());
     }
 
     #[tokio::test]

@@ -1,3 +1,4 @@
+# shellcheck shell=sh
 # Shared helpers for the scripts/release-*.sh scripts. Sourced, not run.
 # POSIX sh only: the release scripts run on Linux and macOS runners.
 

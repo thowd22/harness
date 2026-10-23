@@ -11,8 +11,8 @@ file with the same `name` in `~/.config/harness/` or a trusted project's
 | agent | `coder` | The default agent. Tools: `read`, `write`, `edit`, `bash`, `todo`. Memory: `read-write`. |
 | agent | `researcher` | Read-only investigation: `read`, `bash` (commits, pushes and `rm` denied), memory `read`, low effort. |
 | agent | `reviewer` | Independent review: `read`, `bash` (commits and pushes denied), no memory, high effort. |
-| prompt | `coder` | `base.md` + `coder.md` + `memory.md` + a line with cwd, OS, branch and date. |
-| prompt | `researcher`, `reviewer` | One inline layer each. |
+| prompt | `coder` | The identity layer + `base.md` + `coder.md` + `memory.md` + `context.md` + a line with cwd, OS, branch and date. |
+| prompt | `researcher`, `reviewer` | The identity layer, one inline layer and `context.md`. |
 | workflow | `dream` | Memory consolidation settings (see [dreaming.md](dreaming.md)). |
 
 ## What the defaults encode
@@ -30,6 +30,17 @@ the known fixes:
   any you created in the project before you finish."
 - **Plans for multi-step work.** The coder prompt explains when to use the
   `todo` tool (several steps) and when not to (one-step tasks).
+- **Know harness.** Every built-in prompt starts with the identity layer
+  (`- builtin: identity`, `harness_config::prompts::IDENTITY`, at most 120
+  tokens, compiled into the binary). It says the model runs inside harness,
+  names the harness features (skills, workflows, agents, subagents, memory,
+  dreaming, context, compaction, agent map, goal bar, slash commands,
+  command palette, harness.ini, remotes) and asks it to read `docs/guide/`
+  (usage) and `backlog/docs/` (design) before answering questions about
+  them: the local copies when the working directory is the harness
+  repository, otherwise https://github.com/thowd22/harness. It is the first
+  layer, so it sits in the cached prefix. `[general] identity_prompt = off`
+  removes it; a custom prompt includes it with `- builtin: identity`.
 - **Memory.** Agents with `memory: read-write` include `prompts/memory.md`,
   which is exactly `harness_memory::extract::PROMPT_SECTION` (a test keeps
   them identical).
@@ -64,6 +75,10 @@ to a tool (here `todo`, `edit`, `write`, `bash`) the agent does not have.
   config (`builtins::tests`).
 - Rendered prompts stay well inside the initial context budget (a quarter of
   `LintOptions::prompt_token_budget`).
+- The identity layer is the first layer of every built-in agent's prompt,
+  stays at most 120 tokens and names every key term (`prompts::tests`,
+  `builtins::tests`); the `identity` eval suite checks that a feature
+  question leads to reading the docs ([evals.md](evals.md)).
 - The rendered prompts and the request each provider would send for every
   default agent are golden snapshots ([golden-snapshots.md](golden-snapshots.md)).
 
@@ -71,7 +86,8 @@ to a tool (here `todo`, `edit`, `write`, `bash`) the agent does not have.
 
 Defaults change behaviour for most users, so changes must be deliberate:
 
-1. Edit the asset and accept the changed golden snapshots
+1. Edit the asset (or `prompts::IDENTITY`, which the fingerprint also
+   covers) and accept the changed golden snapshots
    (`cargo insta review`).
 2. Add an entry to the `## Defaults` section of `CHANGELOG.md` that says what
    changed and why, ending with `defaults-fingerprint: <hex>`.

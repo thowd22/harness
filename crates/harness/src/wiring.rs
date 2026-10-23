@@ -43,9 +43,17 @@ pub fn roots(data: &DataDir, cwd: &Path) -> Roots {
     Roots::resolve(builtins(), &TrustStore::from_data_dir(data), Some(cwd))
 }
 
-/// Loads the catalog of prompts, agents, workflows and skills for `cwd`.
-pub fn catalog(data: &DataDir, cwd: &Path) -> Catalog {
-    Catalog::load(&roots(data, cwd))
+/// Loads the catalog of prompts, agents, workflows and skills for `cwd`,
+/// with the built-in identity layer per `[general] identity_prompt`.
+pub fn catalog(cfg: &Config, data: &DataDir, cwd: &Path) -> Catalog {
+    catalog_from(cfg, &roots(data, cwd))
+}
+
+/// Loads the catalog from `roots`, applying `[general] identity_prompt`.
+pub fn catalog_from(cfg: &Config, roots: &Roots) -> Catalog {
+    let mut catalog = Catalog::load(roots);
+    catalog.set_identity_prompt(cfg.general.identity_prompt);
+    catalog
 }
 
 /// Agent validation context: `[models]`, the built-in model aliases and the
@@ -486,6 +494,32 @@ mod catalog_tests {
             "providers without a source have nothing to refresh"
         );
         assert!(service.spawn_refresh(false).is_none(), "nothing to fetch");
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    use harness_config::prompts::IDENTITY;
+
+    #[test]
+    fn identity_prompt_setting_controls_the_system_prompt() {
+        let cwd = tempfile::tempdir().unwrap();
+        let roots = Roots::new(builtins());
+        for (ini, on) in [
+            ("", true),
+            ("[general]\nidentity_prompt = on\n", true),
+            ("[general]\nidentity_prompt = off\n", false),
+        ] {
+            let cfg = harness_config::ini::load_str(ini, None).unwrap();
+            let catalog = catalog_from(&cfg, &roots);
+            for name in harness_config::builtins::AGENTS {
+                let a = agent(&catalog, name).unwrap();
+                let system = system_prompt(&catalog, &a, cwd.path()).unwrap();
+                assert_eq!(system.starts_with(IDENTITY), on, "{ini:?} agent {name}");
+                assert_eq!(system.contains(IDENTITY), on, "{ini:?} agent {name}");
+            }
+        }
     }
 }
 

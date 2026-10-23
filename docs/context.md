@@ -15,6 +15,10 @@ Every request is laid out so that what does not change comes first:
 4. the skill listing,
 5. the history.
 
+The system prompt of every built-in agent starts with the built-in identity
+layer (see [defaults.md](defaults.md)), so it is part of the most stable
+bytes of the request and never moves the cache boundary.
+
 Layers 1, 3 and 4 are frozen once at session start (`SessionPrefix::freeze`)
 and never recomputed mid-session. Memories written and skills added during a
 session take effect in the next one. Because the prefix bytes never change,

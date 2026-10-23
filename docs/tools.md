@@ -76,8 +76,12 @@ and the change ledger can see it.
 - `timeout` is in seconds. The default is `bash_timeout` (120) and the maximum
   `bash_max_timeout` (600); larger values are capped, with a note.
 - On timeout, cancel or when the command finishes, the command's whole
-  process group is killed: SIGTERM, then SIGKILL after 2 seconds. Background
-  jobs (`server &`) do not outlive the call.
+  process group is killed: SIGTERM (with SIGCONT, so stopped processes can
+  exit), then SIGKILL after 2 seconds. Background jobs (`server &`) do not
+  outlive the call.
+- The command runs in its own session with no controlling terminal, so
+  anything that opens `/dev/tty` (an ssh or sudo password prompt,
+  pinentry-tty) fails at once instead of waiting for input that cannot come.
 - Output streams live to the UI. The model gets stdout and stderr combined,
   followed by `[exit code N]` on failure or a timeout/cancel note.
 - The working directory persists between calls in a session: `cd sub` in one

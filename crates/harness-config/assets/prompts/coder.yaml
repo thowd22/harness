@@ -1,6 +1,7 @@
 name: coder
 description: Default coding prompt (built in)
 layers:
+  - builtin: identity
   - file: base.md
   - file: coder.md
   - file: memory.md

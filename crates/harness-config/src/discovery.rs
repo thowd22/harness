@@ -834,9 +834,31 @@ pub struct Catalog {
     pub workflows: Registry<RawWorkflow>,
     /// Skills.
     pub skills: Registry<Skill>,
+    /// `[general] identity_prompt = off` (see [`Catalog::set_identity_prompt`]).
+    identity_off: bool,
 }
 
 impl Catalog {
+    /// Turns the built-in identity layer on or off for every prompt
+    /// (`[general] identity_prompt`, default on). The setting is kept across
+    /// [`Catalog::reload`].
+    pub fn set_identity_prompt(&mut self, on: bool) {
+        self.identity_off = !on;
+        self.apply_identity();
+    }
+
+    /// Whether the built-in identity layer is on.
+    pub fn identity_prompt(&self) -> bool {
+        !self.identity_off
+    }
+
+    fn apply_identity(&mut self) {
+        let on = !self.identity_off;
+        for e in self.prompts.files.values_mut() {
+            e.item.identity = on;
+        }
+    }
+
     /// Loads all four kinds.
     pub fn load(roots: &Roots) -> Self {
         let mut c = Catalog::default();
@@ -847,6 +869,7 @@ impl Catalog {
     /// Reloads all four kinds; returns true if anything active changed.
     pub fn reload(&mut self, roots: &Roots) -> bool {
         let a = self.prompts.reload(roots);
+        self.apply_identity();
         let b = self.agents.reload(roots);
         let c = self.workflows.reload(roots);
         let d = self.skills.reload(roots);

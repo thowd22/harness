@@ -25,7 +25,7 @@ Components never use raw colors, only semantic tokens. The default theme maps th
 | Pink | `#ff79c6` | `user` (user message bar), `keyword` |
 | Purple | `#bd93f9` | `accent` (tool names, focus border, palette match), `agent` names |
 | Red | `#ff5555` | `error`, diff removed |
-| Yellow | `#f1fa8c` | `number` (tokens, cost, durations), `highlight` (search match) |
+| Yellow | `#f1fa8c` | `number` (tokens, cost, durations), `highlight` (search match, slash-completion match) |
 
 Card tints (blended over `bg`): `card.pending` (surface), `card.ok` (green at 8 %), `card.error` (red at 10 %), `card.approval` (orange at 10 %). Diff lines use `ok` and `error` at 15 % for backgrounds with full-strength gutter signs.
 

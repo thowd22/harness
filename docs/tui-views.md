@@ -128,9 +128,18 @@ shows the spinner and phase, e.g. `⠹ thinking · 12.3s — harness`.
   placeholders in place, and clicking a placeholder (or focusing it and
   pressing Enter) expands that one. The full text is always what gets sent.
 - Typing `/` at the start opens completion of slash commands with their
-  arguments, description and scope. Up/Down select, Tab or Enter complete,
-  Esc closes, and rows are clickable. Enter on a complete command that takes
-  no arguments sends it.
+  arguments, description and scope. Matching is fuzzy, with the same
+  matcher as the command palette: letters may have gaps (`/mdl` finds
+  `/model`), namespaced commands such as `project:deploy` match on `deploy`
+  as well as on the full name, and descriptions are searched too, so
+  `/review` also finds a workflow whose description mentions review. Exact
+  name matches come first, then names that start with what you typed, then
+  other name matches by score, then description matches; equal scores stay
+  in alphabetical order. Matched letters are highlighted (`highlight`
+  token). Smart case: typing an upper-case letter makes the match case
+  sensitive. Up/Down select, Tab or Enter complete, Esc closes, and rows
+  are clickable. Enter on a complete command that takes no arguments sends
+  it.
 
 ## Command palette
 

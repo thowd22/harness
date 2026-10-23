@@ -10,6 +10,7 @@ pub mod clipboard;
 pub mod demo;
 pub mod detail;
 pub mod diff;
+pub mod fuzzy;
 pub mod goalbar;
 pub mod history;
 pub mod indicators;

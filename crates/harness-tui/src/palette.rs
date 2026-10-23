@@ -4,7 +4,8 @@
 //! workflows, skills, agents, past runs, remotes and settings. Each row
 //! shows the title, description, source (kind and scope) and keybinding.
 //! Entries that take arguments prompt for them inline, one at a time,
-//! before running. Matching uses `nucleo-matcher` over haystacks converted
+//! before running. Matching uses the shared [`crate::fuzzy`] matcher
+//! (`nucleo-matcher`, also used by the slash dropdown) over haystacks converted
 //! once in [`Palette::set_entries`], so opening and filtering 1000 entries
 //! stays well under one 16 ms frame.
 //!
@@ -15,8 +16,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use harness_config::discovery::Catalog;
 use harness_config::ini::config::Config;
-use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
-use nucleo_matcher::{Matcher, Utf32Str, Utf32String};
+use nucleo_matcher::Utf32String;
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::Modifier;
@@ -24,6 +24,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 
 use crate::chat::text::{truncate, width};
+use crate::fuzzy::{self, Fuzzy};
 use crate::interaction::{ElementId, HitMap};
 use crate::keys::{Action, Keymap};
 use crate::theme::{Theme, Token};
@@ -224,7 +225,7 @@ struct ArgPrompt {
 pub struct Palette {
     entries: Vec<PaletteEntry>,
     hay: Vec<Utf32String>,
-    matcher: Matcher,
+    matcher: Fuzzy,
     open: bool,
     query: String,
     filtered: Vec<usize>,
@@ -256,7 +257,7 @@ impl Palette {
         let mut p = Palette {
             entries: Vec::new(),
             hay: Vec::new(),
-            matcher: Matcher::new(nucleo_matcher::Config::DEFAULT),
+            matcher: Fuzzy::new(),
             open: false,
             query: String::new(),
             filtered: Vec::new(),
@@ -411,16 +412,12 @@ impl Palette {
             self.filtered = all;
             return;
         }
-        let pattern = Pattern::parse(&self.query, CaseMatching::Smart, Normalization::Smart);
+        let pattern = fuzzy::query(&self.query);
         let mut scored: Vec<(u32, usize)> = self
             .hay
             .iter()
             .enumerate()
-            .filter_map(|(i, h)| {
-                pattern
-                    .score(h.slice(..), &mut self.matcher)
-                    .map(|s| (s, i))
-            })
+            .filter_map(|(i, h)| self.matcher.score(&pattern, h.slice(..)).map(|s| (s, i)))
             .collect();
         scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
         self.filtered = scored.into_iter().map(|(_, i)| i).collect();
@@ -628,11 +625,9 @@ impl Palette {
         } else if self.selected >= self.scroll + rows {
             self.scroll = self.selected + 1 - rows;
         }
-        let pattern = (!self.query.trim().is_empty())
-            .then(|| Pattern::parse(&self.query, CaseMatching::Smart, Normalization::Smart));
+        let pattern = (!self.query.trim().is_empty()).then(|| fuzzy::query(&self.query));
         let title_w = (w * 2 / 5).max(10);
         let mut lines = Vec::new();
-        let mut buf = Vec::new();
         let mut indices = Vec::new();
         for (row, &idx) in self
             .filtered
@@ -652,25 +647,19 @@ impl Palette {
             let title = truncate(&e.title, title_w);
             indices.clear();
             if let Some(p) = &pattern {
-                p.indices(
-                    Utf32Str::new(&title, &mut buf),
-                    &mut self.matcher,
-                    &mut indices,
-                );
+                self.matcher.word_indices(p, &title, &mut indices);
             }
             let mut spans = vec![Span::styled(
                 if sel { "▸ " } else { "  " },
                 base.patch(theme.fg(Token::Accent)),
             )];
-            for (ci, ch) in title.chars().enumerate() {
-                let st = if indices.contains(&(ci as u32)) {
-                    base.patch(theme.fg(Token::Accent))
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    base.patch(theme.fg(Token::Fg))
-                };
-                spans.push(Span::styled(ch.to_string(), st));
-            }
+            spans.extend(fuzzy::highlight(
+                &title,
+                &indices,
+                base.patch(theme.fg(Token::Fg)),
+                base.patch(theme.fg(Token::Accent))
+                    .add_modifier(Modifier::BOLD),
+            ));
             spans.push(Span::styled(
                 " ".repeat(title_w.saturating_sub(width(&title)) + 1),
                 base,
@@ -1083,6 +1072,33 @@ mod tests {
         };
         assert_eq!(it.handle_mouse(&outside), Some(Dispatch::Back));
         assert_eq!(p.back(), PaletteOutcome::Closed);
+    }
+
+    #[test]
+    fn title_highlights_words_that_match_it_when_others_match_elsewhere() {
+        let mut p = Palette::new(vec![PaletteEntry::new(
+            "custom.model",
+            "Model",
+            "Switch the model",
+            EntryKind::Builtin,
+        )]);
+        p.open();
+        typ(&mut p, "mod sw");
+        assert_eq!(p.matches().len(), 1, "`sw` matches the description");
+        let mut it = Interaction::new();
+        let term = draw(&mut p, &mut it);
+        let buf = term.backend().buffer();
+        let (x, y) = find_text(buf, "Model").unwrap();
+        let theme = Theme::default();
+        let accent = theme.fg(Token::Accent).fg;
+        for i in 0..5u16 {
+            let cell = &buf[(x + i, y)];
+            let hit = i < 3;
+            assert_eq!(cell.modifier.contains(Modifier::BOLD), hit, "cell {i} bold");
+            if hit {
+                assert_eq!(cell.fg, accent.unwrap(), "cell {i} accent");
+            }
+        }
     }
 
     #[test]

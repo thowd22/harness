@@ -36,7 +36,7 @@ jobs:
     outputs:
       version: ${{ steps.v.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Must run on a tag
         if: github.ref_type != 'tag'
         run: |
@@ -80,7 +80,7 @@ jobs:
       VERSION: ${{ needs.meta.outputs.version }}
       TARGET: ${{ matrix.target }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.93.1
         with:
           targets: ${{ matrix.target }}
@@ -88,7 +88,10 @@ jobs:
         with:
           key: release-${{ matrix.target }}
       - if: matrix.zig
-        uses: mlugg/setup-zig@v1
+        uses: mlugg/setup-zig@v2
+        with:
+          # Both musl targets run on ubuntu-latest; keep their Zig caches apart.
+          cache-key: ${{ matrix.target }}
       - if: matrix.zig
         run: cargo install cargo-zigbuild --locked
       - name: Build (cargo-zigbuild, static musl)
@@ -109,7 +112,7 @@ jobs:
         run: scripts/release-smoke.sh "$VERSION" "$GITHUB_SHA" ${{ matrix.run }} "target/$TARGET/release/harness"
       - name: Package
         run: scripts/release-package.sh dist "harness-$VERSION-$TARGET" "target/$TARGET/release/harness" README.md CHANGELOG.md
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist-${{ matrix.target }}
           path: dist/
@@ -122,14 +125,14 @@ jobs:
     env:
       VERSION: ${{ needs.meta.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.93.1
         with:
           targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-helpers
-      - uses: mlugg/setup-zig@v1
+      - uses: mlugg/setup-zig@v2
       - run: cargo install cargo-zigbuild --locked
       - run: scripts/build-remote-helpers.sh remote-bin x86_64 aarch64
       - run: sudo apt-get update && sudo apt-get install -y qemu-user
@@ -141,7 +144,7 @@ jobs:
             f="remote-bin/harness-$VERSION-$arch-linux-musl"
             scripts/release-package.sh dist "harness-remote-agent-$VERSION-$arch-linux-musl" "$f" "$f.sha256"
           done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist-remote-helpers
           path: dist/
@@ -158,8 +161,8 @@ jobs:
       TAG: ${{ github.ref_name }}
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           pattern: dist-*
           path: dist

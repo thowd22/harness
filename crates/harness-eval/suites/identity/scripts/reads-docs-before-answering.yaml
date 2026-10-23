@@ -1,0 +1,6 @@
+# Good behaviour: read the workflow guide, then answer from it.
+responses:
+  - content:
+      - tool_use: { name: read, input: { path: docs/guide/workflows.md } }
+  - content:
+      - text: "Save `<name>.yaml` in `~/.config/harness/workflows/` (or a trusted project's `.harness/workflows/`); it becomes the `/<name>` slash command (docs/guide/workflows.md)."

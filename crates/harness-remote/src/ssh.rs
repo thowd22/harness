@@ -76,32 +76,81 @@ impl SshOptions {
     }
 }
 
-/// `$XDG_RUNTIME_DIR/harness`, or `<tmp>/harness-<user>` when there is no
-/// runtime dir.
+/// Size of `sockaddr_un.sun_path` on this platform: 104 bytes on macOS and
+/// the BSDs, 108 on Linux. A ControlPath must be shorter than this.
+pub const SUN_PATH_MAX: usize = if cfg!(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+)) {
+    104
+} else {
+    108
+};
+
+/// Longest socket path OpenSSH builds under a control dir: the longer
+/// pattern (`cmz-`), `%C` expanded to 40 hex characters, and the
+/// `.<16 hex>` suffix ssh appends while binding a new master socket.
+const CONTROL_SOCKET_TAIL: usize = 1 + "cmz-".len() + 40 + 17;
+
+/// True if sockets in `dir` stay under the `sun_path` limit `max`.
+fn control_dir_fits(dir: &Path, max: usize) -> bool {
+    dir.as_os_str().len() + CONTROL_SOCKET_TAIL < max
+}
+
+/// `$XDG_RUNTIME_DIR/harness`, else `$TMPDIR/harness-<user>`, else
+/// `/tmp/harness-<user>`: the first one whose ControlMaster socket paths fit
+/// in `sun_path`. macOS has no runtime dir and a long per-user `$TMPDIR`
+/// (`/var/folders/…/T/`), so there the sockets live under `/tmp`.
 pub fn default_control_dir() -> PathBuf {
     control_dir_with(|k| std::env::var_os(k))
 }
 
 /// [`default_control_dir`] with an injectable environment.
 pub fn control_dir_with(env: impl Fn(&str) -> Option<std::ffi::OsString>) -> PathBuf {
-    match env("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
-        Some(dir) => PathBuf::from(dir).join("harness"),
-        None => {
-            let user = env("USER")
-                .map(|u| u.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "user".into());
-            std::env::temp_dir().join(format!("harness-{user}"))
-        }
+    control_dir_for(env, SUN_PATH_MAX)
+}
+
+/// [`control_dir_with`] for a given `sun_path` size.
+fn control_dir_for(env: impl Fn(&str) -> Option<std::ffi::OsString>, max: usize) -> PathBuf {
+    let user = env("USER")
+        .filter(|u| !u.is_empty())
+        .map(|u| u.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "user".into());
+    let leaf = format!("harness-{user}");
+    let short = Path::new("/tmp").join(&leaf);
+    let mut candidates = Vec::new();
+    if let Some(dir) = env("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
+        candidates.push(PathBuf::from(dir).join("harness"));
     }
+    if let Some(dir) = env("TMPDIR").filter(|v| !v.is_empty()) {
+        candidates.push(PathBuf::from(dir).join(&leaf));
+    }
+    candidates
+        .into_iter()
+        .find(|d| control_dir_fits(d, max))
+        .unwrap_or(short)
 }
 
 /// Create `dir` (and parents) with mode 0700, and tighten an existing one.
+///
+/// The directory may sit in a shared `/tmp`, so this refuses a symlink and
+/// a directory owned by someone else (only the owner can change its mode).
 pub fn create_private_dir(dir: &Path) -> io::Result<()> {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(dir)?;
+    if !std::fs::symlink_metadata(dir)?.is_dir() {
+        return Err(io::Error::other(format!(
+            "{} is not a directory (a symlink?); remove it and retry",
+            dir.display()
+        )));
+    }
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
 }
 
@@ -623,7 +672,57 @@ mod tests {
         let d = control_dir_with(|k| (k == "XDG_RUNTIME_DIR").then(|| "/run/user/7".into()));
         assert_eq!(d, PathBuf::from("/run/user/7/harness"));
         let d = control_dir_with(|k| (k == "USER").then(|| "bob".into()));
-        assert!(d.ends_with("harness-bob"));
+        assert_eq!(d, PathBuf::from("/tmp/harness-bob"));
+        let d = control_dir_with(|k| match k {
+            "USER" => Some("bob".into()),
+            "TMPDIR" => Some("/var/tmp".into()),
+            _ => None,
+        });
+        assert_eq!(d, PathBuf::from("/var/tmp/harness-bob"));
+    }
+
+    /// macOS has no XDG_RUNTIME_DIR and a long per-user TMPDIR; sockets
+    /// under it would exceed the 104-byte sun_path and ssh would refuse
+    /// with "ControlPath too long".
+    #[test]
+    fn control_dir_fits_sun_path_with_a_macos_tmpdir() {
+        let mac_tmp = "/var/folders/24/8k48jl6d249_n_qfxwsl6xvm0000gn/T/";
+        let env = |k: &str| match k {
+            "USER" => Some("runner".into()),
+            "TMPDIR" => Some(mac_tmp.into()),
+            _ => None,
+        };
+        for max in [104, 108] {
+            let d = control_dir_for(env, max);
+            let longest = d.join(format!("cmz-{}.{}", "f".repeat(40), "0".repeat(16)));
+            assert!(
+                longest.as_os_str().len() < max,
+                "{} is {} bytes, sun_path is {max}",
+                longest.display(),
+                longest.as_os_str().len()
+            );
+        }
+        assert_eq!(
+            control_dir_for(env, 104),
+            PathBuf::from("/tmp/harness-runner")
+        );
+        // A long runtime dir falls back too.
+        let long = format!("/run/{}", "x".repeat(60));
+        let d = control_dir_for(
+            |k| (k == "XDG_RUNTIME_DIR").then(|| long.clone().into()),
+            108,
+        );
+        assert_eq!(d, PathBuf::from("/tmp/harness-user"));
+    }
+
+    #[test]
+    fn private_dir_refuses_a_symlink() {
+        let t = tempfile::tempdir().unwrap();
+        let real = t.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = t.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(create_private_dir(&link).is_err());
     }
 
     #[test]
@@ -688,15 +787,25 @@ mod tests {
     /// A fake `ssh` that fails like OpenSSH does for an unknown host.
     #[tokio::test]
     async fn run_reports_unknown_host_from_fake_ssh() {
-        use std::os::unix::fs::PermissionsExt;
         let t = tempfile::tempdir().unwrap();
-        let fake = t.path().join("ssh");
+        // Written as a plain file and made executable by a child process
+        // (`install`): if this multi-threaded test process held a write
+        // descriptor on the executable, a concurrent fork could inherit it
+        // and the exec would fail with ETXTBSY ("Text file busy").
+        let src = t.path().join("ssh.src");
         std::fs::write(
-            &fake,
+            &src,
             "#!/bin/sh\necho 'Host key verification failed.' >&2\nexit 255\n",
         )
         .unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let fake = t.path().join("ssh");
+        let st = std::process::Command::new("install")
+            .args(["-m", "755"])
+            .arg(&src)
+            .arg(&fake)
+            .status()
+            .unwrap();
+        assert!(st.success(), "install failed: {st}");
         let mut opts = SshOptions::new(t.path().join("cm"));
         opts.program = fake.display().to_string();
         let tg = SshTarget::new("gpu", &remote(), opts);

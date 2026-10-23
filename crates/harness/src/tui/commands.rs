@@ -339,12 +339,7 @@ async fn builtin(d: &mut Driver, b: Builtin, cmd: &Command) {
             let mut report =
                 harness_tui::inspector::context::ContextReport::new(Some(h.context_window));
             if let Some(system) = &h.system {
-                report.push(
-                    harness_tui::inspector::context::ContextKind::PromptLayer,
-                    "system prompt (frozen prefix)",
-                    None,
-                    system.clone(),
-                );
+                report.add_system_prompt(system);
             }
             report.add_tools(&h.tools);
             let mut lines = vec![format!(

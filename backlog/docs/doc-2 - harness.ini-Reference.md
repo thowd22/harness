@@ -3,7 +3,7 @@ id: doc-2
 title: harness.ini Reference
 type: specification
 created_date: '2026-10-22 14:26'
-updated_date: '2026-10-22 22:21'
+updated_date: '2026-10-23 03:24'
 ---
 # harness.ini Reference
 
@@ -29,6 +29,7 @@ data_dir = ~/.local/share/harness
 max_subagent_depth = 2
 max_concurrent_agents = 4
 model_list_ttl = 24h             ; cached live model lists stay fresh this long
+identity_prompt = on             ; on | off: built-in identity prompt layer
 
 [provider.anthropic]
 api_key = sk-ant-...
@@ -184,7 +185,7 @@ policy.bash.deny = sudo*
 - `provider.<id>` accepts `anthropic`, `openai`, `openrouter`. Every provider takes `api_key`, `api_key_cmd`, `api_key_env` and `base_url`. Only openrouter also takes `app_name`, `provider_order` and `allow_fallbacks`. Only openai also takes `auth` (`api_key`, the default, or `chatgpt`: Sign in with ChatGPT, using the user's ChatGPT plan; requests then never use the API key, with no fallback) and `chatgpt_headless` (boolean, default `false`; headless runs, workflows and evals refuse `auth = chatgpt` unless it is `true`, and refuse it whenever `CI` is set, because the credential is personal). Only anthropic also takes `gzip_requests` (`auto`, the default, or `off`) and `gzip_level` (1 to 9, default 3). With `auto`, request bodies of 4 KiB or more are gzipped only when `base_url` is `https://api.anthropic.com` on the default port and no proxy (`HTTPS_PROXY`, `ALL_PROXY`) or custom CA (`SSL_CERT_FILE`, `SSL_CERT_DIR`) is set. The environment variable `HARNESS_GZIP_REQUEST_BODIES=0` also turns it off. See docs/providers-anthropic.md.
 - `remote.<name>` requires `host`. Defaults: `port = 22`, `max_jobs = 1`, `sync = rsync`, `compression = auto`, `compression_below_mbps = 20`. A remote can only tighten policy, with `policy.bash.deny` and `policy.bash.ask`.
 - `remote.<name> compression` sets SSH channel compression for that host: `yes` adds `Compression=yes` to the host's ControlMaster, `no` adds `Compression=no`, and `auto` (the default) compresses only when the host's last measured link throughput is below `compression_below_mbps` (a positive number of Mbit/s). The link is measured by `/remote test` and, when no measurement younger than 24 hours exists, when a remote step connects; an unmeasured host is not compressed. Compressed connections use their own ControlMaster socket (`cmz-%C`). rsync sync uses `--compress-choice=zstd` when both rsyncs support zstd, and rsync's default compression otherwise. See docs/remote.md.
-- `api_key_cmd` runs under `sh -c` with a 10 s timeout, stdin closed and stderr discarded.
+- `api_key_cmd` runs under `sh -c` with a 10 s timeout, stdin closed and stderr discarded. It leads its own process group, and a timeout kills the whole group.
 - A file that holds an inline `api_key` and is group- or world-readable is refused with a `chmod 600` hint.
-- Defaults when a key is absent: `default_model = sonnet`, `mode = auto-edit`, `data_dir = $XDG_DATA_HOME/harness` (`~/.local/share/harness`), `max_subagent_depth = 2`, `max_concurrent_agents = 4`, `model_list_ttl = 24h` (live model lists for the model catalog are cached in `<data_dir>/model-lists/` and refetched in the background when older; see docs/models.md). `[ui]` defaults are the values in the example above. `[policy]` lists are empty (the engine adds built-ins). `sandbox.enabled = true`, `network = allow`. `verify.command` is auto-detected, `baseline = true`, `max_fix_attempts = 3`. `[context]` defaults are as in the example. Budgets have no cap and `on_exceed = ask`. Memory defaults are as in the example, with `drive = <data_dir>/memory`.
+- Defaults when a key is absent: `default_model = sonnet`, `mode = auto-edit`, `data_dir = $XDG_DATA_HOME/harness` (`~/.local/share/harness`), `max_subagent_depth = 2`, `max_concurrent_agents = 4`, `model_list_ttl = 24h` (live model lists for the model catalog are cached in `<data_dir>/model-lists/` and refetched in the background when older; see docs/models.md), `identity_prompt = on` (every built-in prompt starts with the built-in identity layer, at most 120 tokens, which names harness and its features and points the model to docs/guide/, backlog/docs/ and https://github.com/thowd22/harness before it answers questions about them; `off` removes it from every prompt, including custom prompts that use `- builtin: identity`; also accepts `true`/`false`; see docs/defaults.md). `[ui]` defaults are the values in the example above. `[policy]` lists are empty (the engine adds built-ins). `sandbox.enabled = true`, `network = allow`. `verify.command` is auto-detected, `baseline = true`, `max_fix_attempts = 3`. `[context]` defaults are as in the example. Budgets have no cap and `on_exceed = ask`. Memory defaults are as in the example, with `drive = <data_dir>/memory`.
 - `harness config check [path]` validates the file and exits 1 on any error.

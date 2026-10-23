@@ -472,13 +472,22 @@ impl ShellExec {
     }
 }
 
+/// A remote `sh` script that stops process group `pgid`: TERM, up to 2 s of
+/// grace, then KILL.
+///
+/// The script uses the shell's builtin `kill` in the `kill -SIG -PGID` form,
+/// because that is the only spelling every remote `sh` accepts: dash (Debian,
+/// Ubuntu) and busybox ash (Alpine) reject `--` ("Illegal number: -",
+/// "invalid number '--'"), and dash also rejects `-s SIG -PGID`. The procps-ng
+/// misparse of `-169` as `-1` is in `/bin/kill`, not in shell builtins; the
+/// `pgid <= 1` guard covers the dangerous targets anyway.
 fn kill_group_script(pgid: u32) -> String {
     // -0 is the killing shell's own group and -1 every process of the user.
     if pgid <= 1 {
         return "true".into();
     }
     format!(
-        "kill -TERM -- -{pgid} 2>/dev/null; i=0; while kill -0 -- -{pgid} 2>/dev/null && [ $i -lt 20 ]; do sleep 0.1; i=$((i+1)); done; kill -KILL -- -{pgid} 2>/dev/null; true"
+        "kill -TERM -{pgid} 2>/dev/null; i=0; while kill -0 -{pgid} 2>/dev/null && [ $i -lt 20 ]; do sleep 0.1; i=$((i+1)); done; kill -KILL -{pgid} 2>/dev/null; true"
     )
 }
 
@@ -571,8 +580,53 @@ mod tests {
         assert_eq!(kill_group_script(0), "true");
         assert_eq!(kill_group_script(1), "true");
         let s = kill_group_script(169);
-        assert!(s.starts_with("kill -TERM -- -169 "), "{s}");
-        assert!(s.contains("kill -KILL -- -169 "), "{s}");
+        assert!(s.starts_with("kill -TERM -169 "), "{s}");
+        assert!(s.contains("kill -0 -169 "), "{s}");
+        assert!(s.contains("kill -KILL -169 "), "{s}");
+        assert!(!s.contains("--"), "dash and busybox reject `kill --`: {s}");
+    }
+
+    /// Runs the kill script through `sh` against a group that nothing else
+    /// owns, so a script that silently does nothing cannot pass. On hosts
+    /// where `/bin/sh` is dash (Debian, Ubuntu) this is the shell a remote
+    /// `ShellExec` kill really uses.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn kill_script_stops_a_foreign_group_under_sh() {
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.args(["-c", "sleep 30 & sleep 30 & wait"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .process_group(0)
+            .kill_on_drop(true);
+        let mut child = cmd.spawn().unwrap();
+        let pg = child.id().unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let out = LocalShell::default()
+            .run(&kill_group_script(pg), b"")
+            .await
+            .unwrap();
+        assert_eq!(out.code, Some(0));
+        let st = tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .expect("group leader still running after the kill script")
+            .unwrap();
+        assert!(!st.success(), "{st:?}");
+        // Orphaned members may be zombies for a moment until init reaps them.
+        let mut gone = false;
+        for _ in 0..50 {
+            let probe = std::process::Command::new("sh")
+                .args(["-c", &format!("kill -0 -{pg} 2>/dev/null")])
+                .status()
+                .unwrap();
+            if !probe.success() {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(gone, "group {pg} survived the kill script");
     }
 
     #[tokio::test]

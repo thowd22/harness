@@ -212,9 +212,13 @@ fn fake_gh(dir: &Path, responses: &[&str]) -> PathBuf {
     for (i, r) in responses.iter().enumerate() {
         std::fs::write(dir.join(format!("resp{i}")), r).unwrap();
     }
-    let gh = bin.join("gh");
+    // Written as a plain file and made executable by a child process
+    // (`install`): if this multi-threaded test process held a write
+    // descriptor on the executable, a concurrent fork could inherit it and
+    // the exec would fail with ETXTBSY ("Text file busy").
+    let src = dir.join("gh.src");
     std::fs::write(
-        &gh,
+        &src,
         format!(
             "#!/bin/sh\nd='{}'\necho \"$*\" >> \"$d/calls\"\nn=$(wc -l < \"$d/calls\" | tr -d ' ')\ni=$((n - 1))\n[ \"$i\" -lt {} ] || i={}\ncat \"$d/resp$i\"\n",
             dir.display(),
@@ -223,7 +227,13 @@ fn fake_gh(dir: &Path, responses: &[&str]) -> PathBuf {
         ),
     )
     .unwrap();
-    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let st = Command::new("install")
+        .args(["-m", "755"])
+        .arg(&src)
+        .arg(bin.join("gh"))
+        .status()
+        .unwrap();
+    assert!(st.success(), "install failed: {st}");
     bin
 }
 
@@ -561,4 +571,66 @@ fn cut_release_normalises_a_leading_v_and_rejects_bad_versions() {
         assert!(!ok, "{bad:?} should be rejected");
         assert_eq!(env, "", "{bad:?} must not reach GITHUB_ENV");
     }
+}
+
+// ------------------------------------------- remote helper scripts (macOS)
+
+/// The remote-helper scripts checksum through release-common.sh
+/// (sha256sum on Linux, shasum on macOS) instead of calling `sha256sum`,
+/// which stock macOS lacks.
+#[test]
+fn remote_helper_scripts_use_portable_checksums() {
+    for name in ["build-remote-helpers.sh", "verify-remote-helpers.sh"] {
+        let text = read(&script(name));
+        assert!(
+            text.contains(". \"$(dirname \"$0\")/release-common.sh\""),
+            "{name}"
+        );
+        assert!(
+            !text.contains("sha256sum"),
+            "{name} calls sha256sum directly"
+        );
+    }
+}
+
+/// verify-remote-helpers.sh compares the sidecar with the portable
+/// `sha256_of` and reports a mismatch by name.
+#[test]
+fn verify_remote_helpers_checks_the_sidecar() {
+    let have = |t: &str| {
+        Command::new("sh")
+            .args(["-c", &format!("command -v {t}")])
+            .output()
+            .is_ok_and(|o| o.status.success())
+    };
+    if !have("readelf") || !have("timeout") {
+        eprintln!("readelf or timeout missing (macOS); the script refuses to run there");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let version = env!("CARGO_PKG_VERSION");
+    let name = format!("harness-{version}-x86_64-linux-musl");
+    let f = tmp.path().join(&name);
+    std::fs::write(&f, "not an elf").unwrap();
+    let sum = Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            ". '{}'; write_sha256 '{}'",
+            script("release-common.sh").display(),
+            f.display()
+        ))
+        .status()
+        .unwrap();
+    assert!(sum.success());
+    let dir = tmp.path().to_string_lossy().into_owned();
+    let o = run(&root(), "verify-remote-helpers.sh", &[&dir, "x86_64"], &[]);
+    assert!(!o.status.success(), "a fake ELF never verifies");
+    assert!(!err(&o).contains("sidecar does not match"), "{}", err(&o));
+    std::fs::write(&f, "changed").unwrap();
+    let o = run(&root(), "verify-remote-helpers.sh", &[&dir, "x86_64"], &[]);
+    assert!(
+        err(&o).contains(&format!("{name}: sha256 sidecar does not match")),
+        "{}",
+        err(&o)
+    );
 }

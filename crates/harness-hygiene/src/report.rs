@@ -353,10 +353,17 @@ fn whitespace_only(root: &Path, c: &NetChange, before: Option<&dyn BeforeContent
 /// Paths tracked by the git repository at `root` (from its index, which is
 /// only read), or `None` when `root` is not in a git work tree.
 pub fn tracked_files(root: &Path) -> Option<BTreeSet<String>> {
+    // Repository-location variables (a hook's GIT_DIR or GIT_INDEX_FILE)
+    // would make git list another repository than the one at `root`.
     let out = Command::new("git")
         .args(["ls-files", "-z", "--full-name"])
         .current_dir(root)
         .env("GIT_OPTIONAL_LOCKS", "0")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_COMMON_DIR")
         .stdin(std::process::Stdio::null())
         .output()
         .ok()?;

@@ -111,6 +111,69 @@ fn test_job_logs_host_features_and_skip_reasons() {
     assert!(r.contains("--test sandbox -- --nocapture"), "{r}");
 }
 
+/// The channel pinned in `rust-toolchain.toml`.
+fn pinned_toolchain() -> String {
+    read("rust-toolchain.toml")
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("channel = "))
+        .expect("rust-toolchain.toml has a channel")
+        .trim_matches('"')
+        .to_string()
+}
+
+#[test]
+fn workflows_install_the_pinned_toolchain() {
+    let pinned = pinned_toolchain();
+    let dir = root().join(".github/workflows");
+    let mut seen = 0;
+    for entry in std::fs::read_dir(&dir).expect("workflows dir") {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) != Some("yml") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        for tag in text
+            .lines()
+            .filter_map(|l| l.split("dtolnay/rust-toolchain@").nth(1))
+        {
+            seen += 1;
+            assert_eq!(
+                tag.trim(),
+                pinned,
+                "{}: dtolnay/rust-toolchain@{} differs from rust-toolchain.toml",
+                path.display(),
+                tag.trim()
+            );
+        }
+    }
+    assert!(seen > 0, "no workflow installs a Rust toolchain");
+}
+
+#[test]
+fn dependabot_leaves_the_toolchain_pin_alone() {
+    let cfg: Value = harness_config::yaml::parse(&read(".github/dependabot.yml"), None)
+        .expect("dependabot.yml parses");
+    let actions = cfg["updates"]
+        .as_array()
+        .expect("updates")
+        .iter()
+        .find(|u| u["package-ecosystem"] == "github-actions")
+        .expect("github-actions updates");
+    let ignored: Vec<&str> = actions["ignore"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|i| i["dependency-name"].as_str())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        ignored.contains(&"dtolnay/rust-toolchain"),
+        "its tag is the Rust version; bump it with rust-toolchain.toml, not via Dependabot"
+    );
+    assert!(read("docs/ci.md").contains("### Upgrading the Rust toolchain"));
+}
+
 #[test]
 fn readme_shows_ci_badge_and_docs_exist() {
     let readme = read("README.md");

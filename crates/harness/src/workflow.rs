@@ -131,7 +131,7 @@ pub async fn main(
                     return exit::ERROR;
                 }
             };
-            let catalog = wiring::catalog(&data, &cwd);
+            let catalog = wiring::catalog(&cfg, &data, &cwd);
             let (lib, errors) = library(&catalog, &cfg);
             for e in errors {
                 let _ = writeln!(err, "harness: warning: {e}");
@@ -471,7 +471,7 @@ async fn run(
     err: &mut dyn Write,
 ) -> Result<u8, String> {
     let cwd = wiring::project_dir(args.cwd.as_ref())?;
-    let catalog = Arc::new(wiring::catalog(&data, &cwd));
+    let catalog = Arc::new(wiring::catalog(&cfg, &data, &cwd));
     let (lib, errors) = library(&catalog, &cfg);
     for e in errors {
         let _ = writeln!(err, "harness: warning: {e}");

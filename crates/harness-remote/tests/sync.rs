@@ -113,7 +113,7 @@ async fn git_bundle_push_pull_apply_cleanup() {
         return;
     }
     let local = project();
-    let ok = std::process::Command::new("git")
+    let ok = fixture_git()
         .args(["init", "-q"])
         .current_dir(local.path())
         .status()
@@ -211,4 +211,19 @@ async fn push_is_audited_with_the_host() {
         vec!["sync.push", "sync.manifest", "sync.changes", "sync.remove"]
     );
     assert!(audit.events().iter().all(|e| e.host == "box" && e.ok));
+}
+
+/// `git` with the caller's `GIT_*` variables removed, so a `GIT_DIR` or
+/// `GIT_INDEX_FILE` from a hook cannot redirect the fixture to another
+/// repository.
+fn fixture_git() -> std::process::Command {
+    let mut cmd = std::process::Command::new("git");
+    for (k, _) in std::env::vars_os() {
+        if k.to_string_lossy().starts_with("GIT_") {
+            cmd.env_remove(&k);
+        }
+    }
+    cmd.env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null");
+    cmd
 }

@@ -87,8 +87,14 @@ pub struct ShellOutput {
 pub const MAX_OUTPUT: usize = 8 * 1024;
 
 /// Runs `cmd` with `sh -c` in `cwd`, with stdin closed.
+///
+/// The command leads its own process group. On timeout the whole group is
+/// killed, so a compound command (`make`, `a && b`, `x &`) cannot leave
+/// children running that hold CPU or the cargo target lock.
 pub async fn run_shell(cwd: &Path, cmd: &str, timeout: Duration) -> Result<ShellOutput, String> {
-    let child = tokio::process::Command::new("sh")
+    use tokio::io::AsyncReadExt;
+    let mut command = tokio::process::Command::new("sh");
+    command
         .arg("-c")
         .arg(cmd)
         .current_dir(cwd)
@@ -99,25 +105,44 @@ pub async fn run_shell(cwd: &Path, cmd: &str, timeout: Duration) -> Result<Shell
         .env("GIT_AUTHOR_EMAIL", "eval@localhost")
         .env("GIT_COMMITTER_NAME", "harness-eval")
         .env("GIT_COMMITTER_EMAIL", "eval@localhost")
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = command
         .spawn()
         .map_err(|e| format!("starting `{cmd}`: {e}"))?;
-    match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        Ok(Ok(out)) => {
-            let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-            text.push_str(&String::from_utf8_lossy(&out.stderr));
+    let pid = child.id();
+    let mut stdout = child.stdout.take().expect("stdout is piped");
+    let mut stderr = child.stderr.take().expect("stderr is piped");
+    let finished = tokio::time::timeout(timeout, async {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let (o, e, status) = tokio::join!(
+            stdout.read_to_end(&mut out),
+            stderr.read_to_end(&mut err),
+            child.wait()
+        );
+        o.and(e).and(status).map(|status| (status, out, err))
+    })
+    .await;
+    match finished {
+        Ok(Ok((status, out, err))) => {
+            let mut text = String::from_utf8_lossy(&out).into_owned();
+            text.push_str(&String::from_utf8_lossy(&err));
             Ok(ShellOutput {
-                code: out.status.code(),
+                code: status.code(),
                 output: truncate(text, MAX_OUTPUT),
                 timed_out: false,
             })
         }
         Ok(Err(e)) => Err(format!("running `{cmd}`: {e}")),
-        Err(_) => Ok(ShellOutput {
-            code: None,
-            output: format!("timed out after {}s", timeout.as_secs()),
-            timed_out: true,
-        }),
+        Err(_) => {
+            super::exec::kill_group(pid, &mut child).await;
+            Ok(ShellOutput {
+                code: None,
+                output: format!("timed out after {}s", timeout.as_secs()),
+                timed_out: true,
+            })
+        }
     }
 }
 
@@ -239,5 +264,36 @@ tasks:
             .unwrap();
         assert!(out.timed_out);
         assert_eq!(out.code, None);
+    }
+
+    /// A timeout kills the command's whole group, not just `sh`: a
+    /// background child must not outlive it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_timeout_kills_background_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("bg.pid");
+        let cmd = format!(
+            "sleep 30 & echo $! > {}; sleep 30",
+            pid_file.to_string_lossy()
+        );
+        let out = run_shell(dir.path(), &cmd, Duration::from_millis(500))
+            .await
+            .unwrap();
+        assert!(out.timed_out);
+        let pid: u32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let mut gone = false;
+        for _ in 0..50 {
+            if harness_tools::conformance::local_process_gone(pid) {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(gone, "background child {pid} outlived the timeout");
     }
 }

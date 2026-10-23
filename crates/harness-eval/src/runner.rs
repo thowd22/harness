@@ -448,7 +448,7 @@ async fn run_attempt(
         Err(e) => return failed(e),
     };
     let after = checks::snapshot(&root);
-    let results = checks::run_checks(&task.checks, &root, &before, &after).await;
+    let results = checks::run_checks(&task.checks, &root, &before, &after, &exe.events).await;
     let hygiene = checks::hygiene(&before, &after, &hygiene_scope(task));
     let metrics = metrics_from_events(&exe.events);
     let passed = !exe.timed_out && results.iter().all(|c| c.passed);

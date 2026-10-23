@@ -16,6 +16,7 @@ dirs.workspace = true
 globset.workspace = true
 hex.workspace = true
 minijinja.workspace = true
+nix.workspace = true
 notify.workspace = true
 regex.workspace = true
 serde.workspace = true

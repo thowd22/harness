@@ -182,22 +182,24 @@ pub fn resolve(
 
 /// Runs `cmd` under `sh -c` and returns its trimmed stdout as a secret.
 ///
-/// Stdin is closed and stderr discarded. The child is killed after
-/// `timeout`.
+/// Stdin is closed and stderr discarded. The command leads its own process
+/// group, and the whole group is killed after `timeout`, so a compound
+/// command cannot leave children behind.
 pub fn run_secret_command(cmd: &str, timeout: Duration) -> Result<Secret, SecretError> {
-    let mut child = Command::new("sh")
+    let mut command = Command::new("sh");
+    command
         .arg("-c")
         .arg(cmd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(SecretError::Spawn)?;
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    let mut child = command.spawn().map_err(SecretError::Spawn)?;
     let deadline = Instant::now() + timeout;
     let stdout = child.stdout.take().expect("stdout is piped");
     let (tx, rx) = mpsc::channel();
-    // The reader thread may outlive a killed child if a grandchild keeps the
-    // pipe open; it ends when the pipe closes.
+    // The reader ends when the pipe closes, which killing the group forces.
     std::thread::spawn(move || {
         let mut buf = Zeroizing::new(Vec::new());
         let res = stdout
@@ -207,6 +209,7 @@ pub fn run_secret_command(cmd: &str, timeout: Duration) -> Result<Secret, Secret
         let _ = tx.send(res);
     });
     let kill = |child: &mut std::process::Child| {
+        kill_group(child.id());
         let _ = child.kill();
         let _ = child.wait();
     };
@@ -236,6 +239,21 @@ pub fn run_secret_command(cmd: &str, timeout: Duration) -> Result<Secret, Secret
     }
     let text = std::str::from_utf8(&output).map_err(|_| SecretError::NotUtf8)?;
     Ok(Secret::new(text.trim().to_owned()))
+}
+
+/// SIGKILLs process group `pgid` (a child started with `process_group(0)`).
+/// Ids 0 and 1 are never signalled: as groups they mean the caller's own
+/// group and every process the user may signal.
+fn kill_group(pgid: u32) {
+    #[cfg(unix)]
+    if let Some(pg) = i32::try_from(pgid).ok().filter(|&p| p > 1) {
+        let _ = nix::sys::signal::killpg(
+            nix::unistd::Pid::from_raw(pg),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+    #[cfg(not(unix))]
+    let _ = pgid;
 }
 
 /// Returns `Some(mode)` (the `0o777` permission bits) when `path` is
@@ -346,6 +364,38 @@ mod tests {
         let err = run_secret_command("sleep 5", Duration::from_millis(200)).unwrap_err();
         assert!(matches!(err, SecretError::Timeout(_)));
         assert!(start.elapsed() < Duration::from_secs(3));
+    }
+
+    /// A timeout kills the whole group: a background child of `sh` must
+    /// not outlive the command.
+    #[cfg(unix)]
+    #[test]
+    fn cmd_timeout_kills_background_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("bg.pid");
+        let cmd = format!(
+            "sleep 30 & echo $! > {}; sleep 30",
+            pid_file.to_string_lossy()
+        );
+        let err = run_secret_command(&cmd, Duration::from_millis(500)).unwrap_err();
+        assert!(matches!(err, SecretError::Timeout(_)));
+        let pid = std::fs::read_to_string(&pid_file).unwrap();
+        let pid = pid.trim();
+        let mut gone = false;
+        for _ in 0..50 {
+            let alive = Command::new("kill")
+                .args(["-0", pid])
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success();
+            if !alive {
+                gone = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(gone, "background child {pid} outlived the timeout");
     }
 
     #[test]

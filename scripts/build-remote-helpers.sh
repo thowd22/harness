@@ -7,7 +7,10 @@
 #
 # Needs the rustup targets (<arch>-unknown-linux-musl). Cross builds use
 # cargo-zigbuild when it is installed, else plain cargo (native target only).
+# Runs on Linux and macOS (checksums via release-common.sh write_sha256).
 set -eu
+# shellcheck source=scripts/release-common.sh
+. "$(dirname "$0")/release-common.sh"
 out=${1:?usage: $0 OUT_DIR [ARCH...]}
 shift
 [ $# -gt 0 ] || set -- x86_64 aarch64
@@ -22,6 +25,6 @@ for arch in "$@"; do
   fi
   f="$out/harness-$version-$arch-linux-musl"
   cp "target/$target/release/harness-remote-agent" "$f"
-  ( cd "$out" && sha256sum "$(basename "$f")" > "$(basename "$f").sha256" )
+  write_sha256 "$f"
   echo "built $f"
 done

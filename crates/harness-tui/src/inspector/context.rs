@@ -100,8 +100,10 @@ impl ContextReport {
         });
     }
 
-    /// Adds every layer of a prompt. Inline layers name the prompt's file;
-    /// `file:` layers name their file next to it.
+    /// Adds every layer of a prompt that is sent. Inline layers name the
+    /// prompt's file; `file:` layers name their file next to it; `builtin:`
+    /// layers (the identity layer) are named `built-in <name> layer` and
+    /// skipped when the prompt's identity layer is off.
     pub fn add_prompt(&mut self, entry: &Entry<Prompt>) {
         let origin = entry.origin.display.clone();
         let dir = entry
@@ -111,18 +113,50 @@ impl ContextReport {
             .and_then(|p| p.parent())
             .map(|p| p.display().to_string());
         for (i, layer) in entry.item.layers.iter().enumerate() {
+            if !entry.item.identity && layer.source.is_identity() {
+                continue;
+            }
             let source = match &layer.source {
                 LayerSource::Inline => origin.clone(),
                 LayerSource::File(f) => match &dir {
                     Some(d) => format!("{d}/{f}"),
                     None => f.clone(),
                 },
+                LayerSource::Builtin(b) => format!("built-in {b} layer"),
             };
             self.push(
                 ContextKind::PromptLayer,
                 format!("{} layer {}", entry.item.name, i + 1),
                 Some(source),
                 layer.template.clone(),
+            );
+        }
+    }
+
+    /// Adds a rendered system prompt. A leading built-in identity layer
+    /// ([`harness_config::prompts::IDENTITY`]) becomes its own `identity
+    /// layer` item, so its token count is visible; the rest is one `system
+    /// prompt (frozen prefix)` item.
+    pub fn add_system_prompt(&mut self, system: &str) {
+        use harness_config::prompts::{IDENTITY, LAYER_SEPARATOR};
+        let rest = match system.strip_prefix(IDENTITY) {
+            Some(rest) => {
+                self.push(
+                    ContextKind::PromptLayer,
+                    "identity layer",
+                    Some("built-in identity layer".into()),
+                    IDENTITY,
+                );
+                rest.strip_prefix(LAYER_SEPARATOR).unwrap_or(rest)
+            }
+            None => system,
+        };
+        if !rest.is_empty() {
+            self.push(
+                ContextKind::PromptLayer,
+                "system prompt (frozen prefix)",
+                None,
+                rest,
             );
         }
     }
@@ -396,6 +430,62 @@ mod tests {
             Some("~/.config/harness/skills".into()),
         );
         r
+    }
+
+    #[test]
+    fn shows_the_identity_layer_with_its_token_count() {
+        let src = SourceFile::inline(
+            Scope::Builtin,
+            Kind::Prompt,
+            "prompts/coder.yaml",
+            "name: coder\nlayers:\n  - builtin: identity\n  - text: Prefer small diffs.\n",
+        );
+        let mut entry = Entry {
+            item: Prompt::load(&src).expect("prompt parses"),
+            origin: harness_config::discovery::Origin {
+                scope: Scope::Builtin,
+                display: "<built-in>/prompts/coder.yaml".into(),
+                path: None,
+            },
+            text: String::new(),
+        };
+        let mut r = ContextReport::new(Some(200_000));
+        r.add_prompt(&entry);
+        let first = &r.items[0];
+        assert_eq!(first.name, "coder layer 1");
+        assert_eq!(first.source.as_deref(), Some("built-in identity layer"));
+        assert_eq!(first.text, harness_config::prompts::IDENTITY);
+        assert_eq!(
+            first.tokens,
+            estimate_tokens(harness_config::prompts::IDENTITY)
+        );
+        assert!(first.tokens > 0 && first.tokens <= 120);
+
+        entry.item.identity = false;
+        let mut off = ContextReport::new(Some(200_000));
+        off.add_prompt(&entry);
+        assert_eq!(off.items.len(), 1);
+        assert_eq!(off.items[0].name, "coder layer 2");
+    }
+
+    #[test]
+    fn system_prompt_splits_off_the_identity_layer() {
+        use harness_config::prompts::IDENTITY;
+        let mut r = ContextReport::new(None);
+        r.add_system_prompt(&format!("{IDENTITY}\n\nBe careful."));
+        let names: Vec<&str> = r.items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, ["identity layer", "system prompt (frozen prefix)"]);
+        assert_eq!(r.items[0].tokens, estimate_tokens(IDENTITY));
+        assert_eq!(
+            r.items[0].source.as_deref(),
+            Some("built-in identity layer")
+        );
+        assert_eq!(r.items[1].text, "Be careful.");
+
+        let mut off = ContextReport::new(None);
+        off.add_system_prompt("Be careful.");
+        assert_eq!(off.items.len(), 1);
+        assert_eq!(off.items[0].name, "system prompt (frozen prefix)");
     }
 
     #[test]

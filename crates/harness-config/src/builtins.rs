@@ -11,7 +11,7 @@
 //! | agent | `coder` | default agent: read, write, edit, bash, todo; read-write memory |
 //! | agent | `researcher` | read-only investigation (read, bash; read memory) |
 //! | agent | `reviewer` | independent review (read, bash; no memory) |
-//! | prompt | `coder`, `researcher`, `reviewer` | their system prompts |
+//! | prompt | `coder`, `researcher`, `reviewer` | their system prompts; each starts with the built-in identity layer ([`crate::prompts::IDENTITY`]) |
 //! | workflow | `dream` | memory consolidation settings (see `harness_memory::dream`) |
 //! | workflow | `implement-verify-review`, `fix-bug`, `plan-approve-implement` | the bundled workflows (`/ivr`, `/fix`, `/plan`); documented and tested in `harness_workflow::bundled` |
 //!
@@ -76,8 +76,9 @@ pub fn file(path: &str) -> Option<&'static BuiltinFile> {
 }
 
 /// A stable fingerprint of every built-in file (sha256 hex over sorted
-/// `path NUL contents NUL` records). It changes whenever a default changes,
-/// which is what the defaults changelog check keys on.
+/// `path NUL contents NUL` records, followed by the compiled-in identity
+/// layer as `builtin:identity NUL text NUL`). It changes whenever a default
+/// changes, which is what the defaults changelog check keys on.
 pub fn fingerprint() -> String {
     let mut files: Vec<&BuiltinFile> = BUILTINS.iter().collect();
     files.sort_by_key(|f| f.path);
@@ -88,6 +89,10 @@ pub fn fingerprint() -> String {
         h.update(f.contents.as_bytes());
         h.update([0]);
     }
+    h.update(b"builtin:identity");
+    h.update([0]);
+    h.update(crate::prompts::IDENTITY.as_bytes());
+    h.update([0]);
     hex::encode(h.finalize())
 }
 
@@ -202,6 +207,66 @@ mod tests {
                 a.item.name
             );
         }
+    }
+
+    #[test]
+    fn identity_is_the_first_layer_of_every_builtin_agent_prompt() {
+        use crate::prompts::{IDENTITY, LayerSource};
+        let c = Catalog::load(&roots());
+        for a in c.agents.active() {
+            let crate::agents::PromptRef::Named(p) = &a.item.prompt else {
+                panic!("built-in agents use named prompts");
+            };
+            let prompt = c.prompts.get(p).unwrap();
+            assert_eq!(
+                prompt.layers[0].source,
+                LayerSource::Builtin("identity".into()),
+                "agent {}",
+                a.item.name
+            );
+            let text = SessionPrompt::new(prompt, vars()).unwrap();
+            assert!(text.text().starts_with(IDENTITY), "agent {}", a.item.name);
+        }
+    }
+
+    #[test]
+    fn identity_prompt_off_removes_the_layer_and_survives_reload() {
+        use crate::prompts::IDENTITY;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("prompts");
+        std::fs::create_dir_all(&dir).unwrap();
+        let custom = dir.join("mine.yaml");
+        std::fs::write(
+            &custom,
+            "name: mine\nlayers:\n  - builtin: identity\n  - text: Mine\n",
+        )
+        .unwrap();
+        let r = roots().with_global(tmp.path());
+        let mut c = Catalog::load(&r);
+        assert!(c.identity_prompt());
+        let render = |c: &Catalog, p: &str| {
+            SessionPrompt::new(c.prompts.get(p).unwrap(), vars())
+                .unwrap()
+                .text()
+                .to_owned()
+        };
+        assert_eq!(render(&c, "mine"), format!("{IDENTITY}\n\nMine"));
+        c.set_identity_prompt(false);
+        assert!(!c.identity_prompt());
+        for p in ["coder", "researcher", "reviewer", "mine"] {
+            assert!(!render(&c, p).contains(IDENTITY), "{p}");
+        }
+        // A changed file is re-parsed on reload and still follows the setting.
+        std::fs::write(
+            &custom,
+            "name: mine\nlayers:\n  - builtin: identity\n  - text: Mine 2\n",
+        )
+        .unwrap();
+        c.reload(&r);
+        assert_eq!(render(&c, "mine"), "Mine 2");
+        assert!(!render(&c, "coder").contains(IDENTITY));
+        c.set_identity_prompt(true);
+        assert!(render(&c, "coder").starts_with(IDENTITY));
     }
 
     #[test]

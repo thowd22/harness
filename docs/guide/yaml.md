@@ -21,11 +21,17 @@ Schema for editor completion.
 name: terse
 description: Short answers, small diffs
 layers:
+  - builtin: identity    # optional: harness's identity layer, as in the built-in prompts
   - text: |
       You are a coding agent in {{ cwd }} on {{ os }}. Today is {{ date }}.
       Keep answers short. You may edit files the task needs and add tests for them.
 vars: [cwd, os, date]
 ```
+
+`- builtin: identity` adds the short layer every built-in prompt starts
+with: it tells the model it runs inside harness and to read the harness docs
+before answering questions about harness features. Leave it out, or set
+`[general] identity_prompt = off`, to send only your own text.
 
 Only `cwd`, `os`, `date` and `git_branch` exist as template variables; no
 environment variables or secrets. Say what the agent may do: prompt lint

@@ -4,7 +4,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use harness_events::schema::FileChangeKind;
+use harness_events::schema::{EventKind, FileChangeKind, Payload, RunEvent};
 use harness_hygiene::snapshot::{Snapshot, SnapshotOptions};
 use serde::{Deserialize, Serialize};
 
@@ -82,12 +82,14 @@ pub fn hygiene(before: &Snapshot, after: &Snapshot, scope: &[String]) -> Hygiene
 }
 
 /// Runs every check in `root`. `before` is the workspace snapshot taken after
-/// setup, `after` the one taken after the agent.
+/// setup, `after` the one taken after the agent, and `events` the run's
+/// events (for `consulted` checks).
 pub async fn run_checks(
     checks: &[Check],
     root: &Path,
     before: &Snapshot,
     after: &Snapshot,
+    events: &[RunEvent],
 ) -> Vec<CheckResult> {
     let mut out = Vec::with_capacity(checks.len());
     for c in checks {
@@ -112,6 +114,7 @@ pub async fn run_checks(
             Check::File { file } => file_check(root, file),
             Check::Unchanged { unchanged } => unchanged_check(before, after, unchanged),
             Check::Hygiene { hygiene: h } => hygiene_check(before, after, h),
+            Check::Consulted { consulted } => consulted_check(events, consulted),
         };
         out.push(CheckResult {
             check: label,
@@ -145,6 +148,32 @@ fn file_check(root: &Path, f: &FileCheck) -> (bool, String) {
         }
     }
     (problems.is_empty(), problems.join("; "))
+}
+
+/// Passes when some tool call's arguments contain one of `needles`.
+fn consulted_check(events: &[RunEvent], needles: &[String]) -> (bool, String) {
+    let mut calls = 0;
+    for e in events {
+        let EventKind::ToolCall { args, .. } = &e.kind else {
+            continue;
+        };
+        calls += 1;
+        let text = match args {
+            Payload::Text(t) => t.clone(),
+            Payload::Json(v) => v.to_string(),
+            Payload::Blob(_) => continue,
+        };
+        if needles.iter().any(|n| text.contains(n.as_str())) {
+            return (true, String::new());
+        }
+    }
+    (
+        false,
+        format!(
+            "no tool call mentioned {} ({calls} tool call(s))",
+            needles.join(" or ")
+        ),
+    )
 }
 
 fn unchanged_check(before: &Snapshot, after: &Snapshot, globs: &[String]) -> (bool, String) {
@@ -195,6 +224,56 @@ mod tests {
         let p = root.join(rel);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(p, text).unwrap();
+    }
+
+    fn tool_call(tool: &str, args: Payload) -> RunEvent {
+        RunEvent {
+            seq: 0,
+            ts: time::OffsetDateTime::UNIX_EPOCH,
+            run_id: harness_events::schema::RunId::new(),
+            node_id: None,
+            parent_node_id: None,
+            kind: EventKind::ToolCall {
+                call_id: "c1".into(),
+                tool: tool.into(),
+                args,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn consulted_checks_tool_call_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        let snap = snapshot(dir.path());
+        let check = vec![Check::Consulted {
+            consulted: vec!["docs/guide/".into(), "backlog/docs/".into()],
+        }];
+        let read = tool_call(
+            "read",
+            Payload::Json(serde_json::json!({ "path": "docs/guide/workflows.md" })),
+        );
+        let grep = tool_call("bash", Payload::text("grep -rn workflow backlog/docs/"));
+        let other = tool_call(
+            "read",
+            Payload::Json(serde_json::json!({ "path": "src/main.rs" })),
+        );
+        for (events, want) in [
+            (vec![read], true),
+            (vec![other.clone(), grep], true),
+            (vec![other], false),
+            (vec![], false),
+        ] {
+            let r = run_checks(&check, dir.path(), &snap, &snap, &events).await;
+            assert_eq!(r[0].passed, want, "{events:?}: {}", r[0].detail);
+            assert_eq!(r[0].check, "consulted docs/guide/, backlog/docs/");
+            if !want {
+                assert!(
+                    r[0].detail.contains("no tool call mentioned"),
+                    "{}",
+                    r[0].detail
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -250,7 +329,7 @@ mod tests {
                 },
             },
         ];
-        let r = run_checks(&checks, root, &before, &after).await;
+        let r = run_checks(&checks, root, &before, &after, &[]).await;
         let passed: Vec<bool> = r.iter().map(|c| c.passed).collect();
         assert_eq!(passed, [true, true, false, true, false, false, false]);
         assert!(r[2].detail.contains("exit Some(2)"));

@@ -705,9 +705,29 @@ pub async fn rsync_push(
     }
 }
 
-async fn git(root: &Path, args: &[&str], env: &[(&str, &Path)]) -> io::Result<String> {
+/// Repository-location variables a caller may export (a git hook sets
+/// `GIT_INDEX_FILE`, a shell may set `GIT_DIR`). They would point git away
+/// from the explicit root, so every sync git command removes them.
+const GIT_LOCATION_VARS: [&str; 5] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_COMMON_DIR",
+];
+
+fn git_command(root: &Path) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new("git");
-    cmd.arg("-C").arg(root).args(args);
+    for k in GIT_LOCATION_VARS {
+        cmd.env_remove(k);
+    }
+    cmd.arg("-C").arg(root);
+    cmd
+}
+
+async fn git(root: &Path, args: &[&str], env: &[(&str, &Path)]) -> io::Result<String> {
+    let mut cmd = git_command(root);
+    cmd.args(args);
     for (k, v) in env {
         cmd.env(k, v);
     }
@@ -735,9 +755,7 @@ pub async fn create_bundle(local_root: &Path, out: &Path) -> io::Result<String> 
     git(local_root, &["add", "-A", "--", "."], &env).await?;
     let tree = git(local_root, &["write-tree"], &env).await?;
     let commit = {
-        let out = tokio::process::Command::new("git")
-            .arg("-C")
-            .arg(local_root)
+        let out = git_command(local_root)
             .args(["commit-tree", &tree, "-m", "harness remote sync snapshot"])
             .env("GIT_AUTHOR_NAME", "harness")
             .env("GIT_AUTHOR_EMAIL", "harness@localhost")
@@ -774,10 +792,11 @@ pub fn unbundle_script(bundle: &str, dest: &str) -> String {
         None => shell_quote(p),
     };
     format!(
-        "set -e; mkdir -p {d}; git -C {d} init -q; git -C {d} fetch -q {b} 'refs/harness/sync/*:refs/harness/sync/*'; \
+        "set -e; unset {vars}; mkdir -p {d}; git -C {d} init -q; git -C {d} fetch -q {b} 'refs/harness/sync/*:refs/harness/sync/*'; \
          git -C {d} checkout -q --detach \"$(git -C {d} for-each-ref --format='%(objectname)' refs/harness/sync | head -n1)\"; rm -f {b}",
         d = q(dest),
-        b = q(bundle)
+        b = q(bundle),
+        vars = GIT_LOCATION_VARS.join(" ")
     )
 }
 
@@ -1263,12 +1282,27 @@ mod tests {
         assert_eq!(rsync_compression(None).await, want);
     }
 
+    /// `git` with the caller's `GIT_*` variables removed, so a `GIT_DIR` or
+    /// `GIT_INDEX_FILE` from a hook cannot redirect the fixture to another
+    /// repository.
+    fn fixture_git() -> std::process::Command {
+        let mut cmd = std::process::Command::new("git");
+        for (k, _) in std::env::vars_os() {
+            if k.to_string_lossy().starts_with("GIT_") {
+                cmd.env_remove(&k);
+            }
+        }
+        cmd.env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null");
+        cmd
+    }
+
     #[tokio::test]
     async fn git_bundle_carries_untracked_and_respects_ignore() {
         let t = tree();
         std::fs::remove_dir_all(t.path().join(".git")).unwrap();
         let r = t.path();
-        let ok = std::process::Command::new("git")
+        let ok = fixture_git()
             .args(["init", "-q"])
             .current_dir(r)
             .status()
@@ -1282,7 +1316,7 @@ mod tests {
         let bundle = b.path().join("x.bundle");
         create_bundle(r, &bundle).await.unwrap();
         // The user's repo has no new refs and an untouched index.
-        let refs = std::process::Command::new("git")
+        let refs = fixture_git()
             .args(["for-each-ref"])
             .current_dir(r)
             .output()
@@ -1291,11 +1325,18 @@ mod tests {
         assert!(!r.join(".git/index").exists(), "user index untouched");
         let dest = b.path().join("dest/run");
         let script = unbundle_script(&bundle.to_string_lossy(), &dest.to_string_lossy());
+        // A stray GIT_DIR / GIT_INDEX_FILE in the remote shell (a hook, a
+        // login profile) must not redirect the unbundle.
+        let stray = b.path().join("stray");
         let st = std::process::Command::new("sh")
             .args(["-c", &script])
+            .env("GIT_DIR", stray.join(".git"))
+            .env("GIT_INDEX_FILE", stray.join("index"))
+            .env("GIT_WORK_TREE", &stray)
             .status()
             .unwrap();
         assert!(st.success());
+        assert!(!stray.exists(), "unbundle used the caller's GIT_DIR");
         let got = manifest(&dest).unwrap();
         let src = manifest(r).unwrap();
         assert_eq!(got, src);

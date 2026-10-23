@@ -5,11 +5,16 @@
 //! name: coder
 //! description: Default coding prompt
 //! layers:                 # concatenated in order
+//!   - builtin: identity   # the built-in harness identity layer
 //!   - file: base.md       # relative to this yaml
 //!   - text: |
 //!       You are working in {{ cwd }} on {{ os }}. Today is {{ date }}.
 //! vars: [cwd, os, date]   # must be a subset of ALLOWED_VARS
 //! ```
+//!
+//! A `builtin:` layer inserts text compiled into the binary. The only one is
+//! [`IDENTITY_LAYER`] ([`IDENTITY`]), which every built-in prompt starts with
+//! and `[general] identity_prompt = off` removes (see [`Prompt::identity`]).
 //!
 //! Templates use minijinja with no filters, functions or globals, and with
 //! strict undefined handling. The only values in scope are the variables a
@@ -35,6 +40,32 @@ pub const ALLOWED_VARS: &[&str] = &["cwd", "os", "date", "git_branch"];
 /// Separator placed between rendered layers.
 pub const LAYER_SEPARATOR: &str = "\n\n";
 
+/// Name of the built-in identity layer (`- builtin: identity`).
+pub const IDENTITY_LAYER: &str = "identity";
+
+/// The built-in identity layer: tells the model it runs inside harness and
+/// where to read about harness features before answering questions about
+/// them. It is the first layer of every built-in prompt, so it sits in the
+/// stable, cached prefix. Keep it at most 120 tokens; changing it is a
+/// defaults change (`CHANGELOG.md`, see `docs/defaults.md`).
+pub const IDENTITY: &str = "You are running inside harness, a terminal coding-agent harness. \
+When the user mentions harness or its features (skills, workflows, agents, subagents, memory, \
+dreaming, context, compaction, agent map, goal bar, slash commands, command palette, harness.ini, \
+remotes), read its docs before answering: docs/guide/ for usage and backlog/docs/ for design, \
+locally when the working directory is the harness repository, else at \
+https://github.com/thowd22/harness.";
+
+/// Built-in layer names a prompt may use with `builtin:`.
+pub const BUILTIN_LAYERS: &[&str] = &[IDENTITY_LAYER];
+
+/// The text of the built-in layer `name`, if it exists.
+pub fn builtin_layer(name: &str) -> Option<&'static str> {
+    match name {
+        IDENTITY_LAYER => Some(IDENTITY),
+        _ => None,
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PromptDoc {
@@ -53,6 +84,8 @@ struct LayerDoc {
     file: Option<String>,
     #[serde(default)]
     text: Option<String>,
+    #[serde(default)]
+    builtin: Option<String>,
 }
 
 /// Where a layer's text came from.
@@ -63,6 +96,15 @@ pub enum LayerSource {
     Inline,
     /// `file:` relative to the YAML (as written).
     File(String),
+    /// `builtin:` text compiled into the binary (see [`builtin_layer`]).
+    Builtin(String),
+}
+
+impl LayerSource {
+    /// True for the built-in identity layer.
+    pub fn is_identity(&self) -> bool {
+        matches!(self, LayerSource::Builtin(n) if n == IDENTITY_LAYER)
+    }
 }
 
 /// One prompt layer: an unrendered template.
@@ -85,6 +127,12 @@ pub struct Prompt {
     pub layers: Vec<Layer>,
     /// Declared template variables (subset of [`ALLOWED_VARS`]).
     pub vars: Vec<String>,
+    /// Whether the built-in identity layer is sent (`[general]
+    /// identity_prompt`, default true). When false, `builtin: identity`
+    /// layers are skipped by [`Prompt::render`] and
+    /// [`Prompt::effective_layers`]. Set for a whole catalog with
+    /// [`Catalog::set_identity_prompt`](crate::discovery::Catalog::set_identity_prompt).
+    pub identity: bool,
 }
 
 /// Values for the allowlisted template variables, captured once per session.
@@ -177,7 +225,15 @@ fn env<'a>() -> minijinja::Environment<'a> {
 }
 
 impl Prompt {
-    /// Renders all layers and joins them with [`LAYER_SEPARATOR`]. Trailing
+    /// The layers that are sent, in order: every layer except the identity
+    /// layer when [`Prompt::identity`] is false.
+    pub fn effective_layers(&self) -> impl Iterator<Item = &Layer> {
+        self.layers
+            .iter()
+            .filter(|l| self.identity || !l.source.is_identity())
+    }
+
+    /// Renders all effective layers and joins them with [`LAYER_SEPARATOR`]. Trailing
     /// whitespace of each layer is trimmed so file endings do not matter.
     /// Deterministic: equal inputs give byte-identical output.
     pub fn render(&self, vars: &PromptVars) -> Result<String, RenderError> {
@@ -190,6 +246,9 @@ impl Prompt {
         let env = env();
         let mut out = String::new();
         for (i, layer) in self.layers.iter().enumerate() {
+            if !self.identity && layer.source.is_identity() {
+                continue;
+            }
             let err = |e: minijinja::Error| RenderError {
                 prompt: self.name.clone(),
                 layer: i + 1,
@@ -208,10 +267,9 @@ impl Prompt {
         Ok(out)
     }
 
-    /// Concatenated raw template text of all layers (for lint).
+    /// Concatenated raw template text of the effective layers (for lint).
     pub fn raw_text(&self) -> String {
-        self.layers
-            .iter()
+        self.effective_layers()
             .map(|l| l.template.as_str())
             .collect::<Vec<_>>()
             .join(LAYER_SEPARATOR)
@@ -243,6 +301,10 @@ impl Prompt {
                             {
                                 "type": "object", "additionalProperties": false, "required": ["text"],
                                 "properties": { "text": { "type": "string", "description": "Inline template text." } }
+                            },
+                            {
+                                "type": "object", "additionalProperties": false, "required": ["builtin"],
+                                "properties": { "builtin": { "enum": BUILTIN_LAYERS, "description": "Text compiled into harness. `identity` names harness and points the model to its docs; `[general] identity_prompt = off` removes it." } }
                             }
                         ]
                     }
@@ -287,24 +349,41 @@ impl Artifact for Prompt {
         let env = env();
         let mut layers = Vec::with_capacity(doc.layers.len());
         for (i, l) in doc.layers.into_iter().enumerate() {
-            let (source, template) = match (l.file, l.text) {
-                (None, Some(t)) => (LayerSource::Inline, t),
-                (Some(_), Some(_)) | (None, None) => {
-                    return Err(src.error_at(
-                        &["layers"],
-                        format!("layer {}: set exactly one of `file:` or `text:`", i + 1),
-                    ));
-                }
-                (Some(f), None) => {
+            let (source, template) = match (l.file, l.text, l.builtin) {
+                (None, Some(t), None) => (LayerSource::Inline, t),
+                (None, None, Some(b)) => match builtin_layer(&b) {
+                    Some(text) => (LayerSource::Builtin(b), text.to_owned()),
+                    None => {
+                        return Err(src.error_at(
+                            &["layers"],
+                            format!(
+                                "layer {}: unknown built-in layer `{b}`; available: {}",
+                                i + 1,
+                                BUILTIN_LAYERS.join(", ")
+                            ),
+                        ));
+                    }
+                },
+                (Some(f), None, None) => {
                     let text = src
                         .read_relative(&f)
                         .map_err(|m| src.error_at(&["layers"], format!("layer {}: {m}", i + 1)))?;
                     (LayerSource::File(f), text)
                 }
+                _ => {
+                    return Err(src.error_at(
+                        &["layers"],
+                        format!(
+                            "layer {}: set exactly one of `file:`, `text:` or `builtin:`",
+                            i + 1
+                        ),
+                    ));
+                }
             };
             let what = match &source {
                 LayerSource::Inline => format!("layer {}", i + 1),
                 LayerSource::File(f) => format!("layer {} (`{f}`)", i + 1),
+                LayerSource::Builtin(b) => format!("layer {} (built-in `{b}`)", i + 1),
             };
             let tmpl = env.template_from_str(&template).map_err(|e| {
                 let at = e.line().map(|l| format!(" line {l}")).unwrap_or_default();
@@ -338,6 +417,7 @@ impl Artifact for Prompt {
             description: doc.description,
             layers,
             vars: doc.vars,
+            identity: true,
         })
     }
 
@@ -561,6 +641,64 @@ mod tests {
         assert_eq!(again.text().as_bytes(), session.text().as_bytes());
         assert_eq!(again.sha256(), session.sha256());
         assert_eq!(session.sha256().len(), 64);
+    }
+
+    #[test]
+    fn builtin_identity_layer_renders_first_and_can_be_turned_off() {
+        let mut p = load("name: x\nlayers:\n  - builtin: identity\n  - text: Rest\n").unwrap();
+        assert_eq!(p.layers[0].source, LayerSource::Builtin("identity".into()));
+        assert!(p.layers[0].source.is_identity());
+        let on = p.render(&vars()).unwrap();
+        assert_eq!(on, format!("{IDENTITY}\n\nRest"));
+        assert_eq!(p.effective_layers().count(), 2);
+        p.identity = false;
+        assert_eq!(p.render(&vars()).unwrap(), "Rest");
+        assert_eq!(p.effective_layers().count(), 1);
+        assert_eq!(p.raw_text(), "Rest");
+    }
+
+    #[test]
+    fn unknown_or_mixed_builtin_layers_are_errors() {
+        let e = load("name: x\nlayers:\n  - builtin: persona\n").unwrap_err();
+        assert!(
+            e.message
+                .contains("unknown built-in layer `persona`; available: identity"),
+            "{e}"
+        );
+        let e = load("name: x\nlayers:\n  - builtin: identity\n    text: hi\n").unwrap_err();
+        assert!(e.message.contains("exactly one of"), "{e}");
+    }
+
+    #[test]
+    fn identity_layer_is_small_and_names_the_key_terms() {
+        assert!(crate::lint::estimate_tokens(IDENTITY) <= 120);
+        for term in [
+            "harness",
+            "skills",
+            "workflows",
+            "agents",
+            "subagents",
+            "memory",
+            "dreaming",
+            "context",
+            "compaction",
+            "agent map",
+            "goal bar",
+            "slash commands",
+            "command palette",
+            "harness.ini",
+            "remotes",
+            "docs/guide/",
+            "backlog/docs/",
+            "https://github.com/thowd22/harness",
+            "working directory",
+        ] {
+            assert!(IDENTITY.contains(term), "missing: {term}");
+        }
+        assert!(
+            !IDENTITY.contains("{{"),
+            "the identity layer has no variables"
+        );
     }
 
     #[test]

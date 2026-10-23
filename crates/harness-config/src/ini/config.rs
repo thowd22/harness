@@ -159,6 +159,9 @@ pub struct General {
     /// they are refetched in the background. Default 24h.
     #[serde(serialize_with = "ser_duration")]
     pub model_list_ttl: Duration,
+    /// Send the built-in identity prompt layer, which names harness and
+    /// points the model to its docs (`identity_prompt`). Default true.
+    pub identity_prompt: bool,
 }
 
 /// `[provider.<id>]`. Use [`ProviderConfig::resolve_api_key`] to obtain the key.
@@ -450,6 +453,7 @@ impl Config {
                 max_subagent_depth: 2,
                 max_concurrent_agents: 4,
                 model_list_ttl: Duration::from_secs(24 * 3600),
+                identity_prompt: true,
             },
             providers: BTreeMap::new(),
             models: BTreeMap::new(),
@@ -623,6 +627,21 @@ fn read_general(r: &mut SectionReader<'_>, g: &mut General) {
         positive(r, "max_concurrent_agents")
     );
     set!(g.model_list_ttl, r.duration("model_list_ttl"));
+    set!(g.identity_prompt, on_off(r, "identity_prompt"));
+}
+
+/// Reads a switch written `on` / `off` (or `true` / `false`).
+fn on_off(r: &mut SectionReader<'_>, key: &'static str) -> Option<bool> {
+    let v = r.string(key)?;
+    match v.as_str() {
+        "on" | "true" => Some(true),
+        "off" | "false" => Some(false),
+        _ => {
+            let entry = r.section().get(key).expect("key was just read");
+            r.invalid(entry, "expected `on` or `off`");
+            None
+        }
+    }
 }
 
 /// Reads a `u32` that must be at least 1.
@@ -968,6 +987,34 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    #[test]
+    fn identity_prompt_defaults_on_and_can_be_turned_off() {
+        assert!(load("").unwrap().general.identity_prompt);
+        assert!(
+            !load("[general]\nidentity_prompt = off\n")
+                .unwrap()
+                .general
+                .identity_prompt
+        );
+        assert!(
+            load("[general]\nidentity_prompt = on\n")
+                .unwrap()
+                .general
+                .identity_prompt
+        );
+        assert!(
+            !load("[general]\nidentity_prompt = false\n")
+                .unwrap()
+                .general
+                .identity_prompt
+        );
+        let e = format!(
+            "{:?}",
+            load("[general]\nidentity_prompt = maybe\n").unwrap_err()
+        );
+        assert!(e.contains("expected `on` or `off`"), "{e}");
     }
 
     #[test]

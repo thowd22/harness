@@ -94,3 +94,22 @@ vulnerable dependency raises an alert and gets a fix PR automatically.
 `.github/dependabot.yml` adds weekly version updates for `cargo` and
 `github-actions`, with minor and patch bumps grouped into one PR per
 ecosystem. `cargo deny check` in CI still fails a build on known advisories.
+
+Dependabot ignores `dtolnay/rust-toolchain`: its tag is the Rust version CI
+installs, so taking its bump would move CI to a compiler nobody pinned. Wire
+format crates (`zstd`, `base64`) are checked against golden frames from older
+helpers in `crates/harness-remote/tests/wire_compat.rs`, so a bump that
+changes what deployed helpers read or send fails the build.
+
+### Upgrading the Rust toolchain
+
+The compiler is upgraded by hand, in one change:
+
+1. Set the new exact version (`x.y.z`) as `channel` in `rust-toolchain.toml`.
+2. Change every `dtolnay/rust-toolchain@` tag in `.github/workflows/` to the
+   same version. `crates/harness/tests/ci_workflow.rs` fails if any tag
+   differs from `rust-toolchain.toml`.
+3. Run `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D
+   warnings` and `cargo test --workspace`, and fix new lints and warnings.
+   A crate bump that needs a newer Rust than the pin fails CI; raise the
+   toolchain first, in its own change.

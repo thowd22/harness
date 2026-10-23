@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-10-22 19:52'
-updated_date: '2026-10-22 20:36'
+updated_date: '2026-10-23 03:25'
 labels:
   - infra
   - testing
@@ -69,4 +69,14 @@ Implemented locally (nothing pushed yet).
 - AC#3 (no-change run < 10 min) and AC#4 (first green run link) await the push: after the orchestrator pushes, rerun CI with no changes, record durations and the run URL here, then check them.
 
 Review follow-up (2026-10-22): no blocking findings. Re-verified: ci_workflow 7/7 pass, actionlint 1.7.7 clean on ci.yml, README badge and docs/ci.md present. DoD#2 checked (docs/ci.md, README; no new config keys or public APIs beyond rustdoc'd conformance::local_process_gone). DoD#3 checked (no check needed more than 3 fix attempts). DoD#4 N/A: no TUI-visible change. Still pending the push: AC#3 (warm-cache no-change run < 10 min), AC#4 (first green run link) and DoD#1 (pass in CI). Known blockers for a first green run, owned by the concurrent run, not this task: cargo fmt --check diff in their in-progress files, harness-eval defaults_changelog (needs CHANGELOG entry), three harness-tui copy tests.
+
+CI-hazard audit (2026-10-23), each finding verified before it was fixed, and each fix has a test that fails without it:
+1. [fixed] harness-remote shell.rs kill_group_script: dash and busybox ash reject `kill --`, and dash also rejects `kill -s TERM -PGID` (measured locally: 'Illegal option -7'), so the audit's suggested -s form was wrong for dash. The script now uses `kill -TERM|-0|-KILL -PGID`, verified under dash, busybox sh, bash and zsh. New test kill_script_stops_a_foreign_group_under_sh runs the script through sh against a group LocalExec does not own (red on the old script).
+2. [fixed] ssh.rs control dir: candidates $XDG_RUNTIME_DIR/harness, $TMPDIR/harness-$USER, /tmp/harness-$USER; the first whose dir+/cmz-<40>+.<16> fits SUN_PATH_MAX (104 on macOS/BSD, 108 on Linux) wins. create_private_dir refuses a symlink, and set_permissions fails on a dir someone else owns. Tests: control_dir_fits_sun_path_with_a_macos_tmpdir, private_dir_refuses_a_symlink.
+3. [fixed] harness-eval run_shell and harness-config run_secret_command: process_group(0) plus a guarded killpg(SIGKILL) on timeout (the pgid<=1 guard is kept). Tests shell_timeout_kills_background_children (red before) and cmd_timeout_kills_background_children. harness-config now depends on nix (workspace dep).
+4. [fixed] harness-tools LocalExec: reproduced the SIGTTIN stop (state T) with a pty session leader. The child now calls setsid() in pre_exec (#[allow(unsafe_code)] with a SAFETY note). process_group(0) had to be dropped because setsid fails with EPERM on a group leader. terminate_group sends SIGCONT after SIGTERM. Tests: exec_child_leads_its_own_session (Linux, /proc), kill_continues_a_stopped_group (both red before), tty_open_fails_fast_instead_of_stopping (passes either way without a ctty, so it documents the behaviour).
+5. [fixed, wider than reported] With GIT_DIR/GIT_INDEX_FILE/GIT_WORK_TREE exported, 3 tests still failed after the helpers were scrubbed, because production code also honoured them: hygiene tracked_files, memory remote_url, and remote sync create_bundle plus unbundle_script (which wrote objects into the outer repo). These now remove the repo-location variables, following drive/git.rs. With them exported, hygiene+memory+remote: 259/259 pass and the outer repo is untouched. git_bundle_carries_untracked_and_respects_ignore now runs the unbundle with a stray GIT_DIR (red before).
+6. [fixed] The fake ssh (ssh.rs) and fake gh (tests/release.rs) are now created with `install -m 755` from a child process, like write_stub.
+7. [fixed] build-remote-helpers.sh sources release-common.sh and uses write_sha256. verify-remote-helpers.sh uses sha256_of, says it is Linux-only, and dies early when readelf or timeout is missing. Also quoted $runner (SC2086) and added a shellcheck shell directive to release-common.sh. Tests: remote_helper_scripts_use_portable_checksums, verify_remote_helpers_checks_the_sidecar.
+Integration checks: cargo fmt --all --check clean; cargo clippy --workspace --all-targets --locked -D warnings clean; cargo nextest run --workspace --locked --profile ci 1452 passed / 8 skipped; cargo test --workspace --locked --doc ok; cargo deny check ok; bash tests/install-test.sh passed; shellcheck -x on scripts/*.sh, tests/*.sh, install.sh and the fixtures clean; actionlint reports only the valid macos-15-intel label.
 <!-- SECTION:NOTES:END -->

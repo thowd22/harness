@@ -232,7 +232,7 @@ impl Executor for ProcessExecutor {
 }
 
 /// Kills the child's whole process group (it was started as a group leader).
-async fn kill_group(pid: Option<u32>, child: &mut tokio::process::Child) {
+pub(super) async fn kill_group(pid: Option<u32>, child: &mut tokio::process::Child) {
     #[cfg(unix)]
     if let Some(pgid) = group_id(pid) {
         // A direct killpg(2), not `kill -KILL -<pgid>`: procps-ng `kill`

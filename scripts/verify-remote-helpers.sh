@@ -9,7 +9,16 @@
 #     REQUIRE_RUN=1, in which case a skipped run is a failure.
 #
 # usage: scripts/verify-remote-helpers.sh DIR [ARCH...]   (default: x86_64 aarch64)
+#
+# Linux only: it needs binutils `readelf` and coreutils `timeout`, which
+# stock macOS lacks, and it stops early with a clear message without them.
 set -eu
+# shellcheck source=scripts/release-common.sh
+. "$(dirname "$0")/release-common.sh"
+for tool in readelf timeout; do
+  command -v "$tool" >/dev/null 2>&1 \
+    || die "$tool not found: verify-remote-helpers.sh needs Linux binutils and coreutils (CI runs it on ubuntu-latest)"
+done
 dir=${1:?usage: $0 DIR [ARCH...]}
 shift
 [ $# -gt 0 ] || set -- x86_64 aarch64
@@ -25,7 +34,8 @@ for arch in "$@"; do
   f="$dir/$name"
   [ -f "$f" ] || { err "$f missing"; continue; }
   [ -f "$f.sha256" ] || { err "$f.sha256 missing"; continue; }
-  ( cd "$dir" && sha256sum -c "$name.sha256" >/dev/null ) || err "$name: sha256 sidecar does not match"
+  want_sum=$(awk '{print $1; exit}' "$f.sha256")
+  [ "$(sha256_of "$f")" = "$want_sum" ] || err "$name: sha256 sidecar does not match"
 
   case $arch in
     x86_64) machine='Advanced Micro Devices X86-64' ;;
@@ -48,7 +58,7 @@ for arch in "$@"; do
     fi
   fi
   reply=$( (printf '{"jsonrpc":"2.0","id":1,"method":"hello","params":{"protocol":%s,"version":"%s"}}\n' "$protocol" "$version"; sleep 2) \
-    | timeout 30 $runner "$f" --stdio 2>&1 | head -1 ) || true
+    | timeout 30 ${runner:+"$runner"} "$f" --stdio 2>&1 | head -1 ) || true
   for want in "\"arch\":\"$arch\"" "\"protocol\":$protocol" "\"version\":\"$version\""; do
     case $reply in *"$want"*) ;; *) err "$name: hello reply lacks $want: $reply" ;; esac
   done

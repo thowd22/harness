@@ -1,0 +1,25 @@
+name: identity
+description: >
+  The built-in identity layer (TASK-140): asked about a harness feature, the
+  agent reads the harness docs before answering instead of guessing. With the
+  bundled fake scripts the task passes; run it against a real model with
+  `harness eval run --model <alias>` to measure it.
+defaults:
+  repeats: 1
+  mode: auto
+  timeout_secs: 300
+  max_turns: 10
+tasks:
+  - id: reads-docs-before-answering
+    problem: "problem-6: the model does not know what harness is and guesses about its features"
+    description: >
+      The workspace is a copy of the harness repository's docs. Answering
+      without reading docs/guide/ or backlog/docs/ (or the GitHub repository)
+      fails, and so does changing any file.
+    fixture: fixtures/harness-repo
+    prompt: "How do I add a workflow to harness?"
+    provider: { fake: scripts/reads-docs-before-answering.yaml }
+    checks:
+      - consulted: ["docs/guide/", "backlog/docs/", "github.com/thowd22/harness"]
+      - unchanged: ["**"]
+      - hygiene: { max_temp_files: 0 }

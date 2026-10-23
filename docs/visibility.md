@@ -93,7 +93,8 @@ export has it as `request_body`. `[export]` (or `e`) writes it all to
 ## `/context` (`harness_tui::inspector::context`)
 
 The initial context before the first user message: every system prompt
-layer (with its YAML or `file:` source), every tool schema, the memory
+layer (with its YAML or `file:` source; the built-in identity layer is
+listed as `identity layer`), every tool schema, the memory
 index (with its `MEMORY.md` path) and the skill listing, each with an
 estimated token count, plus the total and its share of the model's context
 window. Rows expand to a preview of their text.

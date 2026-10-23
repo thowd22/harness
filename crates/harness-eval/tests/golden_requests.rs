@@ -129,6 +129,38 @@ fn default_prompts_render() {
     }
 }
 
+/// The identity layer opens every built-in agent's request on every
+/// provider, with bytes that do not depend on the session (cwd, date,
+/// branch), so it stays inside the cached prefix across turns and sessions.
+#[test]
+fn identity_layer_opens_the_cached_prefix_of_every_request() {
+    use harness_config::prompts::IDENTITY;
+    let c = catalog();
+    let other = PromptVars {
+        cwd: "/elsewhere".into(),
+        os: "macos".into(),
+        date: "2027-01-01".into(),
+        git_branch: "dev".into(),
+    };
+    for a in c.agents.active() {
+        let PromptRef::Named(p) = &a.item.prompt else {
+            panic!("built-in agents use named prompts");
+        };
+        let prompt = c.prompts.get(p).unwrap();
+        for v in [vars(), other.clone()] {
+            let text = SessionPrompt::new(prompt, v).unwrap();
+            assert!(text.text().starts_with(IDENTITY), "{}", a.item.name);
+        }
+        let b = bodies(&a.item.name);
+        let anthropic = b["anthropic"]["system"][0]["text"].as_str().unwrap();
+        assert!(anthropic.starts_with(IDENTITY), "{}", a.item.name);
+        let openai = b["openai"]["instructions"].as_str().unwrap();
+        assert!(openai.starts_with(IDENTITY), "{}", a.item.name);
+        let openrouter = b["openrouter"]["messages"][0]["content"].as_str().unwrap();
+        assert!(openrouter.starts_with(IDENTITY), "{}", a.item.name);
+    }
+}
+
 #[test]
 fn coder_requests() {
     insta::assert_json_snapshot!("request_coder", bodies("coder"));

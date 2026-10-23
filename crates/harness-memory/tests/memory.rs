@@ -49,10 +49,20 @@ fn write(t: &MemoryTool, path: &str, text: &str) -> harness_memory::tool::Memory
     .unwrap()
 }
 
+/// Runs git in `dir` with the caller's `GIT_*` variables removed, so a
+/// `GIT_DIR` or `GIT_INDEX_FILE` from a hook cannot redirect the fixture to
+/// another repository.
 fn git(dir: &Path, args: &[&str]) -> String {
-    let o = Command::new("git")
+    let mut cmd = Command::new("git");
+    for (k, _) in std::env::vars_os() {
+        if k.to_string_lossy().starts_with("GIT_") {
+            cmd.env_remove(&k);
+        }
+    }
+    let o = cmd
         .current_dir(dir)
         .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .args(args)
         .output()
         .unwrap();

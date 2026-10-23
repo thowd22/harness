@@ -18,18 +18,18 @@ jobs:
     name: musl helpers (x86_64, aarch64)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.93.1
         with:
           targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
-      - uses: mlugg/setup-zig@v1
+      - uses: mlugg/setup-zig@v2
       - run: cargo install cargo-zigbuild --locked
       - run: scripts/build-remote-helpers.sh remote-bin x86_64 aarch64
       - run: sudo apt-get install -y qemu-user
       - name: Check the builds are static, the sidecars match and both answer hello
         run: REQUIRE_RUN=1 scripts/verify-remote-helpers.sh remote-bin x86_64 aarch64
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: remote-bin
           path: remote-bin/

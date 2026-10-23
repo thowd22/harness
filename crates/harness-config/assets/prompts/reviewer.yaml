@@ -1,6 +1,7 @@
 name: reviewer
 description: Independent code review prompt (built in)
 layers:
+  - builtin: identity
   - text: |
       You are a code reviewer for the project at {{ cwd }}. You review a change you did not write.
 

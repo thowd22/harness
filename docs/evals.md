@@ -38,6 +38,7 @@ tasks:
       - file: { path: debug.log, exists: false }
       - unchanged: ["tests/**"]                   # identical to the fixture
       - hygiene: { max_temp_files: 0, scope: ["src/**"], max_out_of_scope: 0 }
+      - consulted: ["docs/", "README"]            # a tool call's arguments mention one
 ```
 
 A task runs a `prompt` (with `agent`, default `coder`) or a `workflow`
@@ -45,7 +46,9 @@ A task runs a `prompt` (with `agent`, default `coder`) or a `workflow`
 `harness wf run`). `provider` picks the scripted fake provider (`fake:` path
 of a [fake script](providers.md)) or a real model (`model:`); without it the
 agent's model or `[general] default_model` is used. Every check must pass for
-an attempt to pass.
+an attempt to pass. `consulted` passes when at least one tool call (a
+`read` path, a `bash` command, ...) has arguments containing one of the
+strings, which shows the agent looked something up before answering.
 
 ## Running
 
@@ -112,6 +115,15 @@ map in doc-1):
 The bundled fake scripts behave well and pass; `scripts/bad/` holds the trap
 behaviour, and a test checks that every trap catches it. Run the suite with
 `--model` to measure a real model.
+
+## Identity
+
+`crates/harness-eval/suites/identity/suite.yaml` checks the built-in
+identity layer ([defaults.md](defaults.md)): in a workspace that holds the
+harness docs, the task asks "How do I add a workflow to harness?" and passes
+only if the agent read `docs/guide/` or `backlog/docs/` (or the GitHub
+repository) before answering and changed no files. The `scripts/bad`
+variant answers from a guess and is caught (`tests/identity.rs`).
 
 ## Long tasks
 

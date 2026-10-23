@@ -612,6 +612,7 @@ pub fn prompt_sources(entry: &Entry<Prompt>) -> Vec<LintSource> {
         .layers
         .iter()
         .enumerate()
+        .filter(|(_, l)| entry.item.identity || !l.source.is_identity())
         .map(|(i, l)| {
             let label = format!("prompt `{}` layer {}", entry.item.name, i + 1);
             match &l.source {
@@ -626,6 +627,13 @@ pub fn prompt_sources(entry: &Entry<Prompt>) -> Vec<LintSource> {
                     kind: SourceKind::PromptLayer,
                     label,
                     file: yaml_dir_display(&entry.origin, f),
+                    text: l.template.clone(),
+                    file_text: None,
+                },
+                LayerSource::Builtin(b) => LintSource {
+                    kind: SourceKind::PromptLayer,
+                    label,
+                    file: format!("built-in {b} layer"),
                     text: l.template.clone(),
                     file_text: None,
                 },

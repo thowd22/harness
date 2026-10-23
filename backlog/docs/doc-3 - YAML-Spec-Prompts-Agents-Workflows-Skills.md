@@ -3,7 +3,7 @@ id: doc-3
 title: YAML Spec - Prompts Agents Workflows Skills
 type: specification
 created_date: '2026-10-22 14:26'
-updated_date: '2026-10-22 17:13'
+updated_date: '2026-10-23 02:50'
 ---
 # YAML Spec: Prompts, Agents, Workflows; Skills (Markdown)
 
@@ -25,12 +25,15 @@ Later scopes shadow earlier ones by `name`; shadowing is reported in `harness do
 name: coder
 description: Default coding prompt
 layers:                       # concatenated in order; order is stable for caching
+  - builtin: identity         # built-in harness identity layer (compiled in)
   - file: base.md             # relative to this yaml
   - text: |
       You are working in {{ cwd }} on {{ os }}. Today is {{ date }}.
       You may edit files matching the task scope and add or update tests.
 vars: [cwd, os, date, git_branch]   # allowed template vars (no secrets, no env)
 ```
+
+A layer is exactly one of `text:`, `file:` or `builtin:`. The only built-in layer is `identity` (`harness_config::prompts::IDENTITY`, at most 120 tokens): it tells the model it runs inside harness, names the harness features and asks it to read docs/guide/ and backlog/docs/ (locally, or at https://github.com/thowd22/harness) before answering questions about them. Every built-in prompt starts with it, so it sits in the stable cached prefix; custom prompts include it explicitly. `[general] identity_prompt = off` removes it from every prompt.
 
 ## Agent (`agents/*.yaml`)
 

@@ -277,7 +277,7 @@ impl Core {
         let trust = TrustStore::from_data_dir(&data);
         let roots = wiring::roots(&data, &cwd);
         warnings.extend(roots.notes.iter().cloned());
-        let catalog = Arc::new(Catalog::load(&roots));
+        let catalog = Arc::new(wiring::catalog_from(&cfg, &roots));
         for e in catalog.errors() {
             warnings.push(e.error.to_string());
         }

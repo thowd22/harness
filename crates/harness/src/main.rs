@@ -144,7 +144,7 @@ fn cmd_wf(args: &[String]) -> ExitCode {
 
 fn cmd_eval(args: &[String]) -> ExitCode {
     let (cfg, data, _) = startup_or_exit();
-    let catalog = wiring::catalog(&data, &current_dir());
+    let catalog = wiring::catalog(&cfg, &data, &current_dir());
     code(runtime().block_on(commands::eval(
         &cfg,
         &catalog,

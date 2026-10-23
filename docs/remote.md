@@ -64,7 +64,7 @@ Every invocation adds:
 
 | Option | Why |
 | --- | --- |
-| `ControlMaster=auto`, `ControlPath=$XDG_RUNTIME_DIR/harness/cm-%C`, `ControlPersist=60` | one multiplexed connection per host; the socket directory is created with mode 0700 (fallback `/tmp/harness-$USER`) |
+| `ControlMaster=auto`, `ControlPath=$XDG_RUNTIME_DIR/harness/cm-%C`, `ControlPersist=60` | one multiplexed connection per host; the socket directory is created with mode 0700 and must not be a symlink. Without `XDG_RUNTIME_DIR` (macOS) it is `$TMPDIR/harness-$USER`, or `/tmp/harness-$USER` when socket paths under `$TMPDIR` would not fit the 104-byte (macOS) or 108-byte (Linux) socket path limit |
 | `StrictHostKeyChecking=yes`, `BatchMode=yes` | unknown hosts fail instead of prompting |
 | `ServerAliveInterval=15`, `ServerAliveCountMax=3`, `ConnectTimeout=10` | a dead network is noticed within about 45 s |
 | `ForwardAgent=no`, `-a`, `ForwardX11=no`, `-x`, `ClearAllForwardings=yes`, `SendEnv=-*`, `PermitLocalCommand=no` | nothing is forwarded to the remote host |
@@ -286,7 +286,9 @@ Check a build directory before using it:
 scripts/verify-remote-helpers.sh ~/.local/share/harness/remote-bin x86_64 aarch64
 ```
 
-It checks each sidecar, the ELF architecture, that the binary is static (no
+`build-remote-helpers.sh` runs on Linux and macOS. `verify-remote-helpers.sh`
+is Linux only (it needs binutils `readelf` and coreutils `timeout`). It
+checks each sidecar, the ELF architecture, that the binary is static (no
 interpreter, no shared libraries) and that it answers the `hello` handshake
 with the expected protocol version, architecture and version. A foreign
 architecture runs under `qemu-<arch>` (from `qemu-user`, or the path in
@@ -306,7 +308,9 @@ fallback offers read, write, atomic replace, chmod, stat, list and exec
 using `cat`, `stat`, `mkdir`, `mv`, `chmod`, `ps` and `kill`. Its limits:
 there is no `glob` (use `find` in bash), a missing program shows up as exit
 code 127 instead of a spawn error, a disconnect cannot be reattached, and
-GNU or BSD `stat` is required.
+GNU or BSD `stat` is required. Kill and timeout stop the remote process
+group with the shell's builtin `kill -TERM -PGID`, the one form dash,
+busybox ash, bash and zsh all accept.
 
 ## Workspace sync
 
@@ -421,3 +425,4 @@ failed, job lost) carry the host name and drive the host badge.
 | --- | --- |
 | `HARNESS_REMOTE_BIN_DIR` | directory of local static helper builds (default `<data_dir>/remote-bin`) |
 | `XDG_RUNTIME_DIR` | parent of the ControlMaster and helper socket directories |
+| `TMPDIR` | ControlMaster socket parent when `XDG_RUNTIME_DIR` is unset and the paths fit; else `/tmp` |

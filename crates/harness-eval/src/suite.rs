@@ -230,6 +230,14 @@ pub enum Check {
         /// The limits.
         hygiene: HygieneCheck,
     },
+    /// `consulted: [needles]`: the agent made at least one tool call (a
+    /// `read`, a `bash` command, ...) whose arguments contain one of these
+    /// strings, e.g. `docs/guide/`. Checks that it looked something up
+    /// before answering.
+    Consulted {
+        /// Substrings of tool-call arguments; any one is enough.
+        consulted: Vec<String>,
+    },
 }
 
 /// A shell command check.
@@ -298,6 +306,7 @@ impl fmt::Display for Check {
             Check::File { file } => write!(f, "file {}", file.path),
             Check::Unchanged { unchanged } => write!(f, "unchanged {}", unchanged.join(", ")),
             Check::Hygiene { .. } => f.write_str("hygiene"),
+            Check::Consulted { consulted } => write!(f, "consulted {}", consulted.join(", ")),
         }
     }
 }
@@ -416,6 +425,14 @@ impl Suite {
                             globset::Glob::new(g).map_err(|e| {
                                 format!("task `{}`: hygiene scope `{g}`: {e}", t.id)
                             })?;
+                        }
+                    }
+                    Check::Consulted { consulted } => {
+                        if consulted.is_empty() || consulted.iter().any(String::is_empty) {
+                            return Err(format!(
+                                "task `{}`: `consulted` needs at least one non-empty string",
+                                t.id
+                            ));
                         }
                     }
                     Check::Command(_) => {}
@@ -567,6 +584,10 @@ tasks:
         );
         assert!(bad("name: x\ntasks: [{id: a, prompt: p, files: {\"../x\": y}}]\n").contains(".."));
         assert!(bad("name: x\ntasks: [{id: a, prompt: p, bogus: 1}]\n").contains("bogus"));
+        assert!(
+            bad("name: x\ntasks: [{id: a, prompt: p, checks: [{consulted: []}]}]\n")
+                .contains("`consulted` needs at least one non-empty string")
+        );
     }
 
     #[test]

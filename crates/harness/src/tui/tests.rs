@@ -196,6 +196,13 @@ async fn builtin_commands_open_panels() {
     h.d.request(UiRequest::Submit("/context".into())).await;
     let ctx = h.panel("Context").await;
     assert!(ctx[0].contains("tokens before history"), "{ctx:?}");
+    let identity_tokens =
+        harness_tui::inspector::estimate_tokens(harness_config::prompts::IDENTITY);
+    assert!(
+        ctx.iter()
+            .any(|l| l.ends_with("identity layer") && l.contains(&identity_tokens.to_string())),
+        "{ctx:?}"
+    );
     // The palette entry of a built-in runs the same command.
     h.d.request(UiRequest::Run(Invocation {
         id: "cmd.agents".into(),

@@ -34,7 +34,7 @@ jobs:
     name: shellcheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: shellcheck --version
       - run: shellcheck install.sh tests/install-test.sh tests/fixtures/install/bin/*
 
@@ -46,7 +46,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: wget is available (the wget-only path is tested too)
         if: runner.os == 'macOS'
         run: command -v wget || brew install wget

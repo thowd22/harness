@@ -121,9 +121,16 @@ fn make_key(name: &str, identity: &str) -> String {
 
 fn remote_url(root: &Path) -> Option<String> {
     let git = |args: &[&str]| -> Option<String> {
+        // Repository-location variables (a hook's GIT_DIR) would point git
+        // away from `root`.
         let out = Command::new("git")
             .current_dir(root)
             .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_OBJECT_DIRECTORY")
+            .env_remove("GIT_COMMON_DIR")
             .args(args)
             .stdin(Stdio::null())
             .stderr(Stdio::null())

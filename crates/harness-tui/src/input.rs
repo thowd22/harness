@@ -16,21 +16,30 @@
 //!   Unicode character, including private-use characters the editor uses
 //!   internally for placeholders (stored as one-character pastes).
 //! - Slash commands: typing `/` at the start opens inline completion with
-//!   each command's arguments, description and scope. Up/Down select, Tab
-//!   or Enter complete (Enter on an exact match without arguments sends it),
-//!   Esc closes, and rows are clickable.
+//!   each command's arguments, description and scope. Matching uses the
+//!   palette's fuzzy matcher ([`crate::fuzzy`]): gaps are allowed (`/mdl`
+//!   finds `/model`), namespaced commands match on the bare and the full
+//!   name, and descriptions are searched too. Rows rank exact name matches
+//!   first, then name prefixes, then other name matches by score, then
+//!   description matches; ties keep alphabetical order. Matched characters
+//!   are highlighted. Up/Down select, Tab or Enter complete (Enter on an
+//!   exact match without arguments sends it), Esc closes, and rows are
+//!   clickable.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 use unicode_width::UnicodeWidthChar;
 
 use crate::chat::text::{truncate, width};
+use crate::fuzzy::{self, Fuzzy};
 use crate::interaction::{ElementId, HitMap};
 use crate::keys::Action;
 use crate::theme::{Theme, Token};
+use nucleo_matcher::Utf32String;
 
 /// Element id of the input box (same as [`crate::app::INPUT_ID`]).
 pub const INPUT_ID: &str = "input";
@@ -103,8 +112,69 @@ pub enum InputOutcome {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Completion {
-    matches: Vec<usize>,
+    matches: Vec<CompletionMatch>,
     selected: usize,
+    /// The token the matches were computed for.
+    token: String,
+}
+
+/// One ranked completion row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CompletionMatch {
+    /// Index into [`Input::commands`].
+    command: usize,
+    /// What matched, for highlighting.
+    field: Field,
+}
+
+/// The part of a command a query matched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Field {
+    /// Nothing (empty query).
+    None,
+    /// The full name, e.g. `project:deploy`.
+    Full,
+    /// The name after the last `:`, e.g. `deploy`.
+    Bare,
+    /// The description.
+    Description,
+}
+
+/// Per-command match keys, converted once in [`Input::set_commands`] so a
+/// keystroke only scores.
+#[derive(Debug, Clone)]
+struct CommandKeys {
+    full: Utf32String,
+    description: Utf32String,
+    full_lower: String,
+    bare_lower: String,
+    /// Characters before the bare name (namespace and colon).
+    ns: u32,
+}
+
+impl CommandKeys {
+    fn new(c: &SlashCommand) -> CommandKeys {
+        let (ns, bare) = match c.name.rsplit_once(':') {
+            Some((ns, bare)) => (ns.chars().count() as u32 + 1, bare),
+            None => (0, c.name.as_str()),
+        };
+        CommandKeys {
+            full: Utf32String::from(c.name.as_str()),
+            description: Utf32String::from(c.description.as_str()),
+            full_lower: c.name.to_lowercase(),
+            bare_lower: bare.to_lowercase(),
+            ns,
+        }
+    }
+}
+
+/// Rank tiers of a completion match, best first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Tier {
+    Exact,
+    Prefix,
+    Name,
+    Description,
 }
 
 /// The editor state.
@@ -117,9 +187,14 @@ pub struct Input {
     hist_pos: Option<usize>,
     stash: String,
     commands: Vec<SlashCommand>,
+    /// Match keys, parallel to `commands`.
+    keys: Vec<CommandKeys>,
+    /// Command indices in alphabetical order (the tie-break).
+    order: Vec<usize>,
     completion: Option<Completion>,
     dismissed: bool,
     scroll: usize,
+    fuzzy: Fuzzy,
 }
 
 fn placeholder(i: usize) -> char {
@@ -141,8 +216,12 @@ impl Input {
 
     /// Sets the slash commands offered by completion.
     pub fn set_commands(&mut self, commands: Vec<SlashCommand>) {
+        self.keys = commands.iter().map(CommandKeys::new).collect();
+        let mut order: Vec<usize> = (0..commands.len()).collect();
+        order.sort_by(|&a, &b| commands[a].name.cmp(&commands[b].name).then(a.cmp(&b)));
+        self.order = order;
         self.commands = commands;
-        self.refresh_completion();
+        self.refresh(false);
     }
 
     /// The raw draft (placeholders as private-use characters).
@@ -423,7 +502,13 @@ impl Input {
     }
 
     fn refresh_completion(&mut self) {
-        let Some(tok) = self.slash_token().map(str::to_lowercase) else {
+        self.refresh(true);
+    }
+
+    /// Recomputes the completion. `narrow` allows reusing the previous
+    /// matches as candidates (false after the command list changed).
+    fn refresh(&mut self, narrow: bool) {
+        let Some(tok) = self.slash_token().map(str::to_owned) else {
             self.completion = None;
             self.dismissed = false;
             return;
@@ -431,36 +516,95 @@ impl Input {
         if self.dismissed {
             return;
         }
-        let mut prefix: Vec<usize> = Vec::new();
-        let mut inner: Vec<usize> = Vec::new();
-        for (i, c) in self.commands.iter().enumerate() {
-            let name = c.name.to_lowercase();
-            let bare = name.rsplit(':').next().unwrap_or(&name).to_owned();
-            if name.starts_with(&tok) || bare.starts_with(&tok) {
-                prefix.push(i);
-            } else if name.contains(&tok) {
-                inner.push(i);
-            }
+        let matches = self.rank(&tok, narrow);
+        let selected = match &self.completion {
+            Some(c) if c.token == tok => c.selected.min(matches.len().saturating_sub(1)),
+            _ => 0,
+        };
+        self.completion = (!matches.is_empty()).then_some(Completion {
+            matches,
+            selected,
+            token: tok,
+        });
+    }
+
+    /// Commands matching `tok`, best first. An empty token lists every
+    /// command alphabetically.
+    ///
+    /// Each command is scored once, on its full name: a gapped match on
+    /// the bare name is also one on the full name, and the exact and
+    /// prefix tiers compare the bare name directly. When `tok` extends the
+    /// previous token only the previous matches can still match, so typing
+    /// forward narrows the candidates instead of rescanning every command.
+    fn rank(&mut self, tok: &str, narrow: bool) -> Vec<CompletionMatch> {
+        if tok.is_empty() {
+            return self
+                .order
+                .iter()
+                .map(|&command| CompletionMatch {
+                    command,
+                    field: Field::None,
+                })
+                .collect();
         }
-        prefix.sort_by(|a, b| self.commands[*a].name.cmp(&self.commands[*b].name));
-        inner.sort_by(|a, b| self.commands[*a].name.cmp(&self.commands[*b].name));
-        prefix.extend(inner);
-        let selected = self
+        let narrowed: Option<Vec<bool>> = self
             .completion
             .as_ref()
-            .map_or(0, |c| c.selected)
-            .min(prefix.len().saturating_sub(1));
-        self.completion = (!prefix.is_empty()).then_some(Completion {
-            matches: prefix,
-            selected,
-        });
+            .filter(|c| narrow && !c.token.is_empty() && tok.starts_with(c.token.as_str()))
+            .map(|c| {
+                let mut keep = vec![false; self.commands.len()];
+                for m in &c.matches {
+                    keep[m.command] = true;
+                }
+                keep
+            });
+        let lower = tok.to_lowercase();
+        let name_pat = fuzzy::fuzzy(tok);
+        let desc_pat = fuzzy::substring(tok);
+        let mut scored: Vec<(Tier, u32, usize, CompletionMatch)> = Vec::new();
+        for (rank, &i) in self.order.iter().enumerate() {
+            if narrowed.as_ref().is_some_and(|keep| !keep[i]) {
+                continue;
+            }
+            let k = &self.keys[i];
+            let (tier, score, field) = match self.fuzzy.score(&name_pat, k.full.slice(..)) {
+                None => match self.fuzzy.score(&desc_pat, k.description.slice(..)) {
+                    Some(sc) => (Tier::Description, sc, Field::Description),
+                    None => continue,
+                },
+                Some(sc) => {
+                    let full_prefix = k.full_lower.starts_with(&lower);
+                    let bare_prefix = k.ns > 0 && k.bare_lower.starts_with(&lower);
+                    let tier = if k.full_lower == lower || (k.ns > 0 && k.bare_lower == lower) {
+                        Tier::Exact
+                    } else if full_prefix || bare_prefix {
+                        Tier::Prefix
+                    } else {
+                        Tier::Name
+                    };
+                    // Highlight the bare name when that is what was typed.
+                    let field = if bare_prefix && !full_prefix {
+                        Field::Bare
+                    } else {
+                        Field::Full
+                    };
+                    (tier, sc, field)
+                }
+            };
+            scored.push((tier, score, rank, CompletionMatch { command: i, field }));
+        }
+        scored.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
+        scored.into_iter().map(|(.., m)| m).collect()
     }
 
     /// Commands currently offered, with the selected index.
     pub fn completions(&self) -> Option<(Vec<&SlashCommand>, usize)> {
         let c = self.completion.as_ref()?;
         Some((
-            c.matches.iter().map(|&i| &self.commands[i]).collect(),
+            c.matches
+                .iter()
+                .map(|m| &self.commands[m.command])
+                .collect(),
             c.selected,
         ))
     }
@@ -471,7 +615,7 @@ impl Input {
         let Some(c) = &self.completion else {
             return;
         };
-        let Some(&idx) = c.matches.get(row) else {
+        let Some(idx) = c.matches.get(row).map(|m| m.command) else {
             return;
         };
         let name = self.commands[idx].name.clone();
@@ -538,7 +682,7 @@ impl Input {
             }
             if action == Some(Action::Send) {
                 let row = c.selected;
-                let cmd = &self.commands[c.matches[row]];
+                let cmd = &self.commands[c.matches[row].command];
                 let exact = self.slash_token() == Some(cmd.name.as_str());
                 if !(exact && cmd.args.is_none()) {
                     self.accept(row);
@@ -761,16 +905,28 @@ impl Input {
     /// Draws the completion popup into `area` (sized by
     /// [`Input::completion_height`]) and registers its rows.
     pub fn render_completion<A: Clone>(
-        &self,
+        &mut self,
         frame: &mut Frame<'_>,
         area: Rect,
         theme: &Theme,
         hits: &mut HitMap<A>,
         wrap: &dyn Fn(InputAction) -> A,
     ) {
-        let Some((cmds, selected)) = self.completions() else {
+        let Input {
+            completion: Some(comp),
+            commands,
+            keys,
+            fuzzy: matcher,
+            ..
+        } = self
+        else {
             return;
         };
+        let selected = comp.selected;
+        let cmds: Vec<&SlashCommand> = comp.matches.iter().map(|m| &commands[m.command]).collect();
+        let name_pat = fuzzy::fuzzy(&comp.token);
+        let desc_pat = fuzzy::substring(&comp.token);
+        let mut idx = Vec::new();
         frame.render_widget(Clear, area);
         let w = area.width as usize;
         let name_w = cmds
@@ -795,6 +951,10 @@ impl Input {
             } else {
                 theme.bg(Token::Surface)
             };
+            let m = comp.matches[i];
+            let hit = base
+                .patch(theme.fg(Token::Highlight))
+                .add_modifier(Modifier::BOLD);
             let mut name = format!("/{}", c.name);
             if let Some(a) = &c.args {
                 name.push(' ');
@@ -803,16 +963,44 @@ impl Input {
             let name = format!("{:<name_w$}", truncate(&name, name_w));
             let scope = c.scope.clone().map(|s| format!(" {s}")).unwrap_or_default();
             let desc_w = w.saturating_sub(name_w + 2 + width(&scope));
-            let spans = vec![
-                Span::styled(" ", base),
-                Span::styled(name, base.patch(theme.fg(Token::Accent))),
-                Span::styled(" ", base),
-                Span::styled(
-                    format!("{:<desc_w$}", truncate(&c.description, desc_w)),
-                    base.patch(theme.fg(Token::Fg)),
-                ),
-                Span::styled(scope, base.patch(theme.fg(Token::Muted))),
-            ];
+            // Highlights are computed for visible rows only. Name
+            // positions shift by one for the slash, bare-name positions
+            // also by the namespace.
+            let desc = format!("{:<desc_w$}", truncate(&c.description, desc_w));
+            let ns = keys[m.command].ns;
+            let mut name_hits = Vec::new();
+            let mut desc_hits = Vec::new();
+            match m.field {
+                Field::None => {}
+                Field::Full => {
+                    matcher.indices(&name_pat, &c.name, &mut idx);
+                    name_hits = visible_hits(&name, idx.iter().map(|&p| p + 1));
+                }
+                Field::Bare => {
+                    let bare = c.name.rsplit(':').next().unwrap_or(&c.name);
+                    matcher.indices(&name_pat, bare, &mut idx);
+                    name_hits = visible_hits(&name, idx.iter().map(|&p| p + ns + 1));
+                }
+                Field::Description => {
+                    matcher.indices(&desc_pat, &c.description, &mut idx);
+                    desc_hits = visible_hits(&desc, idx.iter().copied());
+                }
+            }
+            let mut spans = vec![Span::styled(" ", base)];
+            spans.extend(fuzzy::highlight(
+                &name,
+                &name_hits,
+                base.patch(theme.fg(Token::Accent)),
+                hit,
+            ));
+            spans.push(Span::styled(" ", base));
+            spans.extend(fuzzy::highlight(
+                &desc,
+                &desc_hits,
+                base.patch(theme.fg(Token::Fg)),
+                hit,
+            ));
+            spans.push(Span::styled(scope, base.patch(theme.fg(Token::Muted))));
             lines.push(Line::from(spans));
             hits.register(
                 id,
@@ -822,6 +1010,15 @@ impl Input {
         }
         frame.render_widget(Paragraph::new(lines).style(theme.bg(Token::Surface)), area);
     }
+}
+
+/// Match positions that are still on screen in `shown` (a possibly
+/// truncated copy): the ellipsis that ends a truncated text is never
+/// highlighted.
+fn visible_hits(shown: &str, hits: impl Iterator<Item = u32>) -> Vec<u32> {
+    let chars: Vec<char> = shown.chars().collect();
+    hits.filter(|&p| chars.get(p as usize).is_some_and(|&c| c != '…' && c != ' '))
+        .collect()
 }
 
 fn width_of(s: &str) -> usize {
@@ -1098,5 +1295,242 @@ mod tests {
         // A full last row puts the cursor at the start of the next one.
         assert_eq!(i.height(52), 3);
         assert_eq!(i.rows(52).1, (2, 0));
+    }
+
+    fn ranked() -> Vec<SlashCommand> {
+        vec![
+            SlashCommand::new("remodel", "Rebuild the scaffold"),
+            SlashCommand::new("model", "Switch the model"),
+            SlashCommand::new("mode", "Cycle the autonomy mode"),
+            SlashCommand::new("compact", "Compact the context"),
+            SlashCommand {
+                name: "project:deploy".into(),
+                description: "Deploy the app".into(),
+                args: None,
+                scope: Some("project".into()),
+            },
+            SlashCommand {
+                name: "global:review".into(),
+                description: "Run the reviewer".into(),
+                args: None,
+                scope: Some("global".into()),
+            },
+            SlashCommand {
+                name: "audit".into(),
+                description: "Workflow: security review of the diff".into(),
+                args: None,
+                scope: Some("project".into()),
+            },
+        ]
+    }
+
+    fn names(i: &Input) -> Vec<String> {
+        i.completions()
+            .map(|(c, _)| c.iter().map(|c| c.name.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    fn typed(s: &str) -> Input {
+        let mut i = Input::new();
+        i.set_commands(ranked());
+        typ(&mut i, s);
+        i
+    }
+
+    #[test]
+    fn gapped_matches_rank_by_score() {
+        // /mdl matches model and remodel; the match at the word start wins.
+        assert_eq!(names(&typed("/mdl")), vec!["model", "remodel"]);
+        // Upper case makes the match case sensitive (smart case).
+        assert!(typed("/MDL").completions().is_none());
+        assert!(typed("/xyz").completions().is_none());
+    }
+
+    #[test]
+    fn exact_then_prefix_then_other_name_matches() {
+        // Prefix matches tie on score and keep alphabetical order; the
+        // gapped remodel comes after them.
+        assert_eq!(names(&typed("/mod")), vec!["mode", "model", "remodel"]);
+        // An exact match ranks first even when another name scores higher.
+        assert_eq!(names(&typed("/model")), vec!["model", "remodel"]);
+        assert_eq!(names(&typed("/mode"))[0], "mode");
+        // Enter on the exact match sends it.
+        let mut i = typed("/mode");
+        assert_eq!(press(&mut i, "enter"), InputOutcome::Submit("/mode".into()));
+    }
+
+    #[test]
+    fn descriptions_are_searched_below_name_matches() {
+        // global:review matches by name, audit only by its description.
+        assert_eq!(names(&typed("/review")), vec!["global:review", "audit"]);
+        assert_eq!(names(&typed("/security")), vec!["audit"]);
+        // Description matches are contiguous: a scattered s-c-a-f does not
+        // pull in unrelated descriptions.
+        assert_eq!(names(&typed("/scaffold")), vec!["remodel"]);
+        // Tab completes a description match to the command name.
+        let mut i = typed("/security");
+        press(&mut i, "tab");
+        assert_eq!(i.text(), "/audit ");
+    }
+
+    #[test]
+    fn namespaced_commands_match_bare_and_full_names() {
+        assert_eq!(names(&typed("/deploy")), vec!["project:deploy"]);
+        assert_eq!(names(&typed("/dep")), vec!["project:deploy"]);
+        assert_eq!(names(&typed("/project:dep")), vec!["project:deploy"]);
+        assert_eq!(names(&typed("/pjdpl")), vec!["project:deploy"]);
+        // Enter on a bare exact match completes the full name.
+        let mut i = typed("/deploy");
+        assert_eq!(press(&mut i, "enter"), InputOutcome::Changed);
+        assert_eq!(i.text(), "/project:deploy ");
+    }
+
+    #[test]
+    fn equal_scores_keep_a_stable_alphabetical_order() {
+        let cmds: Vec<SlashCommand> = ["xc", "xa", "xb", "xa"]
+            .iter()
+            .enumerate()
+            .map(|(n, s)| SlashCommand::new(*s, format!("d{n}")))
+            .collect();
+        let mut i = Input::new();
+        i.set_commands(cmds);
+        typ(&mut i, "/x");
+        let (c, _) = i.completions().unwrap();
+        let got: Vec<_> = c
+            .iter()
+            .map(|c| (c.name.as_str(), c.description.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![("xa", "d1"), ("xa", "d3"), ("xb", "d2"), ("xc", "d0")]
+        );
+    }
+
+    #[test]
+    fn selection_resets_when_the_ranking_changes() {
+        let mut i = typed("/mo");
+        press(&mut i, "down");
+        press(&mut i, "down");
+        assert_eq!(i.completions().unwrap().1, 2);
+        press(&mut i, "up");
+        assert_eq!(i.completions().unwrap().1, 1);
+        // Typing re-ranks and selects the best match again.
+        typ(&mut i, "d");
+        assert_eq!(i.completions().unwrap().1, 0);
+        // Reloading commands with the same token keeps the selection.
+        press(&mut i, "down");
+        i.set_commands(ranked());
+        assert_eq!(i.completions().unwrap().1, 1);
+        press(&mut i, "esc");
+        assert!(i.completions().is_none());
+    }
+
+    #[test]
+    fn matched_characters_are_highlighted_with_theme_tokens() {
+        let theme = Theme::default();
+        let hit = theme.fg(Token::Highlight).fg;
+        let mut input = typed("/mdl");
+        let mut it = Interaction::new();
+        let term = draw(&mut input, &mut it);
+        let buf = term.backend().buffer();
+        let (x, y) = find_text(buf, "/model").unwrap();
+        let styled = |dx: u16| {
+            let cell = &buf[(x + dx, y)];
+            (
+                cell.fg == hit.unwrap(),
+                cell.modifier.contains(Modifier::BOLD),
+            )
+        };
+        // "/model": m, d and l are hits; the slash, o and e are not.
+        assert_eq!(styled(0), (false, false));
+        assert_eq!(styled(1), (true, true));
+        assert_eq!(styled(2), (false, false));
+        assert_eq!(styled(3), (true, true));
+        assert_eq!(styled(4), (false, false));
+        assert_eq!(styled(5), (true, true));
+        // A description match highlights the description.
+        let mut input = typed("/security");
+        let term = draw(&mut input, &mut it);
+        let buf = term.backend().buffer();
+        let (x, y) = find_text(buf, "security").unwrap();
+        assert_eq!(buf[(x, y)].fg, hit.unwrap());
+        assert_eq!(buf[(x + 8, y)].fg, theme.fg(Token::Fg).fg.unwrap());
+        // Clicking the highlighted row still completes it.
+        let (x, y) = find_text(buf, "/audit").unwrap();
+        let ev = crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        };
+        let Some(Dispatch::Activate(a)) = it.handle_mouse(&ev) else {
+            panic!("no hit")
+        };
+        input.activate(&a);
+        assert_eq!(input.text(), "/audit ");
+    }
+
+    #[test]
+    fn typing_forward_narrows_to_the_same_results_as_a_rescan() {
+        for q in ["/review", "/mdl", "/project:dep", "/secur", "/Mo", "/de"] {
+            let mut typed_in = Input::new();
+            typed_in.set_commands(ranked());
+            typ(&mut typed_in, q);
+            let mut fresh = Input::new();
+            fresh.set_commands(ranked());
+            fresh.set_text(q);
+            assert_eq!(names(&typed_in), names(&fresh), "{q}");
+            assert_eq!(typed_in.completion, fresh.completion, "{q}");
+        }
+        // Reloading a shorter list while open rescans instead of reusing
+        // stale matches, and typing on keeps working.
+        let mut i = typed("/m");
+        i.set_commands(vec![SlashCommand::new("mode", "Cycle")]);
+        typ(&mut i, "o");
+        assert_eq!(names(&i), vec!["mode"]);
+    }
+
+    #[test]
+    fn ranks_1000_commands_within_a_frame_per_keystroke() {
+        let cmds: Vec<SlashCommand> = (0..1000)
+            .map(|n| SlashCommand {
+                name: format!(
+                    "{}:command-number-{n}",
+                    if n % 2 == 0 { "global" } else { "project" }
+                ),
+                description: format!("Description of command {n} for testing completion"),
+                args: Some("[arg]".into()),
+                scope: Some("global".into()),
+            })
+            .collect();
+        let mut input = Input::new();
+        input.set_commands(cmds);
+        let theme = Theme::default();
+        let mut term = Terminal::new(TestBackend::new(100, 12)).unwrap();
+        let it: Interaction<InputAction> = Interaction::new();
+        let mut worst = std::time::Duration::ZERO;
+        let mut steps = Vec::new();
+        for c in "/cmdnum99".chars() {
+            let t = std::time::Instant::now();
+            input.insert_char(c);
+            let ranked = t.elapsed();
+            let mut hits = it.begin_frame();
+            term.draw(|f| {
+                let ch = input.completion_height();
+                input.render_completion(f, Rect::new(0, 0, 100, ch), &theme, &mut hits, &|a| a);
+            })
+            .unwrap();
+            steps.push((c, ranked, t.elapsed()));
+            worst = worst.max(t.elapsed());
+        }
+        let got = names(&input);
+        assert!(!got.is_empty());
+        // Every number with two 9s after the gap-matched "cmdnum" prefix.
+        assert_eq!(got.len(), 28, "{got:?}");
+        assert!(got.iter().any(|n| n == "project:command-number-99"));
+        assert!(
+            worst < std::time::Duration::from_millis(16),
+            "worst frame {worst:?}; (key, ranked, drawn): {steps:?}"
+        );
     }
 }

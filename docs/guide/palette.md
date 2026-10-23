@@ -10,6 +10,11 @@ Type to filter, Up/Down to select, Enter to run. Entries that need
 arguments ask for them inline; Esc goes back, Esc again closes. Rows are
 clickable.
 
+Typing `/` at the start of the message box opens the same fuzzy search
+for slash commands only: `/mdl` finds `/model`, `/deploy` finds
+`/project:deploy`, and a command whose description matches is listed
+below the name matches. Tab or Enter completes the selected row.
+
 Rebind the palette (or any action) in `harness.ini`:
 
 ```ini

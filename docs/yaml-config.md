@@ -63,8 +63,12 @@ or labels in `runs_on`, and agent budgets above `[budget] run_usd`.
 ## Prompts
 
 - `layers` are joined in order with one blank line between them. Each layer
-  is either `text:` or `file:` (a path relative to the YAML file; absolute
-  paths and `..` are rejected).
+  is either `text:`, `file:` (a path relative to the YAML file; absolute
+  paths and `..` are rejected) or `builtin:`, text compiled into harness.
+  The only built-in layer is `identity`, which names harness and points the
+  model to its docs; the built-in prompts start with it, and a custom
+  prompt can too (`- builtin: identity`). `[general] identity_prompt = off`
+  removes it from every prompt.
 - Templates can use only the variables listed in `vars`, and `vars` can list
   only `cwd`, `os`, `date` (UTC, `YYYY-MM-DD`) and `git_branch`. A template
   that uses any other variable fails to load. Environment variables and
