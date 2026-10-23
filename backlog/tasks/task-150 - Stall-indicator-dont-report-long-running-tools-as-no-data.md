@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-23 15:35'
-updated_date: '2026-10-23 17:21'
+updated_date: '2026-10-23 19:22'
 labels:
   - tui
   - indicators
@@ -72,6 +72,8 @@ Mutation check: reverting either fix makes the new tests fail. Residual (not cha
 Validation: cargo nextest run -p harness-tui 400/400 pass; clippy -p harness-tui --all-targets -D warnings clean; rustfmt applied. Docs: docs/tui-views.md activity-line note on batches and approvals. The real-TUI tmux repro was not re-run; the ChatView test drives the same envelope/key path.
 
 Integration check (both tasks together, 2026-10-23): cargo fmt --all --check clean; cargo clippy --workspace --all-targets --locked -D warnings clean; cargo nextest run --workspace --locked --profile ci 1812 passed, 10 skipped; cargo test --workspace --locked --doc ok; cargo deny check ok; scripts/hermetic-guard.sh nextest run -p harness -p harness-eval 213 passed, nothing written to HOME/XDG. No conflicts found between TASK-149 and TASK-150 in the TUI app. DoD #1 'in CI' is pending until the orchestrator pushes; nothing committed.
+
+Committed in 58b1512; CI green on Ubuntu and macOS: https://github.com/thowd22/harness/actions/runs/40009831788.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

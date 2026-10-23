@@ -1,11 +1,11 @@
 ---
 id: TASK-148
 title: Coder keeps a todo list by default for multi-step work
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-23 15:25'
-updated_date: '2026-10-23 15:26'
+updated_date: '2026-10-23 19:22'
 labels:
   - agent
   - tui
@@ -30,18 +30,18 @@ Limit how many times you test and fix. If the same test, build or check still fa
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The coder prompt and the todo tool description tell the model to write a todo list before starting any task with more than one step
-- [ ] #2 When an agent with the todo tool has made [general] todo_nudge_after tool-using turns (default 3) and the task list is empty, the next model request carries a short reminder to use todo; it repeats at most every todo_nudge_after turns and stops once a task exists
-- [ ] #3 todo_nudge_after = 0 disables the reminder; agents without the todo tool never get it
-- [ ] #4 The reminder is visible in the run's events/request and does not break prompt caching of earlier turns
+- [x] #1 The coder prompt and the todo tool description tell the model to write a todo list before starting any task with more than one step
+- [x] #2 When an agent with the todo tool has made [general] todo_nudge_after tool-using turns (default 3) and the task list is empty, the next model request carries a short reminder to use todo; it repeats at most every todo_nudge_after turns and stops once a task exists
+- [x] #3 todo_nudge_after = 0 disables the reminder; agents without the todo tool never get it
+- [x] #4 The reminder is visible in the run's events/request and does not break prompt caching of earlier turns
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Tests: automated tests cover every acceptance criterion (unit and/or integration as appropriate) and pass locally and in CI; no existing test is deleted, skipped, ignored or weakened to get a green run
-- [ ] #2 Docs: user-facing behaviour is documented (docs/ and, if the design changed, the relevant backlog doc), public APIs have rustdoc, and any new config keys appear in the harness.ini reference
-- [ ] #3 Loop guard respected: no more than 3 fix attempts per failing test or check; if still failing, stop, record attempts, output and hypothesis in implementation notes, and ask the user instead of looping
-- [ ] #4 UI interaction: if this task makes anything visible in the TUI, every visible interactive element is clickable with the mouse and fully operable with the keyboard (arrows/Tab to focus, Enter to activate, Esc to back out), with tests for both input paths; tasks with no visible UI mark this N/A
+- [x] #1 Tests: automated tests cover every acceptance criterion (unit and/or integration as appropriate) and pass locally and in CI; no existing test is deleted, skipped, ignored or weakened to get a green run
+- [x] #2 Docs: user-facing behaviour is documented (docs/ and, if the design changed, the relevant backlog doc), public APIs have rustdoc, and any new config keys appear in the harness.ini reference
+- [x] #3 Loop guard respected: no more than 3 fix attempts per failing test or check; if still failing, stop, record attempts, output and hypothesis in implementation notes, and ask the user instead of looping
+- [x] #4 UI interaction: if this task makes anything visible in the TUI, every visible interactive element is clickable with the mouse and fully operable with the keyboard (arrows/Tab to focus, Enter to activate, Esc to back out), with tests for both input paths; tasks with no visible UI mark this N/A
 <!-- DOD:END -->
 
 ## Implementation Plan
@@ -53,3 +53,15 @@ Limit how many times you test and fix. If the same test, build or check still fa
 4. Wire it into core.rs hooks for the top-level loop; integration test via fake provider that the reminder appears in model_call_started.
 5. Docs: docs/subagents.md (todo section), docs/visibility.md goal bar note; run full gates.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Shipped on main in 168e63c (CI flakes fixed in 46afdc1, f76427d, bfd12a4, 58b1512); CI green on Ubuntu and macOS: https://github.com/thowd22/harness/actions/runs/40009831788. Live Opus 5.5 sessions: run 1 the model added 4 todos right after the reminder; run 2 it planned with todo without one. DoD 4 N/A (no new UI).
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+The coder now plans with todo by default: stronger coder prompt and todo description, plus the TodoNudge request hook ([general] todo_nudge_after, default 3, 0 = off) that adds a cache-safe reminder to the unsent tool-result message when the board is empty. Verified by unit tests, a binary-level test of the reminder in the run log, and live Opus sessions where the goal bar filled in.
+<!-- SECTION:FINAL_SUMMARY:END -->

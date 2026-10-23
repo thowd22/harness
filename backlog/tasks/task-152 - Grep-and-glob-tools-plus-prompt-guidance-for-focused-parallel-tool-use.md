@@ -1,11 +1,11 @@
 ---
 id: TASK-152
 title: 'Grep and glob tools, plus prompt guidance for focused, parallel tool use'
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-23 16:14'
-updated_date: '2026-10-23 19:14'
+updated_date: '2026-10-23 19:22'
 labels:
   - tools
   - agent
@@ -35,7 +35,7 @@ Limit how many times you test and fix. If the same test, build or check still fa
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Tests: automated tests cover every acceptance criterion (unit and/or integration as appropriate) and pass locally and in CI; no existing test is deleted, skipped, ignored or weakened to get a green run
+- [x] #1 Tests: automated tests cover every acceptance criterion (unit and/or integration as appropriate) and pass locally and in CI; no existing test is deleted, skipped, ignored or weakened to get a green run
 - [x] #2 Docs: user-facing behaviour is documented (docs/ and, if the design changed, the relevant backlog doc), public APIs have rustdoc, and any new config keys appear in the harness.ini reference
 - [x] #3 Loop guard respected: no more than 3 fix attempts per failing test or check; if still failing, stop, record attempts, output and hypothesis in implementation notes, and ask the user instead of looping
 - [x] #4 UI interaction: if this task makes anything visible in the TUI, every visible interactive element is clickable with the mouse and fully operable with the keyboard (arrows/Tab to focus, Enter to activate, Esc to back out), with tests for both input paths; tasks with no visible UI mark this N/A
@@ -80,4 +80,6 @@ DoD #1 unticked with AC3: no automated test that runs by default covers AC3 as w
 Integration (TASK-151..155, 2026-10-23): workspace green on the combined tree with TASK-149/150 also Done: cargo fmt --all --check ok; cargo clippy --workspace --all-targets --locked -D warnings ok; cargo nextest run --workspace --locked --profile ci 1838 passed / 10 skipped (golden_requests and prompt snapshots included); cargo test --workspace --doc ok; cargo deny check ok; scripts/hermetic-guard.sh nextest -p harness -p harness-eval 216 passed, nothing written to HOME/XDG. CHANGELOG Defaults: the provisional TASK-152/153/155 entries are merged into one reconciled entry (also naming TASK-151's cache_ttl and TASK-153's [tools] job limits) with final fingerprint 45850933b6b6; defaults_changelog passes. README gains a Focused tools highlight and the harness-tools crate row. 'Passes in CI' is pending until the orchestrator pushes; nothing is committed. Status: stays In Progress. The scripted eval grep_answers_a_multi_file_lookup_in_fewer_model_calls_than_bash passes, but AC3 asks for a recorded or live run. The user must choose between approving the one live run (command in the notes above) and accepting AC3 on the documented fallback. AC3 and DoD1 stay unchecked until then.
 
 AC3 live evidence (2026-10-23, user-authorized, Opus 5.5 via OpenRouter): HARNESS_EVAL_LIVE_MODEL=opus cargo test -p harness-eval --test search -- --ignored -> 'live opus: passed 1, model calls 5 (bash-only replay 6), tool calls 4'. A live multi-step session on a temp repo also used grep first and read 5 files in one parallel turn (8 model calls, $0.097, 0 failed tool calls).
+
+CI green on Ubuntu and macOS with the batch: https://github.com/thowd22/harness/actions/runs/40009831788.
 <!-- SECTION:NOTES:END -->

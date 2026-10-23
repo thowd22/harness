@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-23 16:14'
-updated_date: '2026-10-23 18:44'
+updated_date: '2026-10-23 19:22'
 labels:
   - sandbox
   - policy
@@ -64,6 +64,8 @@ Validation: cargo nextest run -p harness-policy (96 passed), clippy -D warnings 
 Review fix (blocking finding confirmed): after the inner output streams closed (e.g. 'exec >/dev/null 2>&1; sleep 60' or 'exec >log 2>&1; cargo build'), relay() left its select loop and awaited inner.wait(), which keeps the inner kill sender alive, so kill() or dropping the outer handle (Esc/cancel) no longer reached the process group until it exited or timed out. Fix: new additive ExecHandle::wait_or_kill(kill_future) in crates/harness-tools/src/exec.rs (waits like wait() but fires the kill sender when the future completes); relay now waits with wait_or_kill on krx (resolves on kill or on outer drop). Tests: harness-tools exec::tests::wait_or_kill_kills_on_request_and_otherwise_just_waits; denial::tests::relay_kills_after_output_closed (deterministic, channel-level, kill and drop after EOF, 10s timeout so a regression fails instead of hanging); sandbox_tty linux::kill_and_drop_end_the_process_after_its_output_closed (real sandboxed sh that closes stdout/stderr then execs sleep 60; kill and drop both, asserts pid gone). Mutation check: putting back inner.wait() fails both new policy tests (and leaks the sleep, which was killed by hand). Validation: cargo nextest run -p harness-tools -p harness-policy (177 passed), clippy --all-targets -D warnings, fmt --check, cargo check -p harness. No prompt/ini defaults changed.
 
 Integration (TASK-151..155, 2026-10-23): workspace green on the combined tree with TASK-149/150 also Done: cargo fmt --all --check ok; cargo clippy --workspace --all-targets --locked -D warnings ok; cargo nextest run --workspace --locked --profile ci 1838 passed / 10 skipped (golden_requests and prompt snapshots included); cargo test --workspace --doc ok; cargo deny check ok; scripts/hermetic-guard.sh nextest -p harness -p harness-eval 216 passed, nothing written to HOME/XDG. CHANGELOG Defaults: the provisional TASK-152/153/155 entries are merged into one reconciled entry (also naming TASK-151's cache_ttl and TASK-153's [tools] job limits) with final fingerprint 45850933b6b6; defaults_changelog passes. README gains a Focused tools highlight and the harness-tools crate row. 'Passes in CI' is pending until the orchestrator pushes; nothing is committed.
+
+Committed in 58b1512; CI green on Ubuntu and macOS: https://github.com/thowd22/harness/actions/runs/40009831788.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

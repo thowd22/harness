@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-23 16:14'
-updated_date: '2026-10-23 18:44'
+updated_date: '2026-10-23 19:22'
 labels:
   - memory
   - agent
@@ -59,6 +59,8 @@ Implemented: guard::limit_for/validate_for (400 per bullet, 1000 in projects/<ke
 Integration (TASK-151..155, 2026-10-23): workspace green on the combined tree with TASK-149/150 also Done: cargo fmt --all --check ok; cargo clippy --workspace --all-targets --locked -D warnings ok; cargo nextest run --workspace --locked --profile ci 1838 passed / 10 skipped (golden_requests and prompt snapshots included); cargo test --workspace --doc ok; cargo deny check ok; scripts/hermetic-guard.sh nextest -p harness -p harness-eval 216 passed, nothing written to HOME/XDG. CHANGELOG Defaults: the provisional TASK-152/153/155 entries are merged into one reconciled entry (also naming TASK-151's cache_ttl and TASK-153's [tools] job limits) with final fingerprint 45850933b6b6; defaults_changelog passes. README gains a Focused tools highlight and the harness-tools crate row. 'Passes in CI' is pending until the orchestrator pushes; nothing is committed.
 
 Open follow-up (not started, needs user approval): the end-of-session memory extractor still applies the default 400-character limit to proposals for project/overview (where the tool allows 1000).
+
+Committed in 58b1512; CI green on Ubuntu and macOS: https://github.com/thowd22/harness/actions/runs/40009831788.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

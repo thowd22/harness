@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-23 16:14'
-updated_date: '2026-10-23 19:14'
+updated_date: '2026-10-23 19:22'
 labels:
   - providers
   - cost
@@ -63,6 +63,8 @@ Validation: cargo nextest run for harness-providers, -config, -events, -agent, -
 Integration (TASK-151..155, 2026-10-23): workspace green on the combined tree with TASK-149/150 also Done: cargo fmt --all --check ok; cargo clippy --workspace --all-targets --locked -D warnings ok; cargo nextest run --workspace --locked --profile ci 1838 passed / 10 skipped (golden_requests and prompt snapshots included); cargo test --workspace --doc ok; cargo deny check ok; scripts/hermetic-guard.sh nextest -p harness -p harness-eval 216 passed, nothing written to HOME/XDG. CHANGELOG Defaults: the provisional TASK-152/153/155 entries are merged into one reconciled entry (also naming TASK-151's cache_ttl and TASK-153's [tools] job limits) with final fingerprint 45850933b6b6; defaults_changelog passes. README gains a Focused tools highlight and the harness-tools crate row. 'Passes in CI' is pending until the orchestrator pushes; nothing is committed.
 
 Live on Opus 5.5 (HARNESS_LIVE_OPENROUTER_MODEL=anthropic/claude-opus-5.5, test now takes this override): first read 0 written 2571; second read 2571 written 0. Live 11-turn Opus session: cached input grew every turn (4.3k -> 11.8k cached, uncached input 0.4-1.3k per call), $0.1475 for the whole session.
+
+Committed in 58b1512; CI green on Ubuntu and macOS: https://github.com/thowd22/harness/actions/runs/40009831788.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

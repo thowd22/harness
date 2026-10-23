@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-23 15:35'
-updated_date: '2026-10-23 17:40'
+updated_date: '2026-10-23 19:22'
 labels:
   - tui
   - clipboard
@@ -84,6 +84,8 @@ Orchestrator fixes after the real-TUI verification (wf_292e042e-b32):
 - The copy toast was hidden under the /model and /resume pickers and the login modal. Over a modal the newest toast is now drawn on top at the bottom right (over the modal's help line, not its rows). dragging_over_picker_rows_copies_them_and_a_click_still_picks asserts the toast is visible (fails without the fix).
 - Map copies included a leading status icon ('✔ Coder'). Chrome::Drawing now blanks an icon that leads a label (first visible cell after a border or row start, followed by a blank); icons inside text are kept. Unit test drawing_chrome_drops_status_icons_in_front_of_labels_only.
 - pty test helpers (resume_pty, tui_pty) now kill their harness child on Drop; failed pty tests had left TUI processes orphaned for hours.
+
+Committed in 58b1512; CI green on Ubuntu and macOS: https://github.com/thowd22/harness/actions/runs/40009831788.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
