@@ -1,7 +1,9 @@
 //! Write guard: what may be saved to memory.
 //!
 //! Every write is checked, in order, for:
-//! 1. format: one line, no metadata suffix, valid `[[links]]`, length cap;
+//! 1. format: one line, no metadata suffix, valid `[[links]]`, length cap
+//!    ([`MAX_BULLET_CHARS`] per bullet, [`MAX_OVERVIEW_BULLET_CHARS`] in a
+//!    project's overview note, see [`limit_for`]);
 //! 2. secrets: anything the run's redactor would mask;
 //! 3. the design doc's "not saved" list: task state (PR/issue numbers,
 //!    statuses, work in progress), session summaries, and facts trivially
@@ -16,7 +18,34 @@ use harness_events::redact::Redactor;
 use regex::Regex;
 
 use crate::drive::NotePath;
-use crate::drive::note::{MAX_BULLET_CHARS, links};
+pub use crate::drive::note::MAX_BULLET_CHARS;
+use crate::drive::note::links;
+
+/// Topic of a project's overview note (`project/overview`, stored as
+/// `projects/<key>/overview.md`). It answers "index this codebase into
+/// memory" with a compact summary instead of a file-by-file map, so its
+/// bullets may be longer ([`MAX_OVERVIEW_BULLET_CHARS`]) and it holds at most
+/// [`MAX_OVERVIEW_BULLETS`] of them.
+pub const OVERVIEW_TOPIC: &str = "overview";
+/// Longest accepted bullet in a project's overview note, in characters.
+pub const MAX_OVERVIEW_BULLET_CHARS: usize = 1000;
+/// Most bullets a project's overview note may hold.
+pub const MAX_OVERVIEW_BULLETS: usize = 10;
+
+/// True when `path` is a project's overview note (`projects/<key>/overview.md`).
+pub fn is_overview(path: &NotePath) -> bool {
+    path.project()
+        .is_some_and(|key| path.as_str() == format!("projects/{key}/{OVERVIEW_TOPIC}.md"))
+}
+
+/// The per-bullet character limit for a note at `path`.
+pub fn limit_for(path: &NotePath) -> usize {
+    if is_overview(path) {
+        MAX_OVERVIEW_BULLET_CHARS
+    } else {
+        MAX_BULLET_CHARS
+    }
+}
 
 /// Why a write was rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,8 +135,15 @@ static REDISCOVERABLE: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     ])
 });
 
-/// Checks bullet `text` (already trimmed) for format problems.
+/// Checks bullet `text` (already trimmed) for format problems with the
+/// default length limit ([`MAX_BULLET_CHARS`]).
 pub fn check_format(text: &str) -> Result<(), Rejection> {
+    check_format_with(text, MAX_BULLET_CHARS)
+}
+
+/// Checks bullet `text` (already trimmed) for format problems, allowing at
+/// most `max_chars` characters.
+pub fn check_format_with(text: &str, max_chars: usize) -> Result<(), Rejection> {
     if text.is_empty() {
         return Err(reject(
             RejectKind::Format,
@@ -117,14 +153,15 @@ pub fn check_format(text: &str) -> Result<(), Rejection> {
     if text.contains('\n') || text.contains('\r') {
         return Err(reject(
             RejectKind::Format,
-            "memories are one-line bullets. Rewrite it as a single line (one lesson per write).",
+            "memories are one-line bullets. Put each lesson on its own line in `bullets: [...]` (one write), or rewrite it as a single line.",
         ));
     }
-    if text.chars().count() > MAX_BULLET_CHARS {
+    let len = text.chars().count();
+    if len > max_chars {
         return Err(reject(
             RejectKind::Format,
             format!(
-                "the memory is longer than {MAX_BULLET_CHARS} characters. Shorten it to the rule and its reason."
+                "the memory is {len} characters; the limit is {max_chars} per bullet. Split it into several self-contained bullets of at most {max_chars} characters and send them in one write as `bullets: [...]`, or shorten it to the rule and its reason."
             ),
         ));
     }
@@ -186,16 +223,26 @@ pub fn check_content(text: &str) -> Result<(), Rejection> {
     Ok(())
 }
 
-/// Runs every check on a candidate memory. Returns the normalised bullet
-/// text (trimmed, leading `- ` removed).
+/// Runs every check on a candidate memory with the default length limit.
+/// Returns the normalised bullet text (trimmed, leading `- ` removed).
 pub fn validate(text: &str, redactor: &Redactor) -> Result<String, Rejection> {
+    validate_with(text, redactor, MAX_BULLET_CHARS)
+}
+
+/// Runs every check on a candidate memory for the note at `path` (its limit
+/// comes from [`limit_for`]).
+pub fn validate_for(path: &NotePath, text: &str, redactor: &Redactor) -> Result<String, Rejection> {
+    validate_with(text, redactor, limit_for(path))
+}
+
+fn validate_with(text: &str, redactor: &Redactor, max_chars: usize) -> Result<String, Rejection> {
     let t = text.trim();
     let t = t
         .strip_prefix("- ")
         .or_else(|| t.strip_prefix("* "))
         .unwrap_or(t)
         .trim();
-    check_format(t)?;
+    check_format_with(t, max_chars)?;
     check_secrets(t, redactor)?;
     check_content(t)?;
     Ok(t.to_owned())
@@ -240,6 +287,30 @@ mod tests {
             v(&"a".repeat(MAX_BULLET_CHARS + 1)),
             Err(RejectKind::Format)
         );
+    }
+
+    #[test]
+    fn overview_notes_get_the_higher_limit() {
+        let overview = NotePath::parse("projects/app-1a2b3c4d/overview").unwrap();
+        let other = NotePath::parse("projects/app-1a2b3c4d/testing").unwrap();
+        let nested = NotePath::parse("projects/app-1a2b3c4d/sub/overview").unwrap();
+        let tool = NotePath::parse("tools/overview").unwrap();
+        assert!(is_overview(&overview));
+        for p in [&other, &nested, &tool] {
+            assert!(!is_overview(p), "{p}");
+            assert_eq!(limit_for(p), MAX_BULLET_CHARS);
+        }
+        assert_eq!(limit_for(&overview), MAX_OVERVIEW_BULLET_CHARS);
+        let r = Redactor::new(Vec::<String>::new());
+        let long = "a".repeat(MAX_BULLET_CHARS + 1);
+        assert!(validate_for(&overview, &long, &r).is_ok());
+        let e = validate_for(&other, &long, &r).unwrap_err();
+        assert_eq!(e.kind, RejectKind::Format);
+        assert!(
+            e.message
+                .contains("401 characters; the limit is 400 per bullet")
+        );
+        assert!(e.message.contains("`bullets: [...]`"));
     }
 
     #[test]

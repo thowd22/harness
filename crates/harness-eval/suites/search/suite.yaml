@@ -1,0 +1,38 @@
+name: search
+description: >
+  Multi-file lookups with the built-in grep and glob tools (TASK-152). The
+  task is modelled on run 01a1691a, where a real model answered "which code
+  starts processes in their own session?" with about twenty one-command bash
+  turns (`cd <repo> && grep -rn ...`, then `sed -n` per file). The bundled
+  script answers with one grep call; `scripts/bash-only` replays the
+  recorded bash pattern. Both pass the checks; the report's model calls show
+  the difference. Run it against a real model with
+  `harness eval run --model <alias>` to measure how the prompt steers it.
+defaults:
+  repeats: 1
+  mode: auto
+  timeout_secs: 300
+  max_turns: 12
+tasks:
+  - id: find-session-spawns
+    problem: "problem-6: slow, unfocused searching through bash (one tool per turn, whole-tree grep including vendor/)"
+    description: >
+      Find every project source file that starts a child process in a new
+      session (setsid) and the function doing it, ignoring the vendored
+      copy, and write them to FINDINGS.md.
+    fixture: fixtures/process-repo
+    files:
+      .gitignore: "vendor/\ntarget/\n"
+    prompt: >
+      Which project source files start a child process in its own session
+      (setsid), and in which function? Write one `path: function` line per
+      place to FINDINGS.md.
+    provider: { fake: scripts/find-session-spawns.yaml }
+    checks:
+      - file:
+          path: FINDINGS.md
+          contains: ["src/providers/runner.rs: spawn_job", "src/pty/viewer.rs: open_pty"]
+          not_contains: ["vendor/"]
+      - consulted: ["setsid"]
+      - unchanged: ["src/**", "vendor/**"]
+      - hygiene: { max_temp_files: 0 }

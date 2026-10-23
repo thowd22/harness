@@ -125,6 +125,7 @@ async fn live_fold_equals_replay_fold() {
                 cached_input: 0,
                 output: 5,
                 reasoning: 0,
+                cache_write: 0,
             },
             stop_reason: None,
             response: None,

@@ -189,6 +189,28 @@ async fn per_call_usage_cost_and_cache_hit_rate_are_recorded() {
     );
 }
 
+#[tokio::test]
+async fn cache_writes_are_recorded_in_call_events_and_the_cost_report() {
+    let mut first = with_usage(turn(vec![tool("echo", json!({"text": "a"}))]), 100, 0, 10);
+    first.usage.cache_write_tokens = 2_000;
+    let h = Harness::new(vec![first, FakeTurn::text("done")]).await;
+    let mut conv = Conversation::new(None);
+    conv.push_user("go");
+    h.agent(config())
+        .with_cost(dollar_per_call())
+        .run(&mut conv, &CancellationToken::new())
+        .await;
+    let events = h.events().await;
+    let ledger = UsageLedger::from_events(&events);
+    let calls = ledger.calls();
+    // Cache writes count as input and are also reported on their own.
+    assert_eq!(calls[0].usage.input, 2_100);
+    assert_eq!(calls[0].usage.cache_write, 2_000);
+    assert_eq!(calls[1].usage.cache_write, 0);
+    let lines = CostReport::new(&ledger).lines(None);
+    assert!(lines[0].contains("2000 written to cache"), "{lines:?}");
+}
+
 /// Fails `failures` times, then passes.
 struct Flaky {
     failures: Mutex<u32>,

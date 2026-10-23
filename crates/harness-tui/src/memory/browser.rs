@@ -189,7 +189,7 @@ impl ButtonRow {
         };
         let rect = Rect::new(self.x, self.y, w, 1);
         frame.render_widget(Paragraph::new(Span::styled(text, style)), rect);
-        hits.register(id, rect, action);
+        hits.register_button(id, rect, action);
         self.x += w + 1;
     }
 }
@@ -486,7 +486,7 @@ impl MemoryBrowser {
             };
             let r = Rect::new(x, inner.y, w, 1);
             frame.render_widget(Paragraph::new(Span::styled(label, style)), r);
-            hits.register(id, r, wrap(BrowserAction::Tab(t)));
+            hits.register_button(id, r, wrap(BrowserAction::Tab(t)));
             x += w + 1;
         }
         let mut y = inner.y + 1;

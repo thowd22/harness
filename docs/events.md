@@ -38,9 +38,27 @@ Event types: `run_started`, `run_finished`, `node_started`, `node_running`,
 `node_retry`, `node_finished`, `model_call_started`, `delta`,
 `model_call_finished`, `tool_call`, `tool_result`, `approval_requested`,
 `approval_resolved`, `file_changed`, `verify_started`, `verify_finished`,
-`memory`, `cost` and `error` (plus `tool_output`, `policy_decision`,
-`remote_op`, `remote_connection`, `tasks`, `mcp_call` and
-`mcp_tools_changed`).
+`memory`, `cost` and `error` (plus `tool_output`, `tool_progress`,
+`policy_decision`, `remote_op`, `remote_connection`, `tasks`, `mcp_call`,
+`mcp_tools_changed` and `bash_job`).
+
+A `bash_job` event records a background bash job (`run_in_background`)
+starting and ending, as a full snapshot on the node of the turn that
+started it: `call_id` (the starting `bash` call), `job_id` (`j1`, ...),
+`command`, `state` (`running`, `exited`, `failed` for a non-zero exit,
+`killed` for a signal, `timed_out`, `stopped`, `lost`), and once it ended
+`exit_code` (when it exited) and `duration_ms`, plus `output` (its log file
+on the harness machine). The end can arrive long after the call's
+`tool_result`, even after the turn ended.
+
+A `tool_progress` event reports on a running tool call (today `bash`):
+`call_id`, and optionally `timeout_ms` (the call's effective timeout, sent
+once when the command starts and repeated with each sample) and `liveness`
+(`cpu_ms`, CPU time the command's live processes have used so far; `procs`,
+live processes in its group; `active`, how many are running or runnable).
+Samples are taken every 3 s while the command runs; a host that cannot be
+sampled (the plain-shell remote fallback) sends no `liveness`. The activity
+line uses them to tell a busy, quiet command from an idle one.
 
 An `mcp_call` event follows the `tool_call` of a call that goes to an MCP
 server: `call_id` (the same as the `tool_call`'s), `server` (the

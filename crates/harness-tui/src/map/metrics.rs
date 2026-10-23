@@ -240,6 +240,7 @@ mod tests {
                         cached_input: 900,
                         output: 10,
                         reasoning: 0,
+                        cache_write: 0,
                     },
                     stop_reason: None,
                     response: None,

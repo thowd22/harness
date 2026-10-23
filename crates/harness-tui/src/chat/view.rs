@@ -50,6 +50,7 @@ use ratatui::widgets::{Block, Paragraph};
 use time::{OffsetDateTime, UtcOffset};
 
 use super::copy::{self as copy_ui, SelectAction, ids as copy_ids};
+use super::text::soft_join;
 use super::timefmt::{TimeFormat, Timestamps};
 use super::transcript::{self, CopyTarget, Transcript, TranscriptAction, ViewSettings};
 use crate::app::{AppCommand, View};
@@ -63,6 +64,7 @@ use crate::notify::{Level, Notifications, NotifyAction};
 use crate::palette::{
     Invocation, Palette, PaletteAction, PaletteEntry, PaletteOutcome, builtin_entries, ids,
 };
+use crate::selection;
 use crate::status::StatusLine;
 use crate::theme::Theme;
 
@@ -94,6 +96,8 @@ pub enum ChatAction {
     Follow,
     /// The status line's MCP indicator: open `/mcp`.
     Mcp,
+    /// The status line's background-jobs indicator: open `/jobs`.
+    Jobs,
 }
 
 /// What the chat screen asks the app or core to do.
@@ -215,8 +219,14 @@ pub struct ChatView {
     /// A screen (node detail, diff) is shown over the chat: "Copy focused"
     /// and "Copy diff" go to it.
     screen_open: bool,
+    /// The chat is not shown (the map or a screen is): "Select text" is
+    /// left to the app's selection mode.
+    covered: bool,
     /// Toasts drawn over another view or screen ([`ChatView::render_toast_overlay`]).
     overlay_toasts: Vec<(Rect, NotifyAction)>,
+    /// A press on a card's body: the card and what a click does, run on
+    /// the release when no drag (a text selection) happened in between.
+    body_press: Option<(ElementId, ChatAction)>,
 }
 
 impl ChatView {
@@ -244,7 +254,9 @@ impl ChatView {
             palette_focus: None,
             body: Rect::default(),
             screen_open: false,
+            covered: false,
             overlay_toasts: Vec::new(),
+            body_press: None,
             cfg,
         }
     }
@@ -318,6 +330,13 @@ impl ChatView {
     /// ([`ChatOutput::Run`]).
     pub fn set_screen_open(&mut self, open: bool) {
         self.screen_open = open;
+    }
+
+    /// Tells the chat whether it is hidden behind the map or a screen;
+    /// then the "Select text" palette entry is left to the app
+    /// ([`ChatOutput::Run`]), which selects in the view that is shown.
+    pub fn set_covered(&mut self, covered: bool) {
+        self.covered = covered;
     }
 
     /// Draws the toasts alone over `area` (when the map or a screen is
@@ -406,10 +425,7 @@ impl ChatView {
                 other => other.summary(),
             })
             .unwrap_or_default();
-        self.activity.set_phase(
-            crate::indicators::Phase::WaitingApproval { action },
-            Instant::now(),
-        );
+        self.activity.enter_approval(action, Instant::now());
         self.approvals.push_envelope(env);
     }
 
@@ -442,14 +458,10 @@ impl ChatView {
             for id in ids.into_iter().filter(|i| !still.contains(i)) {
                 self.transcript.set_card_approval(&id, None);
             }
-            if self.approvals.is_empty()
-                && matches!(
-                    self.activity.phase(),
-                    crate::indicators::Phase::WaitingApproval { .. }
-                )
-            {
-                self.activity
-                    .set_phase(crate::indicators::Phase::Sending, now);
+            if self.approvals.is_empty() {
+                // Resumes the phase the prompt interrupted, e.g. the tool
+                // that was waiting for this approval.
+                self.activity.approval_answered(now);
             }
         }
     }
@@ -670,6 +682,44 @@ impl ChatView {
             self.transcript.select_row((m.row - b.y) as usize, &f);
             return;
         }
+        // A click on the body of a card (below its header row, including
+        // its expand hint) toggles or opens it on the release: the press
+        // only focuses it, so a drag over its output selects text instead
+        // (the app's selection layer keeps the release of a drag).
+        if m.kind == MouseEventKind::Down(MouseButton::Left) {
+            self.body_press = None;
+        }
+        if m.kind == MouseEventKind::Up(MouseButton::Left) {
+            if let Some((id, action)) = self.body_press.take()
+                && !self.palette.is_open()
+                && self
+                    .interaction
+                    .hits()
+                    .hit(m.column, m.row)
+                    .is_some_and(|r| r.id == id)
+            {
+                self.activate(action, now, out);
+            }
+            return;
+        }
+        if m.kind == MouseEventKind::Down(MouseButton::Left)
+            && !self.palette.is_open()
+            && !self.notify.is_history_open()
+            && let Some(r) = self.interaction.hits().hit(m.column, m.row)
+            && r.rect.height > 1
+            && m.row > r.rect.y
+            && matches!(
+                r.action,
+                ChatAction::Transcript(
+                    TranscriptAction::ToggleCard(_) | TranscriptAction::OpenNode(_)
+                )
+            )
+        {
+            let (id, action) = (r.id.clone(), r.action.clone());
+            self.interaction.set_focus(id.clone());
+            self.body_press = Some((id, action));
+            return;
+        }
         if let Some(d) = self.interaction.handle_mouse(m) {
             self.dispatch(d, now, out);
         }
@@ -735,6 +785,10 @@ impl ChatView {
                 out.push(ChatOutput::Submit("/mcp".into()));
                 self.interaction.set_focus(INPUT_ID);
             }
+            ChatAction::Jobs => {
+                out.push(ChatOutput::Submit("/jobs".into()));
+                self.interaction.set_focus(INPUT_ID);
+            }
             ChatAction::Select(a) => match a {
                 SelectAction::Copy => self.copy_selection(now, out),
                 SelectAction::Mark => self.transcript.select_mark(),
@@ -779,6 +833,9 @@ impl ChatView {
         out: &mut Vec<ChatOutput>,
     ) -> bool {
         if self.screen_open && matches!(id, copy_ids::FOCUSED | copy_ids::DIFF) {
+            return false;
+        }
+        if self.covered && id == copy_ids::SELECT {
             return false;
         }
         let call = Self::focused_call(focus.as_ref());
@@ -884,6 +941,13 @@ impl ChatView {
                 if let Some(d) = self.interaction.handle_key(k) {
                     self.dispatch(d, now, out);
                 }
+            }
+            KeyCode::Up | KeyCode::Down if k.modifiers.contains(KeyModifiers::SHIFT) => {
+                // Shift extends: the mark stays where the cursor was.
+                if t.selection().is_some_and(|s| s.mark.is_none()) {
+                    t.select_mark();
+                }
+                t.select_move(if k.code == KeyCode::Up { -1 } else { 1 }, &f);
             }
             KeyCode::Up | KeyCode::Char('k') => t.select_move(-1, &f),
             KeyCode::Down | KeyCode::Char('j') => t.select_move(1, &f),
@@ -997,10 +1061,36 @@ impl ChatView {
         } else {
             let pad = self.transcript.pad().min(body.height);
             let r = Rect::new(body.x, body.y + pad, body.width, body.height - pad);
+            // Text selection: content positions, soft wraps and chrome.
+            let rows: Vec<selection::Row> = lines
+                .iter()
+                .zip(self.transcript.visible_ords())
+                .map(|(l, &ord)| selection::Row {
+                    ord,
+                    join: soft_join(l),
+                })
+                .collect();
+            selection::update(CHAT_PANE, |region| {
+                region.rect = Rect {
+                    height: rows.len() as u16,
+                    ..r
+                };
+                region.rows = rows;
+                region.scrolls = true;
+                region.chrome = selection::Chrome::Smart;
+            });
             frame.render_widget(Paragraph::new(lines), r);
         }
         for h in thits {
-            hits.register(h.id, h.rect, ChatAction::Transcript(h.action));
+            let button = matches!(
+                h.action,
+                TranscriptAction::Copy(_) | TranscriptAction::UndoMemory(_)
+            );
+            if button {
+                hits.register_button(h.id, h.rect, ChatAction::Transcript(h.action));
+            } else {
+                hits.register(h.id, h.rect, ChatAction::Transcript(h.action));
+            }
         }
         // New output below a scrolled-up view.
         if self.transcript.has_unseen() && !self.transcript.is_following() && body.height > 0 {
@@ -1019,7 +1109,7 @@ impl ChatView {
                 theme.fg_on(crate::theme::Token::Accent, crate::theme::Token::Surface)
             };
             frame.render_widget(Paragraph::new(label).style(style), r);
-            hits.register(NEW_MESSAGES_ID, r, ChatAction::Follow);
+            hits.register_button(NEW_MESSAGES_ID, r, ChatAction::Follow);
         }
         // Activity line.
         if activity_h > 0 {
@@ -1068,20 +1158,33 @@ impl ChatView {
                 &ChatAction::Input,
             );
         }
-        // Status, with the MCP indicator as a button when it shows.
+        // Status, with the MCP and background-jobs indicators as buttons
+        // when they show.
         let mut status_line = self.status.line(&theme, &self.spinner, width as usize);
-        if let Some(label) = self.status.mcp_label() {
+        let buttons = [
+            (
+                self.status.mcp_label(),
+                crate::status::MCP_INDICATOR_ID,
+                ChatAction::Mcp,
+            ),
+            (
+                self.status.jobs_label(),
+                crate::status::JOBS_INDICATOR_ID,
+                ChatAction::Jobs,
+            ),
+        ];
+        for (label, id, action) in buttons {
+            let Some(label) = label else { continue };
             let mut x = 0usize;
             for span in &mut status_line.spans {
                 let w = unicode_width::UnicodeWidthStr::width(span.content.as_ref());
                 if span.content == label {
-                    let id = crate::status::MCP_INDICATOR_ID;
                     if focus.as_deref() == Some(id) {
                         span.style = span.style.patch(theme.focused());
                     }
                     let r =
                         Rect::new(status.x + x as u16, status.y, w as u16, 1).intersection(status);
-                    hits.register(id, r, ChatAction::Mcp);
+                    hits.register(id, r, action);
                     break;
                 }
                 x += w;
@@ -1381,6 +1484,91 @@ mod tests {
             task.await.unwrap()[0].1,
             harness_policy::approvals::ApprovalAnswer::Deny { .. }
         ));
+    }
+
+    /// Regression: a bash call approved from the prompt resumes as the
+    /// running tool, so its progress shows elapsed/timeout and CPU instead
+    /// of the model-silence warning.
+    #[tokio::test]
+    async fn approved_tool_resumes_running_with_progress_not_model_silence() {
+        let mut ui = Ui::new();
+        start_main(&mut ui);
+        ui.event(
+            2,
+            Some("main"),
+            EventKind::ToolCall {
+                call_id: "call-0".into(),
+                tool: "bash".into(),
+                args: Payload::Json(json!({"command": "git push origin main"})),
+            },
+        );
+        let (chan, mut rx) = ChannelUi::new(2);
+        let c = chan.clone();
+        let task = tokio::spawn(async move {
+            c.ask(ApprovalPrompt {
+                batch: 1,
+                requests: vec![request(0)],
+            })
+            .await
+        });
+        // The UI's prompt arrives before the approval_requested event.
+        ui.view.push_approval(rx.recv().await.unwrap());
+        ui.event(
+            3,
+            Some("main"),
+            EventKind::ApprovalRequested {
+                approval_id: "approval-1-0".into(),
+                action: "git push origin main".into(),
+                preview: None,
+            },
+        );
+        ui.now += Duration::from_secs(1);
+        ui.send(vec![key("y")]);
+        assert!(matches!(
+            task.await.unwrap()[0].1,
+            harness_policy::approvals::ApprovalAnswer::Approve(_)
+        ));
+        ui.event(
+            4,
+            Some("main"),
+            EventKind::ApprovalResolved {
+                approval_id: "approval-1-0".into(),
+                decision: harness_events::schema::ApprovalDecision::Approved,
+                by: "user".into(),
+            },
+        );
+        assert!(matches!(
+            ui.view.activity.phase(),
+            crate::indicators::Phase::RunningTool { .. }
+        ));
+        let start = ui.now;
+        for i in 0..=8u64 {
+            ui.now = start + Duration::from_secs(i * 3);
+            ui.event(
+                5 + i,
+                Some("main"),
+                EventKind::ToolProgress {
+                    call_id: "call-0".into(),
+                    timeout_ms: (i == 0).then_some(600_000),
+                    liveness: (i > 0).then_some(harness_events::schema::ProcessLiveness {
+                        cpu_ms: i * 2990,
+                        procs: 1,
+                        active: 1,
+                    }),
+                },
+            );
+        }
+        ui.now = start + Duration::from_secs(25);
+        ui.draw();
+        let t = ui.text();
+        assert!(
+            t.contains("running bash: git push origin main 25.0s of 10m · cpu 23.9s (1 process)"),
+            "{t}"
+        );
+        assert!(
+            !t.contains("waiting on the model") && !t.contains('⚠'),
+            "{t}"
+        );
     }
 
     fn start_main(ui: &mut Ui) {
@@ -1826,6 +2014,63 @@ mod tests {
         ui.view.status_mut().set_mcp_failed(Vec::new());
         ui.draw();
         assert!(!ui.text().contains("⚠ mcp"));
+    }
+
+    #[test]
+    fn jobs_indicator_opens_jobs_by_click_and_keyboard() {
+        let mut ui = Ui::new();
+        assert!(!ui.text().contains("⚙"), "hidden while no job runs");
+        let job = |state: &str| RunEvent {
+            seq: 0,
+            ts: time::OffsetDateTime::UNIX_EPOCH,
+            run_id: harness_events::schema::RunId(uuid::Uuid::nil()),
+            node_id: Some(NodeId::from("n1")),
+            parent_node_id: None,
+            kind: EventKind::BashJob {
+                call_id: "c1".into(),
+                job_id: "j1".into(),
+                command: "cargo test".into(),
+                state: state.into(),
+                exit_code: None,
+                duration_ms: None,
+                output: None,
+            },
+        };
+        ui.view.status_mut().apply(&job("running"));
+        ui.draw();
+        let (x, y) = ui.find("⚙ 1 job");
+        assert_eq!(y, 29, "on the status line");
+        assert_eq!(
+            ui.term.backend().buffer()[(x, y)].style().fg,
+            ui.view.cfg.theme.fg(crate::theme::Token::Running).fg
+        );
+        // Mouse.
+        ui.click_text("⚙ 1 job");
+        assert_eq!(ui.take(), vec![ChatOutput::Submit("/jobs".into())]);
+        // Keyboard: Shift+Tab from the input reaches it; Enter activates it.
+        ui.send(vec![key("shift+tab")]);
+        assert_eq!(
+            ui.view.focused().map(|f| f.0.as_str()),
+            Some(crate::status::JOBS_INDICATOR_ID)
+        );
+        let (x, y) = ui.find("⚙ 1 job");
+        assert_eq!(
+            ui.term.backend().buffer()[(x, y)].style().bg,
+            ui.view.cfg.theme.focused().bg
+        );
+        ui.send(vec![key("enter")]);
+        assert_eq!(ui.take(), vec![ChatOutput::Submit("/jobs".into())]);
+        // Esc backs out to the input.
+        ui.send(vec![key("shift+tab")]);
+        ui.send(vec![key("esc")]);
+        assert_ne!(
+            ui.view.focused().map(|f| f.0.as_str()),
+            Some(crate::status::JOBS_INDICATOR_ID)
+        );
+        // The job ends: the indicator goes away.
+        ui.view.status_mut().apply(&job("exited"));
+        ui.draw();
+        assert!(!ui.text().contains("⚙"));
     }
 
     #[test]

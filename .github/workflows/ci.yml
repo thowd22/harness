@@ -108,6 +108,10 @@ jobs:
         run: cargo test --workspace --locked --doc
       - name: Sandbox tests with skip reasons
         run: cargo test --locked -p harness-policy --test sandbox -- --nocapture
+      # Real ptys under the sandbox; the notes name the kernel's Landlock ABI
+      # case (device ioctls restricted on ABI 5+ or not).
+      - name: Terminal sandbox tests with skip reasons
+        run: cargo test --locked -p harness-policy --test sandbox_tty -- --nocapture
 
   deny:
     name: cargo-deny

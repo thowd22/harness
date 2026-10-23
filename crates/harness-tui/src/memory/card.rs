@@ -273,7 +273,7 @@ impl MemoryCard {
             let w = (width(UNDO_LABEL) as u16).min(inner.width);
             let rect = Rect::new(inner.x, status_row, w, 1);
             frame.render_widget(Paragraph::new(Span::styled(UNDO_LABEL, style)), rect);
-            hits.register(id, rect, wrap(MemoryCardAction::Undo(commit.to_owned())));
+            hits.register_button(id, rect, wrap(MemoryCardAction::Undo(commit.to_owned())));
         }
     }
 }

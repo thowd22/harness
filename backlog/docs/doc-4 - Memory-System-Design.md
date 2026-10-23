@@ -3,7 +3,7 @@ id: doc-4
 title: Memory System Design
 type: specification
 created_date: '2026-10-22 14:26'
-updated_date: '2026-10-22 16:01'
+updated_date: '2026-10-23 16:23'
 ---
 # Memory System (Devin-style, local)
 
@@ -40,7 +40,8 @@ Not saved: session summaries, task state (PR numbers, statuses), facts trivially
 
 ## Write path
 
-- Agents with `memory: read-write` get a `memory` tool: `search`, `read`, `write` (note + bullet), `forget`.
+- Agents with `memory: read-write` get a `memory` tool: `search`, `read`, `write` (note + bullet), `forget`. A `write` carries one bullet (`text`) or up to 10 for the same note (`bullets`), each validated on its own and saved in one commit; the description and schema state the limits (400 characters per bullet, 1000 in `project/overview`), and rejections name the limit and how to split.
+- "Index this codebase into memory" is answered with one compact `project/overview` note (at most 10 bullets) plus non-obvious gotchas, not a file map; the agent tells the user the rest is re-read from the repo (TASK-155, see docs/memory.md).
 - Triggers taught in the prompt: user correction, explicit preference, reusable discovery.
 - Optional end-of-session extraction pass (cheap model) proposes missed lessons from the run log.
 - Each write: validate format → secret scan → edit note → commit (message references run id) → merge with concurrent sessions → "Updated memory" card in the TUI (with undo).

@@ -65,12 +65,24 @@ to the model at all.
 |---|---|---|---|
 | `search` | read | `query`, `limit?` (default 5, max 20) | BM25 search; returns notes and their best-matching bullets |
 | `read` | read | `path` | returns a whole note |
-| `write` | read-write | `path`, `text`, `title?` | appends one bullet (a new note gets `title`, or one built from its file name) |
+| `write` | read-write | `path`, `text` or `bullets`, `title?` | appends one bullet (`text`) or up to 10 (`bullets`) to the note in one commit (a new note gets `title`, or one built from its file name) |
 | `forget` | read-write | `path`, `text` | removes every bullet that contains `text` (case-insensitive); a note left with no bullets is deleted (`MEMORY.md` is kept) |
 
 Paths can be `MEMORY.md`, `tools/<tool>`, `projects/<key>/<topic>`, or the
 shorthand `project/<topic>` for the current project. Writing the same
 bullet twice does nothing.
+
+The tool description and schema state the limits up front: each bullet is
+one line of at most 400 characters (1000 in `project/overview`, see below),
+and the schema sets `maxLength` on `text` and on each `bullets` item and
+`maxItems: 10` on `bullets`. Several lessons for the same note go in one
+`write` as `bullets`. Each bullet is checked on its own: the valid ones are
+saved together in one commit, and the reply lists every rejected one by
+number with its reason (`Not saved: bullet 3: the memory is 450
+characters; the limit is 400 per bullet. Split it into several
+self-contained bullets ...`), so the model resends only those. A write
+whose bullets all fail is refused with the same per-bullet list and makes
+no commit.
 
 Memory is also turned off when `[memory] enabled = false`, and for headless
 runs (automation, evals) unless `[memory] headless_access = true`. See
@@ -89,9 +101,11 @@ memory in these cases:
 Every write goes through the same checks, and is refused with a message the
 model can act on if it fails one:
 
-1. **Format.** The bullet is a single line of at most 400 characters. It is
-   not a heading, has no hand-written `(src: …)` suffix, and every
-   `[[link]]` is a valid note path.
+1. **Format.** The bullet is a single line of at most 400 characters
+   (1000 in a project's overview note). It is not a heading, has no
+   hand-written `(src: …)` suffix, and every `[[link]]` is a valid note
+   path. A bullet that is too long is refused with its length, the limit
+   and how to split it into several bullets sent in one write.
 2. **Secrets.** The text is scanned with the run's redactor: your configured
    credentials plus the built-in key patterns. Anything the redactor would
    mask is refused, and the secret is never echoed back.
@@ -101,6 +115,32 @@ model can act on if it fails one:
    - session summaries: "in this session…", "today we…", "we implemented…";
    - facts anyone can rediscover from the repo: "function X is defined in
      Y", "main.rs contains…", "the repo has 13 crates".
+
+### "Index this codebase into memory"
+
+Users sometimes ask the agent to index or learn a whole codebase into
+memory. A file-by-file or module map is exactly the kind of fact the rules
+above refuse: it is easy to rediscover and goes stale with every change.
+Harness answers such a request this way, taught by the tool description and
+`extract::PROMPT_SECTION`, and enforced by the write checks:
+
+- The agent writes one **overview note**, `project/overview` (stored as
+  `projects/<key>/overview.md`): the project's purpose, its architecture in
+  a few sentences, how to build and test it, and the conventions that
+  matter. Overview bullets may be up to 1000 characters
+  (`guard::MAX_OVERVIEW_BULLET_CHARS`), and the note holds at most 10
+  bullets (`guard::MAX_OVERVIEW_BULLETS`). A write that would grow it past
+  that is refused with a hint to read the note and forget or merge bullets
+  first; re-sending bullets it already has is not refused.
+- Everything else it found worth keeping goes in as **non-obvious
+  gotchas** in ordinary project notes (`project/testing`,
+  `project/gotchas`, ...), several per write.
+- It **tells the user** that the rest of the code is not stored: it is read
+  from the repository again in each session, which stays accurate as the
+  code changes.
+
+The overview note is listed in the session index like every other project
+note, so later sessions find it with `read project/overview`.
 
 ### Commits
 

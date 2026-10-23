@@ -4,6 +4,7 @@ layers:
   - builtin: identity
   - file: base.md
   - file: coder.md
+  - file: tools.md
   - file: memory.md
   - file: context.md
   - text: |

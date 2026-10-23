@@ -27,6 +27,7 @@ command palette both read from it.
 | `/context` | | Show what the next request carries, by layer |
 | `/config` | `[show\|check]` | Show the effective config or check harness.ini |
 | `/doctor` | | Check config, providers, sandbox and remotes |
+| `/jobs` | | Background bash jobs with state, elapsed time and command; open a job's output or stop it ([tools](tools.md#background-jobs-run_in_background)) |
 | `/mcp` | | MCP servers with status, transport, tools and auth; restart, disable for the session or view logs ([MCP](mcp.md#in-the-tui)) |
 | `/login` | `[anthropic\|openai\|openrouter\|mcp] [server]` | Add, check and save an API key in a modal, or Sign in with ChatGPT for openai ([Logging in](providers.md#in-the-tui-login)); `mcp [server]` authorizes remote MCP servers with OAuth ([MCP](mcp.md#authorization-oauth)) |
 | `/quit` | | Quit harness |

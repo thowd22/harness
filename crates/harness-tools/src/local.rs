@@ -16,6 +16,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::exec::{Exec, ExecError, ExecHandle, ExecRequest, ExitOutcome, OutputChunk, StreamKind};
+use crate::liveness::{LIVENESS_INTERVAL, Liveness, sample_group};
 use crate::workspace::{DirEntry, FileKind, FileStat, Workspace, WsError, WsResult};
 
 /// Permission bits for files created by [`Workspace::replace_atomic`] when no
@@ -209,6 +210,23 @@ impl Workspace for LocalWorkspace {
                 source: std::io::Error::other(e),
             })?
     }
+
+    async fn find(&self, query: &crate::search::FindQuery) -> WsResult<crate::search::FindResult> {
+        let mut query = query.clone();
+        query.base = self.resolve(&query.base);
+        let base = query.base.clone();
+        // Dropping this future (cancellation) stops the walk.
+        let guard = crate::search::CancelOnDrop(Default::default());
+        let cancel = guard.0.clone();
+        let res = tokio::task::spawn_blocking(move || crate::search::find_blocking(&query, cancel))
+            .await
+            .map_err(|e| WsError::Io {
+                path: base,
+                source: std::io::Error::other(e),
+            })?;
+        drop(guard);
+        res
+    }
 }
 
 /// [`Exec`] that runs processes on this machine.
@@ -218,13 +236,34 @@ impl Workspace for LocalWorkspace {
 /// group receives SIGTERM, then SIGKILL after [`KILL_GRACE`]. When the leader
 /// exits on its own, any processes left in its group are killed too, so
 /// stray background jobs cannot outlive a tool call.
-#[derive(Debug, Clone, Default)]
-pub struct LocalExec;
+///
+/// While a process runs, its group's [`Liveness`] is sampled every
+/// [`LIVENESS_INTERVAL`] (off the async threads) and attached to the
+/// handle, so callers can tell a busy quiet command from an idle one.
+#[derive(Debug, Clone)]
+pub struct LocalExec {
+    liveness_every: Option<Duration>,
+}
+
+impl Default for LocalExec {
+    fn default() -> Self {
+        Self {
+            liveness_every: Some(LIVENESS_INTERVAL),
+        }
+    }
+}
 
 impl LocalExec {
-    /// A local executor.
+    /// A local executor sampling liveness every [`LIVENESS_INTERVAL`].
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// Sample liveness every `every` instead (`None` disables sampling).
+    /// Intervals below 100 ms are raised to 100 ms.
+    pub fn with_liveness_interval(mut self, every: Option<Duration>) -> Self {
+        self.liveness_every = every.map(|d| d.max(Duration::from_millis(100)));
+        self
     }
 }
 
@@ -294,6 +333,31 @@ fn pump(
     })
 }
 
+/// Periodic liveness sampling of one process group.
+struct Sampler {
+    every: tokio::time::Interval,
+    pgid: i32,
+    tx: mpsc::UnboundedSender<Liveness>,
+}
+
+impl Sampler {
+    fn new(pgid: i32, every: Duration, tx: mpsc::UnboundedSender<Liveness>) -> Self {
+        let mut every = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+        every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        Self { every, pgid, tx }
+    }
+
+    /// Takes one sample and sends it. False when sampling should stop
+    /// (unavailable here, or nobody listens any more).
+    async fn sample(&self) -> bool {
+        let pgid = self.pgid;
+        match tokio::task::spawn_blocking(move || sample_group(pgid)).await {
+            Ok(Some(s)) => self.tx.send(s).is_ok(),
+            _ => false,
+        }
+    }
+}
+
 async fn supervise(
     mut child: Child,
     pgid: i32,
@@ -301,6 +365,7 @@ async fn supervise(
     mut kill_rx: oneshot::Receiver<()>,
     readers: Vec<JoinHandle<()>>,
     status_tx: oneshot::Sender<ExitOutcome>,
+    mut sampler: Option<Sampler>,
 ) {
     let deadline = async {
         match timeout {
@@ -310,18 +375,36 @@ async fn supervise(
     };
     tokio::pin!(deadline);
     let mut outcome = ExitOutcome::default();
-    let status = tokio::select! {
-        status = child.wait() => status,
-        () = &mut deadline => {
-            outcome.timed_out = true;
-            terminate_group(pgid, &mut child).await
-        }
-        // Fires on an explicit kill and when the handle is dropped.
-        _ = &mut kill_rx => {
-            outcome.killed = true;
-            terminate_group(pgid, &mut child).await
+    let status = loop {
+        let tick = async {
+            match sampler.as_mut() {
+                Some(s) => {
+                    s.every.tick().await;
+                }
+                None => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            status = child.wait() => break status,
+            () = &mut deadline => {
+                outcome.timed_out = true;
+                break terminate_group(pgid, &mut child).await;
+            }
+            // Fires on an explicit kill and when the handle is dropped.
+            _ = &mut kill_rx => {
+                outcome.killed = true;
+                break terminate_group(pgid, &mut child).await;
+            }
+            () = tick => {
+                if let Some(s) = &sampler
+                    && !s.sample().await
+                {
+                    sampler = None;
+                }
+            }
         }
     };
+    drop(sampler);
     // Leader is gone: make sure nothing else in its group survives.
     signal_group(pgid, Signal::SIGKILL);
     for mut reader in readers {
@@ -372,6 +455,13 @@ impl Exec for LocalExec {
         }
         let (kill_tx, kill_rx) = oneshot::channel();
         let (status_tx, status_rx) = oneshot::channel();
+        let mut handle = ExecHandle::new(out_rx, kill_tx, status_rx);
+        let mut sampler = None;
+        if let Some(every) = self.liveness_every {
+            let (tx, rx) = mpsc::unbounded_channel();
+            handle = handle.with_liveness(rx);
+            sampler = Some(Sampler::new(pgid, every, tx));
+        }
         tokio::spawn(supervise(
             child,
             pgid,
@@ -379,8 +469,9 @@ impl Exec for LocalExec {
             kill_rx,
             readers,
             status_tx,
+            sampler,
         ));
-        Ok(ExecHandle::new(out_rx, kill_tx, status_rx))
+        Ok(handle)
     }
 }
 

@@ -25,7 +25,7 @@ use async_trait::async_trait;
 use futures::future::join_all;
 use harness_events::blobs::BlobStore;
 use harness_events::schema::{
-    BlobEncoding, EventKind, FileChangeKind, NodeId, OutputStream, Payload,
+    BlobEncoding, EventKind, FileChangeKind, NodeId, OutputStream, Payload, ProcessLiveness,
 };
 use harness_events::store::{EventDraft, RunRecorder};
 use harness_policy::approvals::{ApprovalBroker, PendingApproval};
@@ -38,10 +38,13 @@ use harness_tools::bash::{self, BashTool, EnvScrubber};
 use harness_tools::config::ToolsConfig;
 use harness_tools::edit::{self, EditTool};
 use harness_tools::exec::{Exec, StreamKind};
+use harness_tools::glob::{self, GlobTool};
+use harness_tools::grep::{self, GrepTool};
+use harness_tools::jobs::{self, JobManager, JobsTool};
 use harness_tools::read::{self, ReadTool};
 use harness_tools::spill::{BlobSink, Spiller};
 use harness_tools::tool::{
-    ChangeKind, ToolContext, ToolError, ToolEvent, ToolEventSink, ToolOutput,
+    ChangeKind, ReadFilter, ToolContext, ToolError, ToolEvent, ToolEventSink, ToolOutput,
 };
 use harness_tools::tracker::ReadTracker;
 use harness_tools::workspace::Workspace;
@@ -132,6 +135,14 @@ adapter!(
     ReadAdapter, ReadTool, read, true
 );
 adapter!(
+    /// [`AgentTool`] adapter for the `grep` tool (read-only).
+    GrepAdapter, GrepTool, grep, true
+);
+adapter!(
+    /// [`AgentTool`] adapter for the `glob` tool (read-only).
+    GlobAdapter, GlobTool, glob, true
+);
+adapter!(
     /// [`AgentTool`] adapter for the `write` tool.
     WriteAdapter, WriteTool, write, false
 );
@@ -162,6 +173,29 @@ impl AgentTool for BashAdapter {
     }
 }
 
+/// [`AgentTool`] adapter for the `bash_jobs` tool. Treated as mutating
+/// (`stop` kills a job), so its calls run in order.
+pub struct BashJobsAdapter(pub JobsTool);
+
+#[async_trait]
+impl AgentTool for BashJobsAdapter {
+    fn name(&self) -> &str {
+        jobs::NAME
+    }
+    fn description(&self) -> &str {
+        jobs::DESCRIPTION
+    }
+    fn schema(&self) -> Value {
+        jobs::schema()
+    }
+    fn read_only(&self) -> bool {
+        false
+    }
+    async fn call(&self, ctx: &ToolContext, args: Value) -> Result<ToolOutput, ToolError> {
+        self.0.call(ctx, args).await
+    }
+}
+
 /// Everything needed to build the standard tool set of one session.
 pub struct StandardTools {
     /// Workspace the file tools operate on.
@@ -176,6 +210,17 @@ pub struct StandardTools {
     pub scrubber: EnvScrubber,
     /// Where spilled output goes.
     pub spill: Arc<dyn BlobSink>,
+}
+
+/// Options of [`ToolSet::standard_with`].
+#[derive(Debug, Clone, Default)]
+pub struct StandardOptions {
+    /// bash starts from this environment instead of this process's (still
+    /// scrubbed); tools on a remote host pass an empty one.
+    pub base_env: Option<Vec<(String, String)>>,
+    /// The session's background jobs, shared with the other agents' bash
+    /// tools; `None` gives bash a manager of its own.
+    pub jobs: Option<JobManager>,
 }
 
 /// The tools offered in a session, in offer order.
@@ -212,9 +257,10 @@ impl ToolSet {
     }
 
     /// read, write, edit and bash sharing one [`ReadTracker`] (one per
-    /// session, so stale-read checks span the tools).
+    /// session, so stale-read checks span the tools), plus the read-only
+    /// grep and glob search tools. Agents pick theirs with [`ToolSet::select`].
     pub fn standard(parts: StandardTools) -> Self {
-        Self::standard_inner(parts, None)
+        Self::standard_inner(parts, None, None)
     }
 
     /// Like [`ToolSet::standard`], but bash starts from `base_env` instead
@@ -222,10 +268,26 @@ impl ToolSet {
     /// non-interactive variables). Tools on a remote host pass an empty
     /// one so the local environment is never sent there.
     pub fn standard_with_bash_env(parts: StandardTools, base_env: Vec<(String, String)>) -> Self {
-        Self::standard_inner(parts, Some(base_env))
+        Self::standard_with(
+            parts,
+            StandardOptions {
+                base_env: Some(base_env),
+                jobs: None,
+            },
+        )
     }
 
-    fn standard_inner(parts: StandardTools, base_env: Option<Vec<(String, String)>>) -> Self {
+    /// [`ToolSet::standard`] with [`StandardOptions`]: a bash base
+    /// environment and/or the session's [`JobManager`] to share.
+    pub fn standard_with(parts: StandardTools, options: StandardOptions) -> Self {
+        Self::standard_inner(parts, options.base_env, options.jobs)
+    }
+
+    fn standard_inner(
+        parts: StandardTools,
+        base_env: Option<Vec<(String, String)>>,
+        jobs: Option<JobManager>,
+    ) -> Self {
         let tracker = Arc::new(ReadTracker::default());
         let ws = parts.workspace;
         let mut bash = BashTool::new(
@@ -238,7 +300,14 @@ impl ToolSet {
         if let Some(env) = base_env {
             bash = bash.with_base_env(env);
         }
+        if let Some(jobs) = jobs {
+            bash = bash.with_jobs(jobs);
+        }
         let bash = Arc::new(bash);
+        let spiller = Spiller::new(parts.spill.clone(), &parts.config);
+        let jobs_tool = JobsTool::new(bash.jobs().clone(), spiller.clone());
+        let grep = GrepTool::new(ws.clone(), spiller.clone());
+        let glob = GlobTool::new(ws.clone(), spiller);
         let mut set = Self::new()
             .with(Arc::new(ReadAdapter(
                 ReadTool::new(ws.clone(), tracker.clone(), parts.config).with_spill(parts.spill),
@@ -248,7 +317,10 @@ impl ToolSet {
                 tracker.clone(),
             ))))
             .with(Arc::new(EditAdapter(EditTool::new(ws, tracker))))
-            .with(Arc::new(BashAdapter(bash.clone())));
+            .with(Arc::new(BashAdapter(bash.clone())))
+            .with(Arc::new(BashJobsAdapter(jobs_tool)))
+            .with(Arc::new(GrepAdapter(grep)))
+            .with(Arc::new(GlobAdapter(glob)));
         set.bash = Some(bash);
         set
     }
@@ -270,6 +342,11 @@ impl ToolSet {
 
     /// Keeps only the tools named in `names`, in that order. Returns the
     /// names that are not available.
+    ///
+    /// `bash_jobs` comes with `bash`: when `bash` is selected and the set
+    /// has `bash_jobs`, it follows `bash` even if `names` does not list it,
+    /// so an agent that can start background jobs can also read and stop
+    /// them.
     pub fn select(&self, names: &[&str]) -> (ToolSet, Vec<String>) {
         let mut out = ToolSet {
             tools: Vec::new(),
@@ -278,7 +355,15 @@ impl ToolSet {
         let mut missing = Vec::new();
         for name in names {
             match self.get(name) {
-                Some(t) => out.tools.push(t.clone()),
+                Some(t) => {
+                    out.tools.push(t.clone());
+                    if *name == bash::NAME
+                        && !names.contains(&jobs::NAME)
+                        && let Some(j) = self.get(jobs::NAME)
+                    {
+                        out.tools.push(j.clone());
+                    }
+                }
                 None => missing.push((*name).to_owned()),
             }
         }
@@ -308,6 +393,18 @@ impl ToolSet {
     /// The bash tool's persisted working directory, if bash is in the set.
     pub fn bash_cwd(&self) -> Option<PathBuf> {
         self.bash.as_ref().map(|b| b.cwd())
+    }
+
+    /// The background jobs of the set's bash tool (one manager per
+    /// session), if bash is in the set.
+    pub fn jobs(&self) -> Option<JobManager> {
+        self.bash.as_ref().map(|b| b.jobs().clone())
+    }
+
+    /// The owner id of the set's bash tool in [`ToolSet::jobs`] (see
+    /// [`JobManager::take_finished_for`]), if bash is in the set.
+    pub fn job_owner(&self) -> Option<u64> {
+        self.bash.as_ref().map(|b| b.job_owner())
     }
 }
 
@@ -460,6 +557,12 @@ pub trait ToolGate: Send + Sync {
     /// One decision per call, in order. All runnable calls of a turn are
     /// passed together so approvals can be batched into one prompt.
     async fn review(&self, node: Option<&NodeId>, calls: &[GateCall]) -> Vec<GateDecision>;
+
+    /// Which paths search tools (grep, glob) may show: protected paths are
+    /// dropped from their results. `None` (the default) shows everything.
+    fn read_filter(&self) -> Option<ReadFilter> {
+        None
+    }
 }
 
 /// A gate that allows everything (tests, trusted automation).
@@ -582,6 +685,12 @@ impl ToolGate for PolicyGate {
         let mode = *self.mode.lock().unwrap_or_else(|e| e.into_inner());
         self.review_in(node, calls, mode).await
     }
+
+    fn read_filter(&self) -> Option<ReadFilter> {
+        let engine = self.engine.clone();
+        let cwd = (self.cwd)();
+        Some(Arc::new(move |p: &Path| !engine.read_protected(p, &cwd)))
+    }
 }
 
 /// A [`PolicyGate`] whose mode never gets looser than `cap` (an agent's
@@ -606,6 +715,10 @@ impl ToolGate for CappedGate {
         self.gate
             .review_in(node, calls, session.min(self.cap))
             .await
+    }
+
+    fn read_filter(&self) -> Option<ReadFilter> {
+        self.gate.read_filter()
     }
 }
 
@@ -884,9 +997,12 @@ impl Dispatcher {
                 ToolErrorMessage::unknown_tool(&call.tool, &self.tools.names()).to_string(),
             );
         };
-        let ctx = ToolContext::new(call.id.clone())
+        let mut ctx = ToolContext::new(call.id.clone())
             .with_images(self.supports_images)
             .with_events(self.events.clone());
+        if matches!(call.tool.as_str(), grep::NAME | glob::NAME) {
+            ctx = ctx.with_read_filter(self.gate.read_filter());
+        }
         let result = tokio::select! {
             r = tool.call(&ctx, call.args.clone()) => Some(r),
             _ = cancel.cancelled() => None,
@@ -956,8 +1072,8 @@ pub fn base64_encode(data: &[u8]) -> String {
 }
 
 /// Maps [`ToolEvent`]s onto the run's event log: file changes become
-/// `file_changed` events and live process output becomes `tool_output`
-/// events on the agent's node (split UTF-8 sequences are held until they
+/// `file_changed` events, live process output becomes `tool_output`
+/// events and process liveness becomes `tool_progress` events on the agent's node (split UTF-8 sequences are held until they
 /// complete). Spill records are only traced.
 pub struct RecorderToolEvents {
     recorder: RunRecorder,
@@ -1020,6 +1136,41 @@ impl ToolEventSink for RecorderToolEvents {
                     .emit(EventDraft::node(self.node.clone(), kind))
                 {
                     tracing::warn!(target: "harness::tools", error = %e, "could not record file change");
+                }
+            }
+            ToolEvent::Progress(p) => {
+                let kind = EventKind::ToolProgress {
+                    call_id: call_id.to_owned(),
+                    timeout_ms: p.timeout.map(|t| t.as_millis() as u64),
+                    liveness: p.liveness.map(|l| ProcessLiveness {
+                        cpu_ms: l.cpu.as_millis() as u64,
+                        procs: l.procs,
+                        active: l.active,
+                    }),
+                };
+                if let Err(e) = self
+                    .recorder
+                    .emit(EventDraft::node(self.node.clone(), kind))
+                {
+                    tracing::warn!(target: "harness::tools", error = %e, "could not record tool progress");
+                }
+            }
+            ToolEvent::Job(job) => {
+                let kind = EventKind::BashJob {
+                    call_id: call_id.to_owned(),
+                    job_id: job.id,
+                    command: job.command,
+                    state: job.status.state().to_owned(),
+                    exit_code: job.status.exit_code(),
+                    duration_ms: (!job.status.is_running())
+                        .then_some(job.elapsed.as_millis() as u64),
+                    output: job.output.map(|p| p.display().to_string()),
+                };
+                if let Err(e) = self
+                    .recorder
+                    .emit(EventDraft::node(self.node.clone(), kind))
+                {
+                    tracing::warn!(target: "harness::tools", error = %e, "could not record a background job");
                 }
             }
             ToolEvent::OutputSpilled(rec) => {

@@ -3,7 +3,7 @@ display_name: Researcher
 description: Read-only investigation agent (built in)
 prompt: researcher
 effort: low
-tools: [read, bash]
+tools: [read, bash, grep, glob]
 memory: read
 policy:
   bash.deny: ["git commit*", "git push*", "git add*", "rm *"]

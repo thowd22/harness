@@ -460,6 +460,7 @@ pub fn usage(input: u64, cached_input: u64, output: u64, reasoning: u64) -> Usag
         cached_input,
         output,
         reasoning,
+        cache_write: 0,
     }
 }
 

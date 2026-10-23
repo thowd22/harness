@@ -21,7 +21,14 @@ pub struct ToolContext {
     pub supports_images: bool,
     /// Where events go.
     pub events: Arc<dyn ToolEventSink>,
+    /// Decides which found paths search tools may show (protected paths
+    /// are dropped); `None` shows everything.
+    pub read_filter: Option<ReadFilter>,
 }
+
+/// Returns false for an absolute path the agent may not read (see
+/// [`ToolContext::may_read`]).
+pub type ReadFilter = Arc<dyn Fn(&std::path::Path) -> bool + Send + Sync>;
 
 impl ToolContext {
     /// A context with the given call id, no image support and no event sink.
@@ -30,7 +37,19 @@ impl ToolContext {
             call_id: call_id.into(),
             supports_images: false,
             events: Arc::new(NoEvents),
+            read_filter: None,
         }
+    }
+
+    /// Set the read filter for search results.
+    pub fn with_read_filter(mut self, filter: Option<ReadFilter>) -> Self {
+        self.read_filter = filter;
+        self
+    }
+
+    /// True unless the read filter rejects `path` (absolute).
+    pub fn may_read(&self, path: &std::path::Path) -> bool {
+        self.read_filter.as_ref().is_none_or(|f| f(path))
     }
 
     /// Set image support.
@@ -236,6 +255,23 @@ pub enum ToolEvent {
     },
     /// Output exceeded the budget and was spilled to a blob.
     OutputSpilled(SpillRecord),
+    /// Progress of a running process (bash): its timeout once at the
+    /// start, then each liveness sample, so the UI can show a quiet but
+    /// busy command as working.
+    Progress(ToolProgress),
+    /// A background job (bash `run_in_background`) started or ended. It is
+    /// reported with the id of the bash call that started it, also after
+    /// that call has returned.
+    Job(crate::jobs::JobInfo),
+}
+
+/// What a running tool reports about itself besides output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ToolProgress {
+    /// The call's effective timeout, when it has one.
+    pub timeout: Option<std::time::Duration>,
+    /// The latest liveness sample; `None` when not (yet) known.
+    pub liveness: Option<crate::liveness::Liveness>,
 }
 
 /// Receives [`ToolEvent`]s. Implementations must not block for long: live

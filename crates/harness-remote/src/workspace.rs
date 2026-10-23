@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use harness_tools::bash::EnvScrubber;
 use harness_tools::exec::{Exec, ExecError, ExecHandle, ExecRequest};
+use harness_tools::search::{FindQuery, FindResult};
 use harness_tools::workspace::{DirEntry, FileStat, Workspace, WsError, WsResult};
 use serde_json::Value;
 use tokio::sync::oneshot;
@@ -260,6 +261,26 @@ impl Workspace for RemoteWorkspace {
                 e => ws_err(self.host(), Path::new(pattern), e),
             })
     }
+
+    async fn find(&self, query: &FindQuery) -> WsResult<FindResult> {
+        let mut q = query.clone();
+        q.base = self.resolve(&query.base);
+        let s = path_str(&q.base);
+        self.client
+            .call::<_, FindResult>(methods::FS_FIND, Some(&s), &q)
+            .await
+            .map_err(|e| match e {
+                // A helper that predates fs.find: the tools fall back.
+                ClientError::Rpc(r) if r.code == codes::METHOD_NOT_FOUND => WsError::Io {
+                    path: q.base.clone(),
+                    source: io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        format!("the helper on {} does not support file search", self.host()),
+                    ),
+                },
+                e => ws_err(self.host(), &q.base, e),
+            })
+    }
 }
 
 /// An [`Exec`] on a remote host.
@@ -285,7 +306,7 @@ impl RemoteExec {
 impl Exec for RemoteExec {
     async fn spawn(&self, req: ExecRequest) -> Result<ExecHandle, ExecError> {
         let job = uuid::Uuid::now_v7().simple().to_string();
-        let (output, status) = self.client.register_job(&job);
+        let (output, status, liveness) = self.client.register_job(&job);
         let (env, mut host_env) = self.env.prepare(req.env);
         if req.clear_env {
             // A clean environment still gets the remote login basics, even
@@ -337,7 +358,7 @@ impl Exec for RemoteExec {
                     .await;
             }
         });
-        Ok(ExecHandle::new(output, kill_tx, status))
+        Ok(ExecHandle::new(output, kill_tx, status).with_liveness(liveness))
     }
 }
 

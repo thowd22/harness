@@ -26,8 +26,10 @@ which.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock.workspace = true
+nix = { workspace = true, features = ["fs", "term"] }
 
 [dev-dependencies]
+nix = { workspace = true, features = ["fs", "term"] }
 serde_norway.workspace = true
 tempfile.workspace = true
 tokio.workspace = true

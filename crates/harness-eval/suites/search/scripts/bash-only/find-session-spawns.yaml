@@ -1,0 +1,20 @@
+# Replays the pattern recorded in run 01a1691a: one bash command per model
+# call, a whole-tree grep (which also hits vendor/), then one `sed -n` per
+# file to find the enclosing functions.
+responses:
+  - content:
+      - tool_use: { name: bash, input: { command: "grep -rn --include=*.rs setsid . | cut -c1-200" } }
+  - content:
+      - tool_use: { name: bash, input: { command: "sed -n 1,20p src/providers/runner.rs" } }
+  - content:
+      - tool_use: { name: bash, input: { command: "sed -n 1,20p src/pty/viewer.rs" } }
+  - content:
+      - tool_use: { name: bash, input: { command: "sed -n 1,12p src/util.rs" } }
+  - content:
+      - tool_use:
+          name: write
+          input:
+            path: FINDINGS.md
+            content: "src/providers/runner.rs: spawn_job\nsrc/pty/viewer.rs: open_pty\n"
+  - content:
+      - text: "Two places start a process in a new session: `spawn_job` in src/providers/runner.rs and `open_pty` in src/pty/viewer.rs. Written to FINDINGS.md."

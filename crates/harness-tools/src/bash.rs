@@ -4,6 +4,9 @@
 //! - Every call has a timeout (default `bash_timeout`, capped at
 //!   `bash_max_timeout`). Timeout or cancellation (dropping the call's
 //!   future) kills the command's whole process group.
+//! - Liveness of the command's process group (CPU time, live processes),
+//!   when the executor samples it, and the call's timeout are reported as
+//!   [`ToolEvent::Progress`] so the UI can tell busy-but-quiet from idle.
 //! - Output streams live as [`ToolEvent::Output`] events for the UI; the
 //!   model gets the combined output, truncated to head + tail with a
 //!   `spill:<id>` pointer when it is over budget (see [`Spiller`]).
@@ -11,6 +14,11 @@
 //!   ([`EnvScrubber`]).
 //! - The working directory persists across calls of one [`BashTool`]
 //!   (one per session): `cd sub` in one call affects the next.
+//! - With `run_in_background` the command becomes a job of the session's
+//!   [`JobManager`]: the call returns at once with the job id and log path,
+//!   the job has no timeout unless the call gives one, and its exit is
+//!   reported later (see [`crate::jobs`]). A `cd` inside a job does not
+//!   change the session directory.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -21,15 +29,18 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::config::ToolsConfig;
-use crate::exec::{Exec, ExecRequest, StreamKind};
+use crate::exec::{Exec, ExecEvent, ExecRequest, StreamKind};
+use crate::jobs::{JobLimits, JobManager, JobOwner};
 use crate::spill::Spiller;
-use crate::tool::{ToolContext, ToolError, ToolErrorKind, ToolEvent, ToolOutput, parse_args};
+use crate::tool::{
+    ToolContext, ToolError, ToolErrorKind, ToolEvent, ToolOutput, ToolProgress, parse_args,
+};
 
 /// Tool name.
 pub const NAME: &str = "bash";
 
 /// One-line description shown to the model.
-pub const DESCRIPTION: &str = "Run a bash command non-interactively (no stdin). The working directory persists between calls. Optional timeout in seconds.";
+pub const DESCRIPTION: &str = "Run a bash command non-interactively (no stdin). The working directory persists between calls. Optional timeout in seconds. run_in_background: for servers and long builds or tests; returns a job id at once, harness reports the exit in a later message, bash_jobs reads or stops it.";
 
 /// Arguments of the bash tool.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -40,6 +51,10 @@ pub struct BashArgs {
     /// Timeout in seconds; defaults to `bash_timeout`, capped at `bash_max_timeout`.
     #[serde(default)]
     pub timeout: Option<u64>,
+    /// Start the command as a background job and return at once. Such a
+    /// job has no timeout unless `timeout` is given (then not capped).
+    #[serde(default)]
+    pub run_in_background: bool,
 }
 
 /// JSON schema of the bash tool's arguments.
@@ -48,7 +63,8 @@ pub fn schema() -> Value {
         "type": "object",
         "properties": {
             "command": {"type": "string"},
-            "timeout": {"type": "integer", "minimum": 1, "description": "Seconds"}
+            "timeout": {"type": "integer", "minimum": 1, "description": "Seconds"},
+            "run_in_background": {"type": "boolean"}
         },
         "required": ["command"],
         "additionalProperties": false
@@ -235,6 +251,8 @@ pub struct BashTool {
     root: PathBuf,
     cwd: Mutex<PathBuf>,
     marker: String,
+    jobs: JobManager,
+    owner: JobOwner,
 }
 
 impl std::fmt::Debug for BashTool {
@@ -248,6 +266,11 @@ impl std::fmt::Debug for BashTool {
 
 const SCRIPT: &str = r#"trap '__harness_rc=$?; printf "%s%s\n" "$HARNESS_MARKER_PLACEHOLDER" "$PWD"; exit $__harness_rc' EXIT
 cd -- "$1" 2>/dev/null || printf '[harness: working directory %s no longer exists; running in %s]\n' "$1" "$PWD" >&2
+eval "$2""#;
+
+/// The script of a background job: same start, no end-of-command marker
+/// (a job's `cd` does not change the session directory).
+const JOB_SCRIPT: &str = r#"cd -- "$1" 2>/dev/null || printf '[harness: working directory %s no longer exists; running in %s]\n' "$1" "$PWD" >&2
 eval "$2""#;
 
 impl BashTool {
@@ -267,6 +290,8 @@ impl BashTool {
         spiller: Spiller,
     ) -> Self {
         let cwd = cwd.into();
+        let jobs = JobManager::new(JobLimits::from_config(&config));
+        let owner = jobs.owner();
         Self {
             exec,
             config,
@@ -276,7 +301,28 @@ impl BashTool {
             root: cwd.clone(),
             cwd: Mutex::new(cwd),
             marker: format!("__HARNESS_CWD_{}__:", uuid::Uuid::now_v7().simple()),
+            jobs,
+            owner,
         }
+    }
+
+    /// The session's background jobs.
+    pub fn jobs(&self) -> &JobManager {
+        &self.jobs
+    }
+
+    /// Start background jobs in `jobs` (the session's manager, shared with
+    /// the other agents' bash tools) instead of a manager of its own.
+    pub fn with_jobs(mut self, jobs: JobManager) -> Self {
+        self.owner = jobs.owner();
+        self.jobs = jobs;
+        self
+    }
+
+    /// This tool's owner id in its manager (see
+    /// [`JobManager::take_finished_for`]).
+    pub fn job_owner(&self) -> u64 {
+        self.owner.id()
     }
 
     /// Use `env` instead of this process's environment as the base (it is
@@ -307,9 +353,56 @@ impl BashTool {
         self.run(ctx, parse_args(NAME, args)?).await
     }
 
+    /// Starts `args.command` as a background job (see [`crate::jobs`]).
+    async fn start_job(&self, ctx: &ToolContext, args: BashArgs) -> Result<ToolOutput, ToolError> {
+        let cwd = self.cwd();
+        let mut req = ExecRequest::new(
+            "bash",
+            vec![
+                "--noprofile".into(),
+                "--norc".into(),
+                "-c".into(),
+                JOB_SCRIPT.into(),
+                "harness-bash".into(),
+                cwd.to_string_lossy().into_owned(),
+                args.command.clone(),
+            ],
+            self.root.clone(),
+        )
+        .with_clean_env(self.env());
+        if let Some(secs) = args.timeout {
+            req = req.with_timeout(Duration::from_secs(secs.max(1)));
+        }
+        let started = self
+            .jobs
+            .start_owned(
+                Some(&self.owner),
+                ctx,
+                self.exec.as_ref(),
+                req,
+                &args.command,
+            )
+            .await?;
+        let log = match &started.output {
+            Some(p) => format!("; its output goes to {}", p.display()),
+            None => String::new(),
+        };
+        let limit = match args.timeout {
+            Some(secs) => format!(" It is killed after {secs}s."),
+            None => String::new(),
+        };
+        Ok(ToolOutput::Text(format!(
+            "[background job {id} started{log}. It keeps running after this call; harness reports its exit code and last output in a later message.{limit} Read new output with bash_jobs (action: output, id: {id}), stop it with action stop.]",
+            id = started.id
+        )))
+    }
+
     /// Run with typed arguments. Dropping the returned future kills the
     /// command's process group.
     pub async fn run(&self, ctx: &ToolContext, args: BashArgs) -> Result<ToolOutput, ToolError> {
+        if args.run_in_background {
+            return self.start_job(ctx, args).await;
+        }
         let max = self.config.bash_max_timeout();
         let asked = args.timeout.map(|s| Duration::from_secs(s.max(1)));
         let timeout = asked.unwrap_or(self.config.bash_timeout()).min(max);
@@ -348,7 +441,21 @@ impl BashTool {
             capture.push(&data);
             ctx.emit(ToolEvent::Output { stream, data });
         };
-        while let Some(chunk) = handle.next_output().await {
+        ctx.emit(ToolEvent::Progress(ToolProgress {
+            timeout: Some(timeout),
+            liveness: None,
+        }));
+        while let Some(event) = handle.next_event().await {
+            let chunk = match event {
+                ExecEvent::Output(chunk) => chunk,
+                ExecEvent::Liveness(sample) => {
+                    ctx.emit(ToolEvent::Progress(ToolProgress {
+                        timeout: Some(timeout),
+                        liveness: Some(sample),
+                    }));
+                    continue;
+                }
+            };
             let data = match chunk.stream {
                 StreamKind::Stdout => filter.feed(&chunk.data),
                 StreamKind::Stderr => chunk.data,
@@ -516,6 +623,74 @@ mod tests {
         task.abort();
         let pid = std::fs::read_to_string(&pid_file).unwrap();
         assert_dead(pid.trim()).await;
+    }
+
+    /// Liveness samples the call reported, after running `command` through
+    /// a local executor that samples every 150 ms.
+    async fn liveness_of(command: &str) -> (Vec<crate::liveness::Liveness>, Vec<ToolProgress>) {
+        let dir = tempfile::tempdir().unwrap();
+        let config = ToolsConfig::default();
+        let events = Arc::new(RecordingEvents::new());
+        let tool = BashTool::new(
+            Arc::new(LocalExec::new().with_liveness_interval(Some(Duration::from_millis(150)))),
+            dir.path(),
+            config.clone(),
+            EnvScrubber::default(),
+            Spiller::new(Arc::new(MemoryBlobSink::new()), &config),
+        );
+        let ctx = ToolContext::new("b1").with_events(events.clone());
+        tool.call(&ctx, json!({"command": command})).await.unwrap();
+        let progress: Vec<ToolProgress> = events
+            .events()
+            .into_iter()
+            .filter_map(|(_, e)| match e {
+                ToolEvent::Progress(p) => Some(p),
+                _ => None,
+            })
+            .collect();
+        let samples = progress.iter().filter_map(|p| p.liveness).collect();
+        (samples, progress)
+    }
+
+    #[tokio::test]
+    async fn reports_timeout_first_then_liveness_samples() {
+        let (samples, progress) = liveness_of("sleep 1").await;
+        assert_eq!(
+            progress.first(),
+            Some(&ToolProgress {
+                timeout: Some(ToolsConfig::default().bash_timeout()),
+                liveness: None,
+            }),
+            "the timeout is known before any sample"
+        );
+        assert!(progress.iter().all(|p| p.timeout.is_some()), "{progress:?}");
+        assert!(!samples.is_empty(), "a 1s command is sampled: {progress:?}");
+        assert!(samples.iter().all(|s| s.procs >= 1), "{samples:?}");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn busy_command_reports_advancing_cpu_and_idle_one_does_not() {
+        // Busy: spin for about two seconds of wall time (bash 3.2 friendly).
+        let (busy, _) =
+            liveness_of("end=$((SECONDS+2)); while [ $SECONDS -lt $end ]; do :; done").await;
+        assert!(busy.len() >= 3, "{busy:?}");
+        let (first, last) = (busy[0], busy[busy.len() - 1]);
+        assert!(
+            last.cpu > first.cpu,
+            "a spinning loop accumulates CPU between samples: {busy:?}"
+        );
+        // Idle: `sleep` is legitimately quiet and uses no CPU. Skip the first
+        // sample, which may still include shell start-up.
+        let (idle, _) = liveness_of("sleep 2").await;
+        assert!(idle.len() >= 3, "{idle:?}");
+        let steady = &idle[1..];
+        assert!(
+            steady.iter().all(|s| s.cpu == steady[0].cpu),
+            "a sleeping group's CPU time does not advance: {idle:?}"
+        );
+        assert!(steady.iter().all(|s| s.active == 0), "{idle:?}");
+        assert!(steady.iter().all(|s| s.procs >= 1), "{idle:?}");
     }
 
     #[tokio::test]

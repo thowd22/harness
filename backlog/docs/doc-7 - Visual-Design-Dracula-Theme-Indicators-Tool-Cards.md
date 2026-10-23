@@ -3,7 +3,7 @@ id: doc-7
 title: 'Visual Design - Dracula Theme, Indicators, Tool Cards'
 type: specification
 created_date: '2026-10-22 14:43'
-updated_date: '2026-10-23 04:34'
+updated_date: '2026-10-23 16:12'
 ---
 # Visual Design: Dracula Theme, Working Indicators, Tool Cards
 
@@ -48,7 +48,7 @@ Something is always visibly happening, or visibly not.
 
 Phases: sending, waiting for first token, thinking, writing, running tool (name + summary), retrying (reason, countdown), waiting for approval, verifying, compacting, syncing to remote host. Each phase shows its elapsed time; the turn total is kept too.
 
-**Stall detection:** no bytes from the provider or no tool output for `[ui] stall_after` seconds turns the indicator orange: `⚠ no data for 20s (provider stream)`.
+**Stall detection:** no bytes from the provider for `[ui] stall_after` seconds turns the indicator orange and says what it waits on: `⚠ waiting on the model: no data for 20s`. A running tool is never shown as stalled: it shows elapsed time against its timeout and, for sampled tools (bash, locally and through the remote helper), the process group's CPU time (`running bash: cargo test 4m12s of 10m · cpu 14m03s (9 processes)`). Only when a sampled tool has had no output, no CPU progress and no runnable process for `stall_after` (at least 6 s) does a soft `warn`-coloured hint name it and the cancel key, without an alarm icon: `bash quiet for 59s (no output, no CPU) · ctrl+c to cancel`. Unsampled tools fall back to elapsed/timeout wording.
 
 **Per agent:** spinner on running map nodes, goal-bar tasks and subagent cards, colored `running`; the status line shows `◐ 3 agents · 1 remote`; optional terminal-title spinner via OSC.
 
@@ -87,7 +87,7 @@ One card per call. Header: status icon, tool name (`accent`), concise argument s
 - **errors:** red card with the actionable error message given to the model.
 - Parallel calls in the same turn are grouped under one header with a count.
 - Cards are clickable and keyboard-focusable: Enter expands or collapses, palette offers copy output and open in node detail.
-- **Copy buttons:** the bottom border carries `⧉ copy output` and (for edits and writes with a change) `⧉ copy diff` in `accent`, e.g. `╰─ ⧉ copy output ─ ⧉ copy diff ───╯`. User and assistant headers show a muted `⧉ copy` before the timestamp, and every code block starts with a muted header line (`  rust  ⧉ copy`). Each button is its own focusable element (focused: `surface` background); copying confirms in a success toast. Keyboard selection (`ctrl+t`) highlights the selected lines with the focus style, the cursor line bold and underlined, and shows a `SELECT` bar (`accent` badge, `[copy] [mark] [done]` buttons) in place of the input.
+- **Copy buttons:** the bottom border carries `⧉ copy output` and (for edits and writes with a change) `⧉ copy diff` in `accent`, e.g. `╰─ ⧉ copy output ─ ⧉ copy diff ───╯`. User and assistant headers show a muted `⧉ copy` before the timestamp, and every code block starts with a muted header line (`  rust  ⧉ copy`). Each button is its own focusable element (focused: `surface` background); copying confirms in a success toast. Keyboard selection (`ctrl+t`) highlights the selected lines with the focus style, the cursor line bold and underlined, and shows a `SELECT` bar (`accent` badge, `[copy] [mark] [done]` buttons) in place of the input. Mouse selection (drag, double/triple click) and the keyboard cursor on the map and screens highlight the selected cells with the `selection` token (`accent` at 35 % over `bg`; reverse video without colour); on those screens the footer becomes the `SELECT` bar with `[copy] [done]`.
 
 ## Subagent cards (chat)
 

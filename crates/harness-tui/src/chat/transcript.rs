@@ -427,6 +427,7 @@ pub struct TranscriptHit {
 struct Rendered {
     lines: Vec<Line<'static>>,
     hits: Vec<TranscriptHit>,
+    ords: Vec<u64>,
 }
 
 /// The transcript and its scroll state.
@@ -460,6 +461,8 @@ pub struct Transcript {
     unseen: bool,
     /// Keyboard selection mode, when active.
     selection: Option<Selection>,
+    /// Content position ([`row_ord`]) of each line of the last frame.
+    last_ords: Vec<u64>,
 }
 
 impl Transcript {
@@ -1241,6 +1244,7 @@ impl Transcript {
         self.last_height = height;
         self.last_width = width;
         self.last_pad = 0;
+        self.last_ords.clear();
         if self.entries.is_empty() || height == 0 {
             return (Vec::new(), Vec::new());
         }
@@ -1284,6 +1288,7 @@ impl Transcript {
             }
         }
         self.last_pad = pad;
+        self.last_ords = r.ords;
         (r.lines, r.hits)
     }
 
@@ -1294,6 +1299,7 @@ impl Transcript {
         let height = area.height as usize;
         let mut out = Vec::new();
         let mut hits = Vec::new();
+        let mut ords = Vec::new();
         let (mut i, mut off) = top;
         while out.len() < height && i < self.entries.len() {
             self.layout_entry(i, width, f);
@@ -1329,12 +1335,29 @@ impl Transcript {
                     Some(st) => l.clone().patch_style(st),
                     None => l.clone(),
                 });
+                ords.push(row_ord(i, n));
             }
             off = 0;
             i += 1;
         }
-        Rendered { lines: out, hits }
+        Rendered {
+            lines: out,
+            hits,
+            ords,
+        }
     }
+
+    /// Content position of each line of the last frame, top to bottom
+    /// (see [`row_ord`]).
+    pub fn visible_ords(&self) -> &[u64] {
+        &self.last_ords
+    }
+}
+
+/// A stable, ordered position for line `line` of entry `entry`, for text
+/// selection: it does not change when the view scrolls.
+pub fn row_ord(entry: usize, line: usize) -> u64 {
+    ((entry as u64) << 32) | (line as u64 & 0xffff_ffff)
 }
 
 fn header(
@@ -1762,6 +1785,7 @@ mod tests {
                     cached_input: 11_900,
                     output: 812,
                     reasoning: 1200,
+                    cache_write: 0,
                 },
                 stop_reason: Some("end_turn".into()),
                 response: None,

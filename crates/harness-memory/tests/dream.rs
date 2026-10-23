@@ -47,6 +47,7 @@ fn write(t: &MemoryTool, path: &str, text: &str) -> harness_memory::tool::Memory
     t.execute(MemoryArgs::Write {
         path: path.into(),
         text: text.into(),
+        bullets: Vec::new(),
         title: None,
     })
     .unwrap()

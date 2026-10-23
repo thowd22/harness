@@ -3,7 +3,7 @@ display_name: Reviewer
 description: Independent reviewer agent (built in)
 prompt: reviewer
 effort: high
-tools: [read, bash]
+tools: [read, bash, grep, glob]
 memory: off
 policy:
   bash.deny: ["git commit*", "git push*", "git add*"]

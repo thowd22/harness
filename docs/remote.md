@@ -156,13 +156,26 @@ harness remote-agent --stdio [--session ID] [--grace SECS] [--socket-dir DIR] [-
 It speaks versioned JSON-RPC 2.0 on stdin/stdout (protocol version 2,
 compatible with 1): `hello`, `ping`, `fs.read`, `fs.write`,
 `fs.replace_atomic`, `fs.set_mode`, `fs.stat`, `fs.list`, `fs.glob`,
-`exec.start`/`exec.kill`/`exec.attach`/`exec.release`/`exec.list` plus the
-`exec.output`/`exec.exit` notifications, `probe`, and `sync.manifest`,
+`fs.find`, `exec.start`/`exec.kill`/`exec.attach`/`exec.release`/`exec.list` plus the
+`exec.output`/`exec.exit`/`exec.liveness` notifications, `probe`, and `sync.manifest`,
 `sync.changes`, `sync.remove`, `sync.prune`. Edits are computed locally
 (stale-read checks and diffs stay local) and applied with
 `fs.replace_atomic`. `--no-compression` makes the helper decline zstd.
 `--content-cache BYTES` sizes the helper's content cache (default 64 MiB,
 `0` turns it off); see [Content cache](#content-cache).
+
+`fs.find` runs the `grep` and `glob` tools' file search on the host (the
+same gitignore-aware walk as locally; see [tools.md](tools.md#grep)). It is
+an optional method: a helper that predates it answers "method not found",
+and then `glob` falls back to `fs.glob` and `grep` tells the model to use
+bash on that host.
+
+While a job runs, the helper samples its process group every 3 s and sends
+`exec.liveness` (`job`, `cpu_ms`, `procs`, `active`) to the attached client,
+so a remote `bash` call shows the same busy/quiet state in the activity line
+as a local one. These samples are not logged or replayed on reattach (the
+next one follows within seconds), and clients that predate them ignore
+them.
 
 ### Wire format
 
@@ -310,7 +323,9 @@ there is no `glob` (use `find` in bash), a missing program shows up as exit
 code 127 instead of a spawn error, a disconnect cannot be reattached, and
 GNU or BSD `stat` is required. Kill and timeout stop the remote process
 group with the shell's builtin `kill -TERM -PGID`, the one form dash,
-busybox ash, bash and zsh all accept.
+busybox ash, bash and zsh all accept. The fallback reports no process
+liveness, so the activity line shows a remote command's elapsed time against
+its timeout and never calls it quiet.
 
 ## Workspace sync
 

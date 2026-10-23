@@ -88,6 +88,7 @@ fn usage(input: u64, cached: u64, output: u64) -> Usage {
         cached_input: cached,
         output,
         reasoning: 0,
+        cache_write: 0,
     }
 }
 

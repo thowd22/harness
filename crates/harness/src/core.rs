@@ -361,6 +361,11 @@ impl Core {
         let exec = executor(&cfg, &cwd, &mut warnings)?;
         let memory_node: NodeHandle = Arc::new(Mutex::new(None));
         let memory = open_memory(&cfg, &agent, &cwd, &session, opts.headless, &mut warnings);
+        // One background-job manager for the session: the agent's bash and
+        // every subagent's share it (ids, notices, /jobs, shutdown).
+        let jobs = harness_tools::jobs::JobManager::new(
+            harness_tools::jobs::JobLimits::from_config(&ToolsConfig::default()),
+        );
         let tools_factory = tools_factory(
             &cfg,
             &cwd,
@@ -372,8 +377,9 @@ impl Core {
                 cap: None,
                 headless: opts.headless,
             },
+            jobs.clone(),
         );
-        let mut base_tools = standard(&cwd, exec.clone(), scrubber.clone(), &recorder);
+        let mut base_tools = standard(&cwd, exec.clone(), scrubber.clone(), &recorder, &jobs);
         if let Some(bash) = base_tools.get(harness_tools::bash::NAME).cloned() {
             let ledger = Arc::new(
                 harness_hygiene::ledger::Ledger::new(&cwd).with_sink(Arc::new(recorder.clone())),
@@ -523,6 +529,11 @@ impl Core {
             board.clone(),
             cfg.general.todo_nudge_after,
         )));
+        // Ended background bash jobs are reported on the next request: the
+        // agent's own, and those of subagents that have ended.
+        if let Some(n) = harness_agent::job_notices::JobNotices::session(&base_tools) {
+            hooks.push(Arc::new(n));
+        }
         let checkpoints = if opts.checkpoints {
             open_checkpoints(&data, &cwd, &mut warnings).await
         } else {
@@ -804,6 +815,11 @@ impl Core {
         }
     }
 
+    /// The session's background bash jobs (the TUI's `/jobs` panel).
+    pub fn jobs(&self) -> Option<harness_tools::jobs::JobManager> {
+        self.base_tools.jobs()
+    }
+
     /// The tool definitions the top-level agent sends.
     pub fn tool_specs(&self) -> Vec<harness_providers::model::ToolSpec> {
         let place = AgentPlace {
@@ -875,6 +891,11 @@ impl Core {
     pub async fn finish(mut self) -> Result<(), String> {
         self.settle_summary(None).await;
         self.mcp.shutdown().await;
+        // Background jobs belong to the session: stop them (whole process
+        // groups) before the run log closes, so their end is recorded.
+        if let Some(jobs) = self.base_tools.jobs() {
+            jobs.shutdown().await;
+        }
         let (status, error) = match &self.last {
             Some(o) => (run_status(o), finished_error(o)),
             None => (RunStatus::Cancelled, None),
@@ -912,15 +933,22 @@ fn standard(
     exec: Arc<dyn Exec>,
     scrubber: EnvScrubber,
     recorder: &RunRecorder,
+    jobs: &harness_tools::jobs::JobManager,
 ) -> ToolSet {
-    ToolSet::standard(StandardTools {
-        workspace: Arc::new(LocalWorkspace::new(cwd)),
-        exec,
-        cwd: cwd.to_path_buf(),
-        config: ToolsConfig::default(),
-        scrubber,
-        spill: Arc::new(RunBlobSink(recorder.blobs().clone())),
-    })
+    ToolSet::standard_with(
+        StandardTools {
+            workspace: Arc::new(LocalWorkspace::new(cwd)),
+            exec,
+            cwd: cwd.to_path_buf(),
+            config: ToolsConfig::default(),
+            scrubber,
+            spill: Arc::new(RunBlobSink(recorder.blobs().clone())),
+        },
+        harness_agent::dispatch::StandardOptions {
+            base_env: None,
+            jobs: Some(jobs.clone()),
+        },
+    )
 }
 
 pub(crate) type Memory = (Arc<SessionCheckout>, harness_memory::index::SessionIndex);
@@ -994,7 +1022,8 @@ pub(crate) struct MemoryUse {
 }
 
 /// Builds each subagent's base tools. Agents get memory as their own
-/// `memory:` allows, never more than `memory.cap`.
+/// `memory:` allows, never more than `memory.cap`. Their bash starts
+/// background jobs in `jobs` (the session's manager).
 pub(crate) fn tools_factory(
     cfg: &Config,
     cwd: &Path,
@@ -1002,6 +1031,7 @@ pub(crate) fn tools_factory(
     scrubber: EnvScrubber,
     recorder: &RunRecorder,
     memory: MemoryUse,
+    jobs: harness_tools::jobs::JobManager,
 ) -> ToolsFactory {
     let MemoryUse {
         checkout: memory,
@@ -1012,7 +1042,7 @@ pub(crate) fn tools_factory(
     let cwd = cwd.to_path_buf();
     let recorder = recorder.clone();
     Arc::new(move |agent: &Agent| {
-        let mut set = standard(&cwd, exec.clone(), scrubber.clone(), &recorder);
+        let mut set = standard(&cwd, exec.clone(), scrubber.clone(), &recorder, &jobs);
         if let Some(checkout) = &memory
             && let Some(tool) = memory_tool(&cfg, agent, headless, cap, checkout, &recorder, &cwd)
         {

@@ -426,3 +426,78 @@ fn workflows_can_turn_memory_off() {
     assert!(tools_of("").contains(&"memory".to_owned()));
     assert!(!tools_of("memory: off\n").contains(&"memory".to_owned()));
 }
+
+/// A workflow agent step hears about the background job it started, and
+/// the jobs still running when the run ends are stopped (and recorded).
+#[test]
+fn workflow_agent_steps_get_job_notices_and_their_jobs_end_with_the_run() {
+    let env = Env::new("[sandbox]\nenabled = false\n");
+    env.global_file(
+        "workflows/bg.yaml",
+        "name: bg\nsteps:\n  - id: a\n    agent: coder\n    prompt: \"build\"\n",
+    );
+    let script = env.script(
+        "bg.yaml",
+        r#"responses:
+  - content: [ { tool_use: { name: bash, input: { command: "sleep 0.3; echo built; touch j1.done; exit 3", run_in_background: true } } } ]
+  - content: [ { tool_use: { name: bash, input: { command: "until [ -e j1.done ]; do sleep 0.05; done; sleep 0.5" } } } ]
+  - content: [ { tool_use: { name: bash, input: { command: "sleep 60 & echo $! > pid.tmp; mv pid.tmp pid; wait", run_in_background: true } } } ]
+  - content: [ { tool_use: { name: bash, input: { command: "until [ -s pid ]; do sleep 0.05; done" } } } ]
+  - content: [ { text: "done" } ]
+"#,
+    );
+    let o = env
+        .cmd(&[
+            "wf",
+            "run",
+            "bg",
+            "--json",
+            "--mode",
+            "auto",
+            "--fake-script",
+            script.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let evs = events(&o);
+    let requests: Vec<String> = evs
+        .iter()
+        .filter(|e| e["type"] == "model_call_started")
+        .map(|e| e["request"]["json"]["messages"].to_string())
+        .collect();
+    assert_eq!(requests.len(), 5, "{}", stdout(&o));
+    // The foreground step waits for j1 to finish (no fixed sleeps, so a
+    // loaded machine cannot reorder it), so its notice is in request 3.
+    assert!(
+        requests[2].contains("Notice from harness: background job j1 ended (exit code 3)"),
+        "{}",
+        requests[2]
+    );
+    let jobs: Vec<(String, String)> = evs
+        .iter()
+        .filter(|e| e["type"] == "bash_job")
+        .map(|e| {
+            (
+                e["job_id"].as_str().unwrap_or_default().to_owned(),
+                e["state"].as_str().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect();
+    assert!(
+        jobs.contains(&("j2".into(), "stopped".into())),
+        "the run stopped its job: {jobs:?}"
+    );
+    let pid: u32 = std::fs::read_to_string(env.project.join("pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    for _ in 0..100 {
+        if harness_tools::conformance::local_process_gone(pid) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    panic!("process {pid} survived the run");
+}

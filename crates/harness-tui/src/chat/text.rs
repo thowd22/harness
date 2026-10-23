@@ -5,8 +5,10 @@
 //! The `fmt_*` helpers keep tokens, costs and durations formatted the same
 //! way everywhere (activity line, cards, metadata line, status line).
 
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+
+use crate::selection::Join;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Display width of `s` in terminal cells.
@@ -94,9 +96,39 @@ pub fn right_align(
     left.style(style)
 }
 
+/// The zero-width span that starts a soft-wrapped continuation line (see
+/// [`wrap_line`] and [`soft_join`]). It renders nothing, so the marker
+/// survives caching, cloning and style patches without changing a cell.
+fn wrap_marker(join: Join) -> Span<'static> {
+    let m = match join {
+        Join::Direct => Modifier::HIDDEN | Modifier::RAPID_BLINK,
+        _ => Modifier::HIDDEN,
+    };
+    Span::styled("", Style::new().add_modifier(m))
+}
+
+/// How a line laid out by [`wrap_line`] continues the line above it:
+/// [`Join::Hard`] for the first line of a wrapped line (and every line not
+/// from `wrap_line`), [`Join::Space`] when the wrap replaced a space and
+/// [`Join::Direct`] when it split a long word. Text selection uses it to
+/// rejoin soft-wrapped lines.
+pub fn soft_join(line: &Line<'_>) -> Join {
+    match line.spans.first() {
+        Some(s) if s.content.is_empty() && s.style.add_modifier.contains(Modifier::HIDDEN) => {
+            if s.style.add_modifier.contains(Modifier::RAPID_BLINK) {
+                Join::Direct
+            } else {
+                Join::Space
+            }
+        }
+        _ => Join::Hard,
+    }
+}
+
 /// Word-wraps `line` to `width` cells. Long words are split. Every output
 /// line keeps the line style; `indent` spans are prepended to continuation
-/// lines.
+/// lines, which start with a zero-width marker telling [`soft_join`] how
+/// they continue the line above.
 pub fn wrap_line(
     line: Line<'static>,
     width: usize,
@@ -132,11 +164,18 @@ pub fn wrap_line(
     let mut w = 0;
     // Width at which the current line has no content yet.
     let mut base = 0;
-    let new_line = |spans: &mut Vec<Span<'static>>, out: &mut Vec<Line<'static>>| {
+    // `space`: the break replaces a space piece the caller skipped.
+    let new_line = |spans: &mut Vec<Span<'static>>, out: &mut Vec<Line<'static>>, space: bool| {
+        let mut popped = false;
         while spans.len() > 1 && spans.last().is_some_and(|s| s.content.trim().is_empty()) {
-            spans.pop();
+            popped |= spans.pop().is_some_and(|s| !s.content.is_empty());
         }
         out.push(Line::from(std::mem::take(spans)).style(style));
+        spans.push(wrap_marker(if space || popped {
+            Join::Space
+        } else {
+            Join::Direct
+        }));
         spans.extend(indent.iter().cloned());
     };
     for (text, st) in pieces {
@@ -149,13 +188,13 @@ pub fn wrap_line(
             continue;
         }
         if text.starts_with(' ') {
-            new_line(&mut spans, &mut out);
+            new_line(&mut spans, &mut out, true);
             w = indent_w;
             base = indent_w;
             continue;
         }
         if w > base && pw <= width - indent_w {
-            new_line(&mut spans, &mut out);
+            new_line(&mut spans, &mut out, false);
             w = indent_w;
             base = indent_w;
             spans.push(Span::styled(text, st));
@@ -169,7 +208,7 @@ pub fn wrap_line(
                 if !chunk.is_empty() {
                     spans.push(Span::styled(std::mem::take(&mut chunk), st));
                 }
-                new_line(&mut spans, &mut out);
+                new_line(&mut spans, &mut out, false);
                 w = indent_w;
                 base = indent_w;
             }

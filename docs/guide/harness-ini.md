@@ -36,7 +36,7 @@ command = cargo test --workspace
 [ui]
 timestamps = relative
 mouse = true
-clipboard = osc52        ; osc52 | system | auto (see docs/tui.md#copy-and-paste)
+clipboard = osc52        ; osc52 | system | auto: where copies and drag selections go (see docs/tui.md#copy-and-paste)
 
 [memory]
 enabled = true

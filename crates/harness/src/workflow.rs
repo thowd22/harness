@@ -255,6 +255,9 @@ pub struct Setup<'a> {
     pub memory: Option<Arc<harness_memory::sync::SessionCheckout>>,
     /// The workflow's `memory:` cap.
     pub memory_cap: Option<harness_config::agents::MemoryAccess>,
+    /// The session's background jobs (the TUI): agent steps start theirs
+    /// there, so `/jobs` shows them. `None`: the run has its own.
+    pub jobs: Option<harness_tools::jobs::JobManager>,
 }
 
 /// A workflow executor and the run it records to.
@@ -267,6 +270,11 @@ pub struct Built {
     pub warnings: Vec<String>,
     /// MCP servers and tools of the run.
     pub(crate) mcp: crate::mcp::McpWiring,
+    /// Background jobs of the run's agent steps; [`JobManager::shutdown`]
+    /// stops exactly those (call it before the run log closes).
+    ///
+    /// [`JobManager::shutdown`]: harness_tools::jobs::JobManager::shutdown
+    pub jobs: harness_tools::jobs::JobManager,
 }
 
 /// The provenance labeler for agent steps, as the interactive agent has:
@@ -303,7 +311,15 @@ pub async fn build(setup: Setup<'_>) -> Result<Built, String> {
         headless,
         memory,
         memory_cap,
+        jobs,
     } = setup;
+    // A run inside a session shares its jobs but stops only its own.
+    let jobs = match jobs {
+        Some(j) => j.scoped(),
+        None => harness_tools::jobs::JobManager::new(harness_tools::jobs::JobLimits::from_config(
+            &harness_tools::config::ToolsConfig::default(),
+        )),
+    };
     let memory = match memory {
         Some(m) => Some(m),
         None if memory_cap != Some(harness_config::agents::MemoryAccess::Off)
@@ -376,6 +392,7 @@ pub async fn build(setup: Setup<'_>) -> Result<Built, String> {
                     cap: memory_cap,
                     headless,
                 },
+                jobs.clone(),
             ),
             gate.clone() as Arc<dyn ToolGate>,
         )
@@ -470,6 +487,7 @@ pub async fn build(setup: Setup<'_>) -> Result<Built, String> {
         recorder,
         warnings,
         mcp,
+        jobs,
     })
 }
 
@@ -537,6 +555,7 @@ async fn run(
         headless: true,
         memory: None,
         memory_cap: wf.memory,
+        jobs: None,
     })
     .await?;
     for w in &built.warnings {
@@ -546,6 +565,7 @@ async fn run(
         executor,
         recorder,
         mcp,
+        jobs,
         ..
     } = built;
 
@@ -554,6 +574,8 @@ async fn run(
     spawn_signal_cancel(cancel.clone());
     let outcome = executor.run(&wf, &inputs, reuse, &cancel).await;
     mcp.shutdown().await;
+    // Background jobs of agent steps end with the run.
+    jobs.shutdown().await;
     let dir = recorder.dir().to_owned();
     if let Err(e) = recorder.finish().await {
         let _ = writeln!(err, "harness: warning: run log: {e}");

@@ -3,7 +3,7 @@ id: doc-1
 title: Architecture and Problem Map
 type: specification
 created_date: '2026-10-22 14:26'
-updated_date: '2026-10-23 08:59'
+updated_date: '2026-10-23 16:57'
 ---
 # Architecture & Problem Map
 
@@ -15,7 +15,7 @@ updated_date: '2026-10-23 08:59'
 2. **Event-sourced runs.** Every run is an append-only `events.jsonl` + blob store. All views (chat, map, detail, history, replay, evals) are folds over events. Nothing is shown that isn't in the log, and nothing important is missing from it.
 3. **Enforce in code, not in prose.** Scope, protected paths, staging rules, budgets and verification are enforced by the harness. Prompts describe what *is* allowed, never blanket prohibitions.
 4. **The repo can ask; only the user can grant.** Project YAML (`.harness/`) can tighten policy, never loosen it. Loosening lives only in the user-owned INI. Project config loads only after explicit trust.
-5. **Small by default.** Four core tools (read, write, edit, bash) with compact schemas; extra tools (spawn_agent, memory) appear only when the agent config enables them. Initial context budget is tested in CI.
+5. **Small by default.** Four core tools (read, write, edit, bash) with compact schemas; extra tools (grep, glob, todo, spawn_agent, memory) appear only when the agent config enables them. Initial context budget is tested in CI.
 6. **Cost is a first-class metric.** Tokens and dollars are tracked per call / node / run / session and appear in the status line, the map and eval reports.
 7. **Credentials never leave the local process.** Model calls are always made locally; remote boxes only receive tool operations.
 8. **Simple UI.** Few keys (Enter, Esc, Tab, Ctrl+P, Ctrl+C, arrows), everything else in the command palette.

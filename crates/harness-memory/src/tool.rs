@@ -1,6 +1,7 @@
 //! The `memory` tool exposed to agents.
 //!
-//! Actions: `search`, `read`, `write` (append one bullet to a note) and
+//! Actions: `search`, `read`, `write` (append one bullet, or several with
+//! `bullets`, to a note) and
 //! `forget` (remove matching bullets). The tool exists only for agents with
 //! `memory: read` (search and read) or `memory: read-write` (all actions);
 //! see [`spec`] and [`MemoryTool::for_agent`].
@@ -41,13 +42,17 @@ pub const MAX_SEARCH_LIMIT: usize = 20;
 /// Path prefix the model may use for the current project's notes:
 /// `project/<topic>` expands to `projects/<project-key>/<topic>.md`.
 pub const PROJECT_ALIAS: &str = "project/";
+/// Most bullets one `write` may carry.
+pub const MAX_BULLETS_PER_WRITE: usize = 10;
 
 /// Description for read-write agents. It also teaches when to write.
 pub const DESCRIPTION: &str = "Long-term memory shared across sessions (Markdown notes of one-line bullets). \
-Actions: search {query}, read {path}, write {path, text, title?} appends one bullet, forget {path, text} removes bullets containing text. \
+Actions: search {query}, read {path}, write {path, text | bullets, title?} appends one bullet (text) or up to 10 (bullets) to one note, forget {path, text} removes bullets containing text. \
+Each bullet is one line of at most 400 characters (1000 in project/overview); put several lessons in one write as bullets. \
 Paths: MEMORY.md (general preferences), project/<topic> (this project), tools/<tool>. Link notes with [[path]]. \
 Write when: the user corrects you (save the rule to follow, not the mistake); the user states a preference; a decision is made (with its reason); you hit a non-obvious gotcha about the repo, environment or a tool. \
-Never save: session summaries, task state (PR/issue numbers, statuses), facts easy to rediscover from the repo, or secrets. Writes apply to future sessions.";
+Never save: session summaries, task state (PR/issue numbers, statuses), facts easy to rediscover from the repo, or secrets. \
+Asked to index or learn the codebase into memory: write one project/overview note (at most 10 bullets: purpose, architecture, how to build and test) plus the non-obvious gotchas you found, not a file or module map, and tell the user the rest is re-read from the repo each session. Writes apply to future sessions.";
 
 /// Description for read-only agents.
 pub const READ_ONLY_DESCRIPTION: &str = "Long-term memory shared across sessions (Markdown notes of one-line bullets). \
@@ -68,7 +73,17 @@ pub fn schema(access: MemoryAccess) -> Option<Value> {
         "path": {"type": "string", "description": "note path, e.g. project/testing or tools/cargo"},
     });
     if access == MemoryAccess::ReadWrite {
-        props["text"] = json!({"type": "string", "description": "write: the one-line lesson; forget: text of the bullets to remove"});
+        props["text"] = json!({
+            "type": "string",
+            "maxLength": guard::MAX_OVERVIEW_BULLET_CHARS,
+            "description": "write: one one-line lesson (at most 400 characters; 1000 in project/overview); forget: text of the bullets to remove",
+        });
+        props["bullets"] = json!({
+            "type": "array",
+            "items": {"type": "string", "maxLength": guard::MAX_OVERVIEW_BULLET_CHARS},
+            "maxItems": MAX_BULLETS_PER_WRITE,
+            "description": "write: several one-line lessons for the same note, one per item, each checked on its own",
+        });
         props["title"] = json!({"type": "string", "description": "write: heading for a new note"});
     }
     Some(json!({
@@ -125,12 +140,16 @@ pub enum MemoryArgs {
         /// Note path.
         path: String,
     },
-    /// Append one bullet.
+    /// Append one bullet (`text`) or several (`bullets`) to one note.
     Write {
         /// Note path.
         path: String,
-        /// The lesson.
+        /// One lesson. May be empty when `bullets` is given.
+        #[serde(default)]
         text: String,
+        /// Several lessons, each validated on its own.
+        #[serde(default)]
+        bullets: Vec<String>,
         /// Heading for a new note.
         #[serde(default)]
         title: Option<String>,
@@ -280,7 +299,19 @@ impl MemoryTool {
         match args {
             MemoryArgs::Search { query, limit } => self.search(&query, limit),
             MemoryArgs::Read { path } => self.read(&path),
-            MemoryArgs::Write { path, text, title } => self.write(&path, &text, title.as_deref()),
+            MemoryArgs::Write {
+                path,
+                text,
+                bullets,
+                title,
+            } => {
+                let mut items = Vec::with_capacity(bullets.len() + 1);
+                if !text.trim().is_empty() {
+                    items.push(text);
+                }
+                items.extend(bullets);
+                self.write(&path, &items, title.as_deref())
+            }
             MemoryArgs::Forget { path, text } => self.forget(&path, &text),
         }
     }
@@ -362,25 +393,57 @@ impl MemoryTool {
     fn write(
         &self,
         path: &str,
-        text: &str,
+        items: &[String],
         title: Option<&str>,
     ) -> Result<MemoryOutcome, ToolError> {
         let np = self.note_path(path)?;
-        let text = guard::validate(text, &self.inner.config.redactor)
-            .map_err(|r| ToolError::invalid_args(format!("memory not saved: {r}")))?;
+        if items.is_empty() {
+            return Err(ToolError::invalid_args(
+                "write needs `text` (one bullet) or `bullets` (several one-line bullets for this note).",
+            ));
+        }
+        if items.len() > MAX_BULLETS_PER_WRITE {
+            return Err(ToolError::invalid_args(format!(
+                "a write carries at most {MAX_BULLETS_PER_WRITE} bullets; this one has {}. Keep only the most useful lessons, or send the rest in a second write.",
+                items.len()
+            )));
+        }
+        let redactor = &self.inner.config.redactor;
+        let mut accepted: Vec<String> = Vec::new();
+        let mut rejected: Vec<(usize, Rejection)> = Vec::new();
+        for (i, item) in items.iter().enumerate() {
+            match guard::validate_for(&np, item, redactor) {
+                Ok(t) if !accepted.contains(&t) => accepted.push(t),
+                Ok(_) => {}
+                Err(r) => rejected.push((i + 1, r)),
+            }
+        }
+        if accepted.is_empty() {
+            return Err(ToolError::invalid_args(match rejected.as_slice() {
+                [(_, r)] => format!("memory not saved: {r}"),
+                _ => format!(
+                    "memory not saved: none of the {} bullets passed. {}",
+                    items.len(),
+                    describe_rejections(&rejected)
+                ),
+            }));
+        }
         let title = match title.map(str::trim).filter(|t| !t.is_empty()) {
             Some(t) => {
                 guard::check_format(t)
-                    .and_then(|()| guard::check_secrets(t, &self.inner.config.redactor))
+                    .and_then(|()| guard::check_secrets(t, redactor))
                     .map_err(|r| ToolError::invalid_args(format!("title rejected: {r}")))?;
                 t.to_owned()
             }
             None => np.default_title(),
         };
+        if guard::is_overview(&np) {
+            self.check_overview_room(&np, &accepted)?;
+        }
         let run = &self.inner.config.run_id;
-        let bullet = Bullet::new(text.clone(), run_link(run), self.today());
-        let message = commit_message("write", &np, std::slice::from_ref(&text), run);
-        let (existed, published) = self
+        let date = self.today();
+        let message = commit_message("write", &np, &accepted, run);
+        let ((existed, added), published) = self
             .inner
             .checkout
             .write(&message, |dir| {
@@ -390,27 +453,51 @@ impl MemoryTool {
                 let mut note = current
                     .as_deref()
                     .map_or_else(|| Note::with_title(&title), Note::parse);
-                if note.contains_text(&bullet.text) {
-                    return Ok(existed);
+                let mut added = Vec::new();
+                for text in &accepted {
+                    if note.contains_text(text) {
+                        continue;
+                    }
+                    note.push(Bullet::new(text.clone(), run_link(run), date));
+                    added.push(text.clone());
                 }
-                note.push(bullet.clone());
+                if added.is_empty() {
+                    return Ok((existed, added));
+                }
                 if let Some(parent) = file.parent() {
                     fs::create_dir_all(parent).map_err(io_err(format!("creating {np}")))?;
                 }
                 fs::write(&file, note.render()).map_err(io_err(format!("writing {np}")))?;
-                Ok(existed)
+                Ok((existed, added))
             })
             .map_err(drive_err)?;
+        let mut out = match &published {
+            None => format!("Already in memory ({np}); nothing changed."),
+            Some(commit) if items.len() == 1 => format!(
+                "Saved to {np} (commit {}). It applies to future sessions.",
+                short(&commit.commit)
+            ),
+            Some(commit) => format!(
+                "Saved {} bullet(s) to {np} (commit {}). It applies to future sessions.",
+                added.len(),
+                short(&commit.commit)
+            ),
+        };
+        let duplicates = accepted.len() - added.len();
+        if published.is_some() && duplicates > 0 {
+            let _ = write!(out, " {duplicates} already in memory.");
+        }
+        if !rejected.is_empty() {
+            let _ = write!(
+                out,
+                " Not saved: {} Resend only those, fixed, or skip them.",
+                describe_rejections(&rejected)
+            );
+        }
         let Some(commit) = published else {
-            return Ok(text_outcome(format!(
-                "Already in memory ({np}); nothing changed."
-            )));
+            return Ok(text_outcome(out));
         };
         self.reindex(&np);
-        let out = format!(
-            "Saved to {np} (commit {}). It applies to future sessions.",
-            short(&commit.commit)
-        );
         Ok(MemoryOutcome {
             output: out,
             change: Some(MemoryChange {
@@ -420,10 +507,28 @@ impl MemoryTool {
                     MemoryAction::Written
                 },
                 path: np,
-                bullets: vec![text],
+                bullets: added,
                 commit,
             }),
         })
+    }
+
+    /// Refuses a write that would grow a project's overview note past
+    /// [`guard::MAX_OVERVIEW_BULLETS`].
+    fn check_overview_room(&self, np: &NotePath, new: &[String]) -> Result<(), ToolError> {
+        let note = read_note_at(self.inner.checkout.path(), np)
+            .map_err(drive_err)?
+            .map(|t| Note::parse(&t))
+            .unwrap_or_default();
+        let have = note.bullets().count();
+        let adding = new.iter().filter(|t| !note.contains_text(t)).count();
+        if have + adding > guard::MAX_OVERVIEW_BULLETS {
+            return Err(ToolError::invalid_args(format!(
+                "memory not saved: {np} holds at most {} bullets and already has {have}; this write adds {adding}. Keep the overview compact: read it, forget or merge bullets, then write again. Save gotchas in another project note.",
+                guard::MAX_OVERVIEW_BULLETS
+            )));
+        }
+        Ok(())
     }
 
     fn forget(&self, path: &str, text: &str) -> Result<MemoryOutcome, ToolError> {
@@ -528,6 +633,15 @@ pub fn commit_message(verb: &str, path: &NotePath, bullets: &[String], run_id: &
     }
     let _ = write!(m, "\nRun: {}", run_link(run_id));
     m
+}
+
+/// "bullet 2: <reason>; bullet 4: <reason>." for a multi-bullet write.
+fn describe_rejections(rejected: &[(usize, Rejection)]) -> String {
+    let parts: Vec<String> = rejected
+        .iter()
+        .map(|(i, r)| format!("bullet {i}: {r}"))
+        .collect();
+    parts.join("; ")
 }
 
 fn text_outcome(output: String) -> MemoryOutcome {

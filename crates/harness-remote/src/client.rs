@@ -35,7 +35,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
-use harness_tools::exec::{ExitOutcome, OutputChunk};
+use harness_tools::exec::{ExitOutcome, Liveness, OutputChunk};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -50,10 +50,10 @@ use crate::probe::ProbeReport;
 use crate::protocol::DataResult;
 use crate::protocol::{
     AttachParams, AttachResult, ChangesParams, CompressionOffer, DEFAULT_COMPRESS_MIN,
-    DEFAULT_ZSTD_LEVEL, ExecExitNote, ExecOutputNote, HELPER_VERSION, HelloParams, HelloResult,
-    JobParams, JobsResult, MAX_FRAME, MIN_PROTOCOL_VERSION, Message, PROTOCOL_VERSION, ProbeParams,
-    PruneParams, PruneResult, ReadParams, RemoveParams, RootParams, RpcError, WriteParams, ZSTD,
-    b64, codes, methods,
+    DEFAULT_ZSTD_LEVEL, ExecExitNote, ExecLivenessNote, ExecOutputNote, HELPER_VERSION,
+    HelloParams, HelloResult, JobParams, JobsResult, MAX_FRAME, MIN_PROTOCOL_VERSION, Message,
+    PROTOCOL_VERSION, ProbeParams, PruneParams, PruneResult, ReadParams, RemoveParams, RootParams,
+    RpcError, WriteParams, ZSTD, b64, codes, methods,
 };
 use crate::ssh::{SshError, SshTarget};
 use crate::sync::{ChangeSet, Manifest};
@@ -606,6 +606,7 @@ impl Live {
 struct JobSink {
     output: mpsc::UnboundedSender<OutputChunk>,
     status: Option<oneshot::Sender<ExitOutcome>>,
+    liveness: mpsc::UnboundedSender<Liveness>,
     next_seq: u64,
 }
 
@@ -730,7 +731,13 @@ const IDEMPOTENT: &[&str] = &[
     methods::FS_STAT,
     methods::FS_LIST,
     methods::FS_GLOB,
+    methods::FS_FIND,
     methods::FS_SET_MODE,
+    // Whole-file writes: sending one twice leaves the same file. Retrying
+    // matters when the connection drops right after the request was
+    // queued (seen on macOS CI after a helper restart).
+    methods::FS_WRITE,
+    methods::FS_REPLACE,
     methods::EXEC_LIST,
     methods::PROBE,
     methods::SYNC_MANIFEST,
@@ -1228,25 +1235,29 @@ impl RemoteClient {
         Ok(r.removed)
     }
 
-    /// Register a job before starting it, so no output is missed.
+    /// Register a job before starting it, so no output is missed. Returns
+    /// its output, exit status and liveness channels.
     pub(crate) fn register_job(
         &self,
         job: &str,
     ) -> (
         mpsc::UnboundedReceiver<OutputChunk>,
         oneshot::Receiver<ExitOutcome>,
+        mpsc::UnboundedReceiver<Liveness>,
     ) {
         let (otx, orx) = mpsc::unbounded_channel();
         let (stx, srx) = oneshot::channel();
+        let (ltx, lrx) = mpsc::unbounded_channel();
         self.inner.lock_jobs().insert(
             job.to_owned(),
             JobSink {
                 output: otx,
                 status: Some(stx),
+                liveness: ltx,
                 next_seq: 0,
             },
         );
-        (orx, srx)
+        (orx, srx, lrx)
     }
 
     /// Forget a job (start failed).
@@ -1604,6 +1615,18 @@ fn dispatch_note(inner: &Inner, live: &Live, method: &str, params: Value, data: 
                 let _ = sink.output.send(OutputChunk {
                     stream: n.stream.into(),
                     data: n.data,
+                });
+            }
+        }
+        methods::EXEC_LIVENESS => {
+            let Ok(n) = serde_json::from_value::<ExecLivenessNote>(params) else {
+                return;
+            };
+            if let Some(sink) = inner.lock_jobs().get(&n.job) {
+                let _ = sink.liveness.send(Liveness {
+                    cpu: Duration::from_millis(n.cpu_ms),
+                    procs: n.procs,
+                    active: n.active,
                 });
             }
         }

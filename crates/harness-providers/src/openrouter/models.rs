@@ -51,13 +51,15 @@ impl ModelInfo {
         })
     }
 
-    /// The model's capabilities.
+    /// The model's capabilities. `caching` is set for Anthropic models,
+    /// whose requests carry explicit cache breakpoints
+    /// ([`super::request::uses_cache_breakpoints`]).
     pub fn capabilities(&self) -> Capabilities {
         Capabilities {
             tools: self.supports_tools,
             parallel_tool_calls: self.supports_tools,
             thinking: self.supports_reasoning,
-            caching: false,
+            caching: super::request::uses_cache_breakpoints(&self.id),
             images: self.supports_images,
             context_window: self.context_length,
             max_output_tokens: self.max_completion_tokens,
@@ -115,5 +117,8 @@ mod tests {
             "{err}"
         );
         assert!(parse_catalog(&json!({})).is_err());
+        assert!(!c.caching);
+        let claude = ModelInfo::from_json(&json!({"id": "anthropic/claude-haiku-5.5"})).unwrap();
+        assert!(claude.capabilities().caching);
     }
 }

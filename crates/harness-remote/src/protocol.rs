@@ -21,6 +21,9 @@
 //! Server-to-client notifications ([`methods::EXEC_OUTPUT`],
 //! [`methods::EXEC_EXIT`]) carry a per-job sequence number so a client that
 //! reattaches after a disconnect can resume without duplicates.
+//! [`methods::EXEC_LIVENESS`] samples are ephemeral: sent only to the
+//! attached client, never logged or replayed, and ignored by clients that
+//! predate them.
 
 use std::io;
 use std::path::PathBuf;
@@ -84,6 +87,10 @@ pub mod methods {
     pub const FS_LIST: &str = "fs.list";
     /// Glob under a root: `GlobParams` -> `GlobResult`.
     pub const FS_GLOB: &str = "fs.glob";
+    /// File search for the grep and glob tools:
+    /// `harness_tools::search::FindQuery` -> `FindResult`. Helpers that
+    /// predate it answer `METHOD_NOT_FOUND`.
+    pub const FS_FIND: &str = "fs.find";
     /// Start a process: `ExecStartParams`.
     pub const EXEC_START: &str = "exec.start";
     /// Kill a process group: `JobParams`.
@@ -98,6 +105,8 @@ pub mod methods {
     pub const EXEC_OUTPUT: &str = "exec.output";
     /// Notification: process exit (`ExecExitNote`).
     pub const EXEC_EXIT: &str = "exec.exit";
+    /// Notification: liveness sample of a running job (`ExecLivenessNote`).
+    pub const EXEC_LIVENESS: &str = "exec.liveness";
     /// Host resources: `ProbeParams` -> `ProbeReport`.
     pub const PROBE: &str = "probe";
     /// Manifest of a directory tree: `RootParams` -> `Manifest`.
@@ -178,6 +187,11 @@ impl RpcError {
 
     /// Map a workspace error onto a wire error, keeping the path in `data`.
     pub fn from_ws(err: &WsError) -> Self {
+        if let WsError::InvalidPattern { pattern, reason } = err {
+            let mut e = Self::new(codes::INVALID_PATTERN, err.to_string());
+            e.data = Some(json!({ "pattern": pattern, "reason": reason }));
+            return e;
+        }
         let (code, path) = match err {
             WsError::NotFound(p) => (codes::NOT_FOUND, Some(p)),
             WsError::PermissionDenied(p) => (codes::PERMISSION_DENIED, Some(p)),
@@ -201,10 +215,22 @@ impl RpcError {
             codes::PERMISSION_DENIED => WsError::PermissionDenied(path),
             codes::IS_DIRECTORY => WsError::IsDirectory(path),
             codes::NOT_A_DIRECTORY => WsError::NotADirectory(path),
-            codes::INVALID_PATTERN => WsError::InvalidPattern {
-                pattern: path.to_string_lossy().into_owned(),
-                reason: self.message,
-            },
+            codes::INVALID_PATTERN => {
+                let field = |k: &str| {
+                    self.data
+                        .as_ref()
+                        .and_then(|d| d.get(k))
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned)
+                };
+                match (field("pattern"), field("reason")) {
+                    (Some(pattern), Some(reason)) => WsError::InvalidPattern { pattern, reason },
+                    _ => WsError::InvalidPattern {
+                        pattern: path.to_string_lossy().into_owned(),
+                        reason: self.message,
+                    },
+                }
+            }
             _ => WsError::Io {
                 path,
                 source: io::Error::other(self.message),
@@ -777,6 +803,20 @@ pub struct ExecExitNote {
     pub seq: u64,
     /// How the process ended.
     pub outcome: WireOutcome,
+}
+
+/// `exec.liveness` notification: a periodic sample of a job's process
+/// group (CPU time and process counts).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecLivenessNote {
+    /// Job id.
+    pub job: String,
+    /// CPU time used by the group's live processes, in ms.
+    pub cpu_ms: u64,
+    /// Live processes in the group.
+    pub procs: u32,
+    /// Processes running, runnable or in uninterruptible wait.
+    pub active: u32,
 }
 
 /// One job in `exec.list`.

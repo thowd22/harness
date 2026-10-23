@@ -136,6 +136,34 @@ only if the agent read `docs/guide/` or `backlog/docs/` (or the GitHub
 repository) before answering and changed no files. The `scripts/bad`
 variant answers from a guess and is caught (`tests/identity.rs`).
 
+## Search
+
+`crates/harness-eval/suites/search/suite.yaml` measures how many model
+calls a multi-file lookup takes. Its task (`find-session-spawns`: which
+project files start a process with `setsid`, and in which function,
+ignoring a gitignored `vendor/` copy) is modelled on run 01a1691a, where
+a real model spent about twenty one-command bash turns (`cd <repo> &&
+grep -rn ...`, then `sed -n` per file) on such a question. The bundled
+script answers with one `grep` call (3 model calls); `scripts/bash-only`
+replays the recorded bash pattern (6 model calls). Both pass the same
+checks, and `tests/search.rs` asserts the difference. Those counts are the
+lengths of the two scripts, so this test is a regression check of the
+suite, not evidence that a model uses fewer calls. The recorded run itself
+cannot be replayed (it used a private repository), so the measurement is a
+separate, ignored test that runs the task through the binary with a real
+model (it spends provider credit) and requires fewer model calls than the
+bash replay:
+
+```sh
+cargo build -p harness
+HARNESS_BIN=$PWD/target/debug/harness HARNESS_EVAL_LIVE_MODEL=sonnet \
+  cargo test -p harness-eval --test search -- --ignored
+```
+
+Credentials come from the provider's API key variable, or from the ini
+named by `HARNESS_EVAL_LIVE_CONFIG`; home and data directories are
+temporary.
+
 ## Long tasks
 
 `crates/harness-eval/suites/long-tasks/suite.yaml` measures whether the

@@ -415,6 +415,27 @@ mod tests {
     }
 
     #[test]
+    fn openrouter_cache_prices_are_read_and_charged() {
+        // The catalog entry of an Anthropic model, as OpenRouter lists it.
+        let m = openrouter_model(&json!({"id": "anthropic/claude-haiku-5.5",
+            "pricing": {"prompt": "0.0000001", "completion": "0.0000005",
+                "input_cache_read": "0.00000001", "input_cache_write": "0.000000125"}}))
+        .unwrap();
+        let price = m.price.unwrap();
+        assert_eq!(
+            (price.cache_read, price.cache_write),
+            (Some(0.01), Some(0.125))
+        );
+        let usage = crate::model::Usage {
+            input_tokens: 1_000_000,
+            cache_read_tokens: 1_000_000,
+            cache_write_tokens: 1_000_000,
+            ..Default::default()
+        };
+        assert!((price.cost(&usage) - (0.1 + 0.01 + 0.125)).abs() < 1e-9);
+    }
+
+    #[test]
     fn debug_never_prints_the_key() {
         let s = ModelListSource::new("openai", Some("sk-secret"), None).unwrap();
         let d = format!("{s:?}");

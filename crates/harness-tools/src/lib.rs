@@ -8,15 +8,23 @@
 //!   [`conformance`] is the shared suite every implementation must pass.
 //! - [`tool`]: context, output, errors and events shared by all tools.
 //! - [`read`], [`write`](mod@write), [`edit`], [`bash`]: the four core tools.
+//! - [`grep`], [`glob`]: read-only search tools; [`search`] is their engine.
 //! - [`tracker`]: stale-read detection; [`spill`]: output budget.
+//! - [`liveness`]: cheap CPU/process sampling of a running process group.
+//! - [`jobs`]: background bash jobs and the `bash_jobs` tool.
 
 pub mod bash;
 pub mod config;
 pub mod conformance;
 pub mod edit;
 pub mod exec;
+pub mod glob;
+pub mod grep;
+pub mod jobs;
+pub mod liveness;
 pub mod local;
 pub mod read;
+pub mod search;
 pub mod spill;
 pub mod tool;
 pub mod tracker;

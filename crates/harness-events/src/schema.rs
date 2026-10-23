@@ -176,6 +176,10 @@ pub struct Usage {
     /// Reasoning tokens (subset of or in addition to output, per provider).
     #[serde(default)]
     pub reasoning: u64,
+    /// Input tokens written to the prompt cache. They are part of `input`
+    /// (billed at the cache-write rate). Left out of the log when zero.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cache_write: u64,
 }
 
 impl Usage {
@@ -185,6 +189,7 @@ impl Usage {
         self.cached_input += other.cached_input;
         self.output += other.output;
         self.reasoning += other.reasoning;
+        self.cache_write += other.cache_write;
     }
 }
 
@@ -327,6 +332,18 @@ pub enum OutputStream {
     Stdout,
     /// Standard error.
     Stderr,
+}
+
+/// A liveness sample of a running tool's process group, carried by
+/// [`EventKind::ToolProgress`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ProcessLiveness {
+    /// CPU time the group's live processes have used so far, in ms.
+    pub cpu_ms: u64,
+    /// Live processes in the group, the shell included.
+    pub procs: u32,
+    /// Processes running, runnable or in uninterruptible wait.
+    pub active: u32,
 }
 
 /// Which stream a [`EventKind::Delta`] belongs to.
@@ -599,6 +616,44 @@ pub enum EventKind {
         /// The output text (stream-redacted like deltas).
         text: String,
     },
+    /// Progress of a running tool call (bash): its timeout, then periodic
+    /// liveness samples of its process group (bounded interval, a few
+    /// seconds). Neither field is required: a remote host without the
+    /// helper reports no liveness.
+    ToolProgress {
+        /// The tool call.
+        call_id: String,
+        /// The call's effective timeout in ms.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<u64>,
+        /// The latest liveness sample.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        liveness: Option<ProcessLiveness>,
+    },
+    /// A background bash job (`run_in_background`) started or ended: a
+    /// full snapshot, so the latest event of a job shows its state. It
+    /// names the bash call that started it, and its end can arrive long
+    /// after that call's `tool_result`.
+    BashJob {
+        /// The bash call that started the job.
+        call_id: String,
+        /// Job id (`j1`, ...), unique in the session.
+        job_id: String,
+        /// The command line.
+        command: String,
+        /// `running`, `exited`, `failed` (non-zero exit), `killed` (signal),
+        /// `timed_out`, `stopped` or `lost`.
+        state: String,
+        /// Exit code, when it exited.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
+        /// Run time, once it ended.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+        /// Its log file on the harness machine.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
+    },
     /// The policy engine decided a tool call.
     PolicyDecision {
         /// The tool call.
@@ -726,6 +781,8 @@ impl EventKind {
             Self::Error { .. } => "error",
             Self::UserMessage { .. } => "user_message",
             Self::ToolOutput { .. } => "tool_output",
+            Self::ToolProgress { .. } => "tool_progress",
+            Self::BashJob { .. } => "bash_job",
             Self::PolicyDecision { .. } => "policy_decision",
             Self::RemoteOp { .. } => "remote_op",
             Self::RemoteConnection { .. } => "remote_connection",
@@ -805,6 +862,7 @@ mod tests {
                     cached_input: 2,
                     output: 3,
                     reasoning: 4,
+                    cache_write: 1,
                 },
                 stop_reason: Some("end_turn".into()),
                 response: None,
@@ -874,6 +932,24 @@ mod tests {
                 call_id: "t".into(),
                 stream: OutputStream::Stderr,
                 text: "warning".into(),
+            },
+            EventKind::ToolProgress {
+                call_id: "t".into(),
+                timeout_ms: Some(600_000),
+                liveness: Some(ProcessLiveness {
+                    cpu_ms: 1_234,
+                    procs: 3,
+                    active: 1,
+                }),
+            },
+            EventKind::BashJob {
+                call_id: "t".into(),
+                job_id: "j1".into(),
+                command: "cargo test".into(),
+                state: "failed".into(),
+                exit_code: Some(101),
+                duration_ms: Some(192_000),
+                output: Some("/tmp/harness-jobs-x/j1.log".into()),
             },
             EventKind::PolicyDecision {
                 call_id: "t".into(),

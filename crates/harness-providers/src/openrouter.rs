@@ -13,6 +13,11 @@
 //!   its absence.
 //! - Routing: `provider_order` and `allow_fallbacks` become the request's
 //!   `provider` object.
+//! - Prompt caching: for Anthropic models (`anthropic/...`), which cache
+//!   only with explicit markers, the body carries up to four
+//!   `cache_control` breakpoints placed like the Anthropic provider's
+//!   (see [`request::uses_cache_breakpoints`]). Other models cache
+//!   automatically and get no markers.
 //! - Usage accounting is always requested (`usage.include`). The reported
 //!   cost arrives as a [`Notice::Cost`](crate::openai::notice::Notice)
 //!   block; read it with [`crate::openai::notice::reported_cost`].
@@ -67,6 +72,19 @@ pub struct OpenRouterOptions {
     /// `allow_fallbacks`: whether OpenRouter may use providers outside
     /// `provider_order`. `None` leaves OpenRouter's default.
     pub allow_fallbacks: Option<bool>,
+    /// `cache_ttl`: lifetime of the prompt-cache entries written for
+    /// Anthropic models. `None` means the 5-minute default.
+    pub cache_ttl: Option<CacheTtl>,
+}
+
+/// Prompt-cache lifetime requested on `cache_control` breakpoints.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CacheTtl {
+    /// Five minutes (the default; no `ttl` field is sent).
+    #[default]
+    FiveMinutes,
+    /// One hour (`"ttl": "1h"`; writes cost more than 5-minute writes).
+    OneHour,
 }
 
 /// Attribution headers for `app_name`: `X-Title` always, `HTTP-Referer`
@@ -288,6 +306,7 @@ mod tests {
             app_name: Some("harness".into()),
             provider_order: vec!["anthropic".into(), "openai".into()],
             allow_fallbacks: Some(true),
+            cache_ttl: None,
         }
     }
 
@@ -467,10 +486,120 @@ mod tests {
                     "format": "anthropic-claude-v1", "signature": "SIG"}])
         );
         assert_eq!(msgs[1]["tool_calls"][0]["id"], json!("toolu_1"));
+        // An Anthropic model: tool output is a content part, and as the
+        // final message it carries a cache breakpoint.
         assert_eq!(
             msgs[2],
-            json!({"role": "tool", "tool_call_id": "toolu_1", "content": "fn main(){}"})
+            json!({"role": "tool", "tool_call_id": "toolu_1", "content": [
+                {"type": "text", "text": "fn main(){}", "cache_control": {"type": "ephemeral"}}]})
         );
+    }
+
+    fn text_turn(text: &str, cached: u64, written: u64) -> String {
+        sse_body(&[
+            (
+                "",
+                json!({"id": "gen-t", "choices": [{"delta": {"content": text}, "finish_reason": "stop"}]}),
+            ),
+            (
+                "",
+                json!({"id": "gen-t", "choices": [], "usage": {"prompt_tokens": 1000 + cached + written,
+                    "completion_tokens": 1, "cost": 0.001,
+                    "prompt_tokens_details": {"cached_tokens": cached, "cache_write_tokens": written}}}),
+            ),
+        ]) + "data: [DONE]\n\n"
+    }
+
+    /// `v` without `cache_control` keys.
+    fn unmarked(v: &serde_json::Value) -> serde_json::Value {
+        let mut v = v.clone();
+        if let Some(parts) = v["content"].as_array_mut() {
+            for p in parts {
+                if let Some(o) = p.as_object_mut() {
+                    o.remove("cache_control");
+                }
+            }
+        }
+        v
+    }
+
+    /// Runs a three-call session (tool call, tool result, follow-up) and
+    /// returns the request bodies.
+    async fn session_bodies(layers: bool) -> Vec<serde_json::Value> {
+        let server = MockServer::start(vec![
+            Canned::sse(tool_turn()),
+            Canned::sse(text_turn("done", 0, 900)),
+            Canned::sse(text_turn("ok", 900, 50)),
+        ])
+        .await;
+        let p = provider(&server.base_url);
+        let mut req = request();
+        req.system = Some("You are terse.\n\n## Memory\n- prefer nextest".into());
+        if layers {
+            req.system_layers = vec!["You are terse.\n\n".len()];
+        }
+        let first = p
+            .complete(req.clone(), CancellationToken::new())
+            .await
+            .unwrap();
+        req.messages.push(first.message);
+        req.messages.push(Message {
+            role: Role::User,
+            content: vec![ContentBlock::tool_result("toolu_1", "fn main(){}", false)],
+        });
+        let second = p
+            .complete(req.clone(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(second.usage.cache_write_tokens, 900);
+        req.messages.push(second.message);
+        req.messages.push(Message::user("next"));
+        let third = p.complete(req, CancellationToken::new()).await.unwrap();
+        assert_eq!(
+            (
+                third.usage.cache_read_tokens,
+                third.usage.cache_write_tokens,
+                third.usage.input_tokens
+            ),
+            (900, 50, 1000)
+        );
+        server.requests().iter().map(|r| r.json()).collect()
+    }
+
+    #[tokio::test]
+    async fn later_requests_reuse_the_cached_prefix() {
+        for layers in [false, true] {
+            let bodies = session_bodies(layers).await;
+            for pair in bodies.windows(2) {
+                let (a, b) = (&pair[0], &pair[1]);
+                // Tools and system (with their breakpoints) are byte-identical.
+                assert_eq!(a["tools"].to_string(), b["tools"].to_string());
+                assert_eq!(a["messages"][0].to_string(), b["messages"][0].to_string());
+                assert!(a["tools"][0].get("cache_control").is_some());
+                // Every earlier message is byte-identical apart from moved
+                // markers, so the next call's prefix matches what this call
+                // wrote up to its last breakpoint.
+                let (am, bm) = (
+                    a["messages"].as_array().unwrap(),
+                    b["messages"].as_array().unwrap(),
+                );
+                assert!(bm.len() > am.len());
+                for (x, y) in am.iter().zip(bm) {
+                    assert_eq!(unmarked(x).to_string(), unmarked(y).to_string());
+                }
+                let last = am.last().unwrap();
+                assert!(last.to_string().contains("cache_control"), "{last}");
+                if !layers {
+                    // With room for two message breakpoints, the previous
+                    // final message keeps its marker, byte for byte.
+                    assert_eq!(last.to_string(), bm[am.len() - 1].to_string());
+                }
+            }
+            for b in &bodies {
+                let n = b.to_string().matches("cache_control").count();
+                assert!(n <= request::MAX_CACHE_BREAKPOINTS, "{n} breakpoints");
+            }
+        }
     }
 
     #[tokio::test]

@@ -498,6 +498,7 @@ async fn builtin(d: &mut Driver, b: Builtin, cmd: &Command) {
             }
         }
         Builtin::Mcp => super::mcp::open(d).await,
+        Builtin::Jobs => super::jobs::open(d).await,
         Builtin::Doctor => {
             let input = harness_eval::doctor::Input {
                 config: None,
@@ -1308,6 +1309,9 @@ pub(super) async fn panel_action(d: &mut Driver, id: &str) {
     if super::mcp::is_action(id) {
         return super::mcp::action(d, id).await;
     }
+    if super::jobs::is_action(id) {
+        return super::jobs::action(d, id).await;
+    }
     let Some(name) = id.strip_prefix(REMOTE_TEST) else {
         return;
     };
@@ -1489,6 +1493,7 @@ async fn run_workflow(
         headless: false,
         memory: h.memory.clone(),
         memory_cap: wf.memory,
+        jobs: h.jobs.clone(),
     })
     .await;
     let built = match built {
@@ -1532,11 +1537,17 @@ async fn run_workflow(
         .await;
     let task = tokio::spawn(async move {
         let crate::workflow::Built {
-            executor, recorder, ..
+            executor,
+            recorder,
+            jobs,
+            ..
         } = built;
         let outcome = executor
             .run(&wf, &inputs, None, &CancellationToken::new())
             .await;
+        // The run's background jobs end with it (recorded before the log
+        // closes, so the status line sees them end).
+        jobs.shutdown().await;
         let _ = recorder.finish().await;
         drop((executor, recorder));
         // Let the forwarder deliver the last events before it stops.

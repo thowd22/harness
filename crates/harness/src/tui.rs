@@ -11,6 +11,7 @@
 
 mod commands;
 pub mod demo;
+mod jobs;
 mod mcp;
 mod mcp_login;
 
@@ -161,6 +162,8 @@ struct Handles {
     context_window: u32,
     tools: Vec<harness_providers::model::ToolSpec>,
     system: Option<String>,
+    /// The session's background bash jobs (`/jobs`), also during a turn.
+    jobs: Option<harness_tools::jobs::JobManager>,
 }
 
 impl Handles {
@@ -179,6 +182,7 @@ impl Handles {
             context_window: core.model.context_window,
             tools: core.tool_specs(),
             system: core.conversation.system.clone(),
+            jobs: core.jobs(),
         }
     }
 }

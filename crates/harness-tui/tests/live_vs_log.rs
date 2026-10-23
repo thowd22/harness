@@ -90,6 +90,7 @@ async fn live_and_logged_streams_match() {
             cached_input: 0,
             output: 20,
             reasoning: 5,
+            cache_write: 0,
         },
         stop_reason: Some("end_turn".into()),
         response: None,

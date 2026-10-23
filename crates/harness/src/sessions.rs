@@ -346,6 +346,7 @@ pub async fn summarize(
                 cached_input: usage.cache_read_tokens,
                 output: usage.output_tokens,
                 reasoning: usage.reasoning_tokens,
+                cache_write: usage.cache_write_tokens,
             },
             stop_reason: response.stop.raw.clone(),
             response: Some(Payload::Json(

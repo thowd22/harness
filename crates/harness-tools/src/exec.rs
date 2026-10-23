@@ -11,12 +11,19 @@
 //! - the process runs in its own process group, and timeout, [`ExecHandle::kill`]
 //!   or dropping the handle kills the **whole group**;
 //! - all output is delivered before the exit outcome.
+//!
+//! An implementation may also report [`Liveness`] samples of the process
+//! group ([`ExecHandle::with_liveness`]); callers read them through
+//! [`ExecHandle::next_event`]. Implementations that cannot sample simply
+//! attach nothing.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};
+
+pub use crate::liveness::Liveness;
 
 /// Which output stream a chunk came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +41,15 @@ pub struct OutputChunk {
     pub stream: StreamKind,
     /// Raw bytes (not necessarily valid UTF-8 or line-aligned).
     pub data: Vec<u8>,
+}
+
+/// Something a running process reported: output or a liveness sample.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecEvent {
+    /// A piece of output.
+    Output(OutputChunk),
+    /// A periodic liveness sample of the process group.
+    Liveness(Liveness),
 }
 
 /// What to run.
@@ -130,6 +146,7 @@ pub struct ExecHandle {
     output: mpsc::UnboundedReceiver<OutputChunk>,
     kill: Option<oneshot::Sender<()>>,
     status: oneshot::Receiver<ExitOutcome>,
+    liveness: Option<mpsc::UnboundedReceiver<Liveness>>,
 }
 
 impl ExecHandle {
@@ -147,6 +164,35 @@ impl ExecHandle {
             output,
             kill: Some(kill),
             status,
+            liveness: None,
+        }
+    }
+
+    /// Attach a channel of [`Liveness`] samples (sent at a bounded
+    /// interval while the process runs). Without one, [`Self::next_event`]
+    /// yields output only and liveness is unknown.
+    pub fn with_liveness(mut self, liveness: mpsc::UnboundedReceiver<Liveness>) -> Self {
+        self.liveness = Some(liveness);
+        self
+    }
+
+    /// Next output chunk or liveness sample, or `None` once both output
+    /// streams are closed. Output is preferred when both are ready.
+    pub async fn next_event(&mut self) -> Option<ExecEvent> {
+        loop {
+            let Some(live) = self.liveness.as_mut() else {
+                return self.output.recv().await.map(ExecEvent::Output);
+            };
+            let sample = tokio::select! {
+                biased;
+                chunk = self.output.recv() => return chunk.map(ExecEvent::Output),
+                sample = live.recv() => sample,
+            };
+            match sample {
+                Some(s) => return Some(ExecEvent::Liveness(s)),
+                // The sampler stopped: output only from now on.
+                None => self.liveness = None,
+            }
         }
     }
 
@@ -168,11 +214,45 @@ impl ExecHandle {
             mut output,
             kill,
             status,
+            liveness,
         } = self;
         output.close();
+        drop(liveness);
         // Keep the kill sender alive while waiting so waiting does not kill.
         let outcome = status.await.map_err(|_| ExecError::Lost);
         drop(kill);
+        outcome
+    }
+
+    /// Like [`Self::wait`], but kill the process group as soon as `kill`
+    /// completes (with any value), so a wrapper that relays this handle can
+    /// still kill after the output streams have closed.
+    pub async fn wait_or_kill(
+        self,
+        kill: impl std::future::Future<Output = impl Sized>,
+    ) -> Result<ExitOutcome, ExecError> {
+        let ExecHandle {
+            mut output,
+            kill: mut kill_tx,
+            mut status,
+            liveness,
+        } = self;
+        output.close();
+        drop(liveness);
+        tokio::pin!(kill);
+        let mut armed = true;
+        let outcome = loop {
+            tokio::select! {
+                outcome = &mut status => break outcome.map_err(|_| ExecError::Lost),
+                _ = &mut kill, if armed => {
+                    armed = false;
+                    if let Some(tx) = kill_tx.take() {
+                        let _ = tx.send(());
+                    }
+                }
+            }
+        };
+        drop(kill_tx);
         outcome
     }
 
@@ -227,6 +307,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn next_event_interleaves_liveness_and_survives_a_stopped_sampler() {
+        let (otx, orx) = mpsc::unbounded_channel();
+        let (ktx, _krx) = oneshot::channel();
+        let (_stx, srx) = oneshot::channel();
+        let (ltx, lrx) = mpsc::unbounded_channel();
+        let mut h = ExecHandle::new(orx, ktx, srx).with_liveness(lrx);
+        let sample = Liveness {
+            cpu: Duration::from_millis(40),
+            procs: 2,
+            active: 1,
+        };
+        ltx.send(sample).unwrap();
+        assert_eq!(h.next_event().await, Some(ExecEvent::Liveness(sample)));
+        drop(ltx);
+        let chunk = OutputChunk {
+            stream: StreamKind::Stdout,
+            data: b"hi".to_vec(),
+        };
+        otx.send(chunk.clone()).unwrap();
+        drop(otx);
+        assert_eq!(h.next_event().await, Some(ExecEvent::Output(chunk)));
+        assert_eq!(h.next_event().await, None);
+        // Without a liveness channel it is plain output.
+        let (_otx, orx) = mpsc::unbounded_channel::<OutputChunk>();
+        let (ktx, _krx) = oneshot::channel();
+        let (_stx, srx) = oneshot::channel();
+        let mut h = ExecHandle::new(orx, ktx, srx);
+        drop(_otx);
+        assert_eq!(h.next_event().await, None);
+    }
+
+    #[tokio::test]
     async fn dropping_handle_signals_kill() {
         let (_otx, orx) = mpsc::unbounded_channel();
         let (ktx, krx) = oneshot::channel();
@@ -234,5 +346,37 @@ mod tests {
         drop(ExecHandle::new(orx, ktx, srx));
         // Sender dropped: the implementation's receiver resolves with Err.
         assert!(krx.await.is_err());
+    }
+
+    #[tokio::test]
+    async fn wait_or_kill_kills_on_request_and_otherwise_just_waits() {
+        // `kill` completes: the implementation sees a kill, then reports.
+        let (_otx, orx) = mpsc::unbounded_channel::<OutputChunk>();
+        let (ktx, krx) = oneshot::channel();
+        let (stx, srx) = oneshot::channel();
+        let (req_tx, req_rx) = oneshot::channel::<()>();
+        let waiter = tokio::spawn(ExecHandle::new(orx, ktx, srx).wait_or_kill(req_rx));
+        req_tx.send(()).unwrap();
+        assert!(krx.await.is_ok(), "kill sent");
+        let killed = ExitOutcome {
+            killed: true,
+            ..Default::default()
+        };
+        stx.send(killed).unwrap();
+        assert_eq!(waiter.await.unwrap().unwrap(), killed);
+
+        // `kill` never completes: no kill while waiting, like `wait`.
+        let (_otx, orx) = mpsc::unbounded_channel::<OutputChunk>();
+        let (ktx, mut krx) = oneshot::channel();
+        let (stx, srx) = oneshot::channel();
+        let waiter =
+            tokio::spawn(ExecHandle::new(orx, ktx, srx).wait_or_kill(std::future::pending::<()>()));
+        tokio::task::yield_now().await;
+        assert!(
+            krx.try_recv()
+                .is_err_and(|e| e == oneshot::error::TryRecvError::Empty)
+        );
+        stx.send(ExitOutcome::default()).unwrap();
+        assert!(waiter.await.unwrap().is_ok());
     }
 }

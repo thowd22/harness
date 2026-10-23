@@ -59,7 +59,7 @@ policy:
 verify: cargo test
 ```
 
-`tools` picks from `read, write, edit, bash, todo`, plus MCP tools as
+`tools` picks from `read, write, edit, bash, grep, glob, todo`, plus MCP tools as
 `mcp:<server>/<tool>` (for example `mcp:github/create_issue` or
 `mcp:db/*`) from servers defined in harness.ini (see
 [MCP servers](../mcp.md#tools-for-agents)); `memory` is `off`,

@@ -156,7 +156,11 @@ fn identity_layer_opens_the_cached_prefix_of_every_request() {
         assert!(anthropic.starts_with(IDENTITY), "{}", a.item.name);
         let openai = b["openai"]["instructions"].as_str().unwrap();
         assert!(openai.starts_with(IDENTITY), "{}", a.item.name);
-        let openrouter = b["openrouter"]["messages"][0]["content"].as_str().unwrap();
+        // Anthropic models on OpenRouter get the system prompt as content
+        // parts (for cache breakpoints).
+        let openrouter = b["openrouter"]["messages"][0]["content"][0]["text"]
+            .as_str()
+            .unwrap();
         assert!(openrouter.starts_with(IDENTITY), "{}", a.item.name);
     }
 }

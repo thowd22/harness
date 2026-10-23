@@ -39,7 +39,8 @@ works), pending approvals, the input, and the status line.
 - Errors, retries, verify results and memory updates appear inline as one-line
   event cards (`✗`, `↻`, `✔`, `◆`). Nothing opens a dialog.
 - Subagents get a live card with a spinner, model, remote host, their last
-  action, elapsed time and cost. Enter or a click opens the agent.
+  action, elapsed time and cost. Enter or a click on its header opens the
+  agent (its body is text you can select).
 - Long sessions stay fast: only what is on screen is laid out, and finished
   entries are cached.
 
@@ -100,9 +101,11 @@ timestamp. The card background is tinted by its state.
 | MCP tools | `mcp <server> › <tool>` and the arguments sent to the server (also for calls through `mcp_tools`) | the server's output (`spill:…` pointer when it was cut) |
 
 Bodies longer than `[ui] tool_preview_lines` (default 8) are collapsed with
-`… N more lines · Enter to expand`. Click a card, or focus it with
-Shift+Tab / arrows and press Enter, to expand or collapse it; Esc returns to
-the input. A failed call always shows the complete error message the model
+`… N more lines · Enter to expand`. Click a card (its header, body or the
+expand hint), or focus it with Shift+Tab / arrows and press Enter, to expand
+or collapse it; Esc returns to the input. On the body the click acts on the
+release, so dragging over its output selects text instead (see
+[tui.md](tui.md#copy-and-paste)). A failed call always shows the complete error message the model
 received. Calls made in parallel in one turn are grouped under
 `⧉ N parallel calls · 2 ok · 1 running`.
 
@@ -119,7 +122,7 @@ time, live token counts, the turn's cost and the interrupt key:
 
 ```
 ⠹ thinking 3.1s · turn 4 · 12.3s · ↑12.4k (cache 11.9k) ↓812 · $0.021 · ctrl+c to interrupt
-⠼ running bash: cargo test parse 8.1s · streaming 214 lines · turn 4 · …
+⠼ running bash: cargo test parse 8.1s of 10m · cpu 6.3s (4 processes) · streaming 214 lines · turn 4 · …
 ⠧ retrying in 4s (429 rate limited, attempt 2/5) …
 ⏸ waiting for approval: git push origin main …
 ```
@@ -128,15 +131,45 @@ Phases: sending, waiting for first token, thinking, writing, running a tool
 (name and summary), retrying (reason and countdown), waiting for approval,
 verifying, compacting and syncing to a remote host.
 
-If no data arrives from the provider, or no output from a running tool, for
-`[ui] stall_after` (default 20 s), the line turns orange:
-`⚠ no data for 21s (provider stream)`. Waiting for you never counts as a
-stall.
+What the line says when nothing visible is happening depends on what is
+being waited on (`[ui] stall_after`, default 20 s, sets the threshold;
+`0` turns detection off):
+
+- **Waiting on the model.** If no data arrives from the provider stream for
+  `stall_after`, the line turns orange and says so, with the silent time:
+  `⚠ waiting on the model: no data for 41s · waiting for first token 41s · …`.
+- **A tool running and alive.** A running tool is shown as working, never
+  as stalled, with its elapsed time against its timeout (`bash_timeout`,
+  or the call's own timeout capped at `bash_max_timeout`). For `bash`,
+  harness samples the command's process group every 3 s (CPU time and live
+  processes; on Linux from `/proc`, on macOS with one `ps` run, never per
+  frame) and shows the group's CPU time, so a test suite that prints
+  nothing for minutes still reads as busy:
+  `⠹ running bash: cargo test --workspace 4m12s of 10m · cpu 14m03s (9 processes) · …`.
+  When one response asks for several tools, the line follows the call
+  that is actually running (bash reports when it starts), and a call
+  that waited for approval resumes as the running tool once approved.
+- **A tool running but idle.** When a sampled tool has printed nothing,
+  used no CPU, had no runnable process and started or lost no process for
+  `stall_after` (at least 6 s, two samples), a soft hint in the `warn`
+  colour names it and the cancel key, without an alarm icon:
+  `⠹ running bash: sleep 600 1m02s of 10m · cpu 4ms (2 processes) · bash quiet for 59s (no output, no CPU) · ctrl+c to cancel`.
+  It does not claim the tool is hung: `sleep`, a lock wait or a slow
+  network call is idle in the same way. Press the interrupt key to cancel
+  it if it should not be idle.
+- **Liveness unknown.** Tools that are not sampled (other tools, a remote
+  host reached through the plain-shell fallback instead of the helper)
+  fall back to elapsed time against the timeout, plus a neutral
+  `no output for 45s` note after `stall_after`; they are never flagged.
+
+Remote `bash` calls report the same liveness through the remote helper
+(see [remote.md](remote.md)). Waiting for you never counts as a stall.
 
 Spinners animate (~80 ms) only while something runs and is on screen; a
 tick redraws only the spinner cells. `[ui] animations = false` shows a
 static `◐` instead. With `[ui] terminal_title = true` the terminal title
-shows the spinner and phase, e.g. `⠹ thinking · 12.3s — harness`.
+shows the spinner and phase, e.g. `⠹ thinking · 12.3s — harness`
+(`⚠ waiting on the model 41s` or `⠹ bash quiet 59s` in the cases above).
 
 ## Input
 
@@ -239,7 +272,15 @@ branch, model and autonomy mode, a context usage bar (green, orange above
 (`$?` until known), the verify state (spinner, `✔` or `✗`), the number of
 running agents and the remote hosts in use. When an MCP server has
 failed, a red `⚠ mcp <name>` (`⚠ mcp <n> failed` for several) shows after
-the model; clicking it, or Shift+Tab to it and Enter, opens `/mcp`. It
+the model; clicking it, or Shift+Tab to it and Enter, opens `/mcp`.
+While background bash jobs run (`bash` with `run_in_background`), a
+`⚙ <n> jobs` indicator (running colour) shows; clicking it, or Shift+Tab
+to it and Enter, opens `/jobs`: a panel listing every job of the session
+with its state, elapsed time, command and log file, with buttons (click,
+or Tab/arrows and Enter; Esc closes) to open a job's latest output (`output
+j1`, with `refresh` and `stop` there too), stop a running job (`stop j1`,
+its whole process group) or refresh the list. A job's end also reaches the
+agent as a notice on its next request ([tools.md](tools.md#background-jobs-run_in_background)). It
 updates from run events as they arrive. On narrow terminals the least important parts (remotes, path,
 tokens, verify, agents) are dropped first.
 

@@ -133,6 +133,14 @@ fn openrouter(cfg: &Config, key: &str) -> Result<OpenRouterProvider, String> {
         app_name: pcfg.app_name.clone(),
         provider_order: pcfg.provider_order.clone(),
         allow_fallbacks: pcfg.allow_fallbacks,
+        cache_ttl: pcfg.cache_ttl.map(|t| {
+            use harness_config::ini::config::CacheTtl as Ini;
+            use harness_providers::openrouter::CacheTtl;
+            match t {
+                Ini::FiveMinutes => CacheTtl::FiveMinutes,
+                Ini::OneHour => CacheTtl::OneHour,
+            }
+        }),
     };
     OpenRouterProvider::with_key(key, pcfg.base_url.as_deref(), options)
         .map_err(|e| format!("openrouter: {e}"))
@@ -694,6 +702,31 @@ mod chatgpt_tests {
         ] {
             let v = engine.check(&action, mode, &project);
             assert_eq!(v.decision, Decision::Deny, "{action:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod openrouter_tests {
+    use super::*;
+    use harness_providers::openrouter::CacheTtl;
+
+    #[test]
+    fn openrouter_cache_ttl_follows_harness_ini() {
+        for (ini, want) in [
+            ("", None),
+            (
+                "[provider.openrouter]\ncache_ttl = 5m\n",
+                Some(CacheTtl::FiveMinutes),
+            ),
+            (
+                "[provider.openrouter]\ncache_ttl = 1h\n",
+                Some(CacheTtl::OneHour),
+            ),
+        ] {
+            let cfg = harness_config::ini::load_str(ini, None).unwrap();
+            let p = openrouter(&cfg, "test-key").unwrap();
+            assert_eq!(p.options().cache_ttl, want, "{ini}");
         }
     }
 }

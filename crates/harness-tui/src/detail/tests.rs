@@ -182,6 +182,27 @@ fn groups_and_entries_toggle_by_click_and_keyboard() {
 }
 
 #[test]
+fn turn_header_shows_cache_writes() {
+    let mut events = log().events().to_vec();
+    let usage = events
+        .iter_mut()
+        .find_map(|e| match &mut e.kind {
+            EventKind::ModelCallFinished { usage, .. } => Some(usage),
+            _ => None,
+        })
+        .expect("the log has a model call");
+    usage.cache_write = 500;
+    let mut h = H::new(&events, 140, 40);
+    h.draw();
+    h.click_on("▸ ✔ Turn 1");
+    let text = h.draw();
+    assert!(
+        text.contains("(cached 11.9k, written 500) out 812"),
+        "{text}"
+    );
+}
+
+#[test]
 fn entries_show_duration_tokens_and_cost_and_reuse_chat_cards_and_meta() {
     let mut h = H::new(log().events(), 140, 40);
     h.draw();

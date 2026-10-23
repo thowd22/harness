@@ -11,7 +11,60 @@ to built-in prompts, agents, workflows and `harness.ini` defaults.
 
 ## Unreleased
 
+### Added
+
+- Select text with the mouse anywhere in the TUI and copy it on release.
+  Press, drag and release over the chat transcript (messages, tool cards
+  and their output), the input box, the map, node detail, the diff screen,
+  panels and pickers: the selection is highlighted (new `selection` theme
+  token) and copied through `[ui] clipboard` with a toast. The copy is the
+  logical text: soft-wrapped lines are rejoined and borders, gutters,
+  icons and button labels are left out. Dragging past the edge of a
+  scrollable view scrolls it; double-click selects a word, triple-click a
+  line; Esc or a click clears it and `ctrl+y` copies it again. A press
+  without movement is still a click; clicks on a card's body and on
+  `/model` and `/resume` picker rows act on the release, so a drag over
+  them selects text instead of toggling, picking or resuming. Text under a
+  toast is still copied. The `select` key
+  (`ctrl+t`) and "Select text" also work on the map and other screens: a
+  cursor moved with the arrows, extended with Shift, copied with Enter; in
+  the chat, Shift+Up/Down extends the line selection.
+- Built-in `grep` and `glob` tools, so agents search without bash. `grep`
+  is a ripgrep-style regex search (honours `.gitignore`, skips `.git`,
+  binary and huge files) with `files_with_matches`, `content` (`-n`, `-A`,
+  `-B`, `-C`) and `count` modes, `glob`/`type` filters, `-i`, `multiline`,
+  `head_limit` and `offset`; `glob` lists files by pattern, newest first.
+  Both are read-only (they run in parallel with other reads), are
+  policy-checked like `read`, never show protected paths, go through the
+  output budget and run on remote hosts through the helper (`fs.find`).
+  The `coder`, `researcher` and `reviewer` agents have them. Before, a real
+  session on a large repo ran 82 of 131 tool calls through bash, mostly
+  `cd <repo> && grep -rn ...` over `vendor/`, one tool per model call.
+- Background bash jobs. `bash` takes `run_in_background: true`: the call
+  returns at once with a job id and a log file, the command keeps running in
+  its own process group (locally, in the sandbox or on a remote host through
+  the helper or the shell fallback), and when it exits harness appends a
+  short notice (command, exit status, run time, last output lines, log path)
+  to the agent's next request, so the model no longer polls with long
+  `sleep`s. The new `bash_jobs` tool (offered with `bash`) lists jobs, reads
+  a job's new output and stops a job (its whole process group). Jobs belong
+  to the session: the top-level agent, its subagents and workflow agent
+  steps (also on remote hosts) share them, each agent is told about the
+  jobs it started (the top-level agent also about jobs of subagents that
+  have ended), and they stop when the session ends (quit, `/new`,
+  `/resume`) or, for a workflow's jobs, when the workflow run ends. At most
+  4 run at once (`[tools] bash_max_jobs`) and each log keeps 32 MiB
+  (`[tools] bash_job_output_bytes`). The TUI shows `⚙ N jobs` in the status
+  line (click or focus + Enter opens `/jobs`); `/jobs` lists jobs with
+  their elapsed time and has buttons to open a job's output or stop it.
+  New `bash_job` event. (TASK-153)
+
 ### Changed
+
+- `bash_jobs` has a `wait` action: it blocks until a background job ends
+  (or `timeout` seconds, default 60, at most 600) and returns its exit
+  status and new output, so agents stop polling with `sleep`. The exit is
+  then not repeated as a notice.
 
 - The coder now keeps a todo list by default, so the goal bar fills in.
   The coder prompt and the `todo` tool description tell the model to add
@@ -22,6 +75,51 @@ to built-in prompts, agents, workflows and `harness.ini` defaults.
   a task exists. The reminder goes on the newest, not-yet-sent tool-result
   message, so earlier requests and their prompt cache are unchanged, and it
   is recorded in the run log. `todo_nudge_after = 0` turns it off.
+- The activity line no longer reports a long, quiet tool as `no data`. A
+  running tool shows its elapsed time against its timeout
+  (`running bash: cargo test 4m12s of 10m`) and, for `bash`, the CPU time
+  of its process group, sampled every 3 s (Linux `/proc`, macOS `ps`; also
+  through the remote helper as `exec.liveness`) and recorded as new
+  `tool_progress` events. Only a sampled tool with no output, no CPU
+  progress and nothing runnable for `[ui] stall_after` gets a soft
+  `bash quiet for 59s (no output, no CPU) · ctrl+c to cancel` hint.
+  Provider silence still warns, now worded
+  `⚠ waiting on the model: no data for 41s`.
+- The `memory` tool states its limits up front and takes several bullets
+  per write. Its description and schema say each bullet is one line of at
+  most 400 characters (`maxLength` on `text`), and the new `bullets` array
+  (up to 10) saves several lessons for one note in one commit, each checked
+  on its own; rejected ones are listed by number with the reason. A bullet
+  that is too long is refused with its length, the limit and how to split
+  it. Asked to "index this codebase into memory", the agent now writes one
+  compact `project/overview` note (at most 10 bullets of up to 1000
+  characters) plus non-obvious gotchas instead of a file map, and tells
+  you the rest is re-read from the repo. Before, a real session had 15 of
+  37 memory writes rejected as too long and rewrote them 2-3 times.
+
+### Fixed
+
+- Prompt caching works for Claude models on OpenRouter. Requests to
+  `anthropic/...` models now carry up to four `cache_control` breakpoints,
+  placed like the Anthropic provider's (last tool, system prompt layers,
+  the latest conversation turns); before, every call was billed as
+  uncached input. Other OpenRouter models are unchanged (they cache
+  automatically). New `[provider.openrouter] cache_ttl = 5m | 1h`. Cache
+  writes are now recorded on `model_call_finished` usage (`cache_write`)
+  and shown in the status line, node detail and `/cost`.
+- Terminal ioctls work in the bash sandbox. The static (musl) release build
+  lost the Landlock rule for `/dev/tty` (Rust's std drops `O_PATH` on musl,
+  so the launcher really opened `/dev/tty`, which fails without a
+  controlling terminal), and `ioctl(TIOCGWINSZ)` / `tcgetattr` on
+  `/dev/tty` then failed with `Permission denied`, breaking terminal-size
+  probes and pty-based TUI tests. The launcher now opens rule paths with
+  `O_PATH` itself and grants device ioctls only on the terminals
+  (`/dev/tty`, `/dev/ptmx`, `/dev/pts` and the command's own terminal);
+  ioctls on other devices stay denied on Landlock ABI 5+ kernels.
+- A sandboxed command that fails with `Permission denied` or
+  `Operation not permitted` outside the writable paths now ends its output
+  with a one-line `harness sandbox:` note naming `[sandbox]` in
+  harness.ini, so the model stops guessing at the cause.
 
 ## [0.3.0] - 2026-10-23
 
@@ -375,3 +473,35 @@ fingerprint. CI fails until the entry exists; `cargo test -p harness-eval
   `[general] todo_nudge_after = 3` reminds agents that still have no task
   list after three model calls.
   defaults-fingerprint: 8328cb67af31
+- Focus and efficiency defaults after a real session on a large repo ran 82
+  of 131 tool calls through bash, one tool per model call, polled long
+  commands with `sleep` and had 15 of 37 memory writes rejected:
+  - The built-in `coder`, `researcher` and `reviewer` agents get the new
+    read-only `grep` and `glob` tools, and their prompts a short shared
+    `tools.md` layer: search with `grep`/`glob` and read with `read` (bash
+    for builds, tests and git), make independent tool calls in the same
+    turn, and the bash working directory persists (no `cd <dir> &&`
+    prefix). The researcher prompt no longer suggests `ls`/`grep` through
+    bash. (TASK-152)
+  - The `bash` tool description and schema gain `run_in_background`, and
+    the built-in agents that have `bash` are also offered the new
+    `bash_jobs` tool, so long builds, tests and servers run as background
+    jobs whose exit is reported in a later message. New `[tools]
+    bash_max_jobs = 4` and `bash_job_output_bytes = 33554432` (32 MiB).
+    (TASK-153)
+  - The memory prompt layer (`memory.md`, used by the `coder`) and the
+    read-write `memory` tool description state the bullet limits (one
+    line, at most 400 characters; 1000 in `project/overview`), ask for
+    several lessons for one note in one write with the new `bullets`
+    argument, and answer "index this codebase into memory" with one compact
+    `project/overview` note plus non-obvious gotchas instead of a file map.
+    (TASK-155)
+  - New `[provider.openrouter] cache_ttl`, default `5m`: requests to
+    `anthropic/...` models on OpenRouter carry `cache_control` breakpoints;
+    other models' requests are unchanged. (TASK-151)
+  - After a live Opus 5.5 session: `bash_jobs` gains `wait` (block until a
+    job ends, default 60 s, at most 600 s) and the tools layer asks for it
+    instead of `sleep`; the tools layer and the `edit` description say to
+    open files with `read`, not `cat`, because `edit` needs a `read` first
+    (the model's first edit failed after it had used `cat`).
+  defaults-fingerprint: 46b4cecb7b8e

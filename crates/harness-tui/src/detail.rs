@@ -993,6 +993,10 @@ impl DetailView {
             left.push(Span::styled(fmt_tokens(u.input + u.cached_input), num));
             left.push(Span::styled(" (cached ", muted));
             left.push(Span::styled(fmt_tokens(u.cached_input), num));
+            if u.cache_write > 0 {
+                left.push(Span::styled(", written ", muted));
+                left.push(Span::styled(fmt_tokens(u.cache_write), num));
+            }
             left.push(Span::styled(") out ", muted));
             left.push(Span::styled(fmt_tokens(u.output), num));
             if u.reasoning > 0 {
@@ -1073,10 +1077,10 @@ impl DetailView {
                                 let line =
                                     Line::from(Span::styled(sanitize(l), th.fg(Token::Reasoning)));
                                 for wl in wrap_line(line, w.saturating_sub(2), &[]) {
-                                    let mut spans =
-                                        vec![indent(), Span::styled("┊ ", th.fg(Token::Muted))];
-                                    spans.extend(wl.spans);
-                                    lines.push(Line::from(spans));
+                                    lines.push(prefixed(
+                                        vec![indent(), Span::styled("┊ ", th.fg(Token::Muted))],
+                                        wl,
+                                    ));
                                 }
                             }
                         }
@@ -1093,9 +1097,7 @@ impl DetailView {
                     for l in t.text.lines() {
                         let line = Line::from(Span::styled(sanitize(l), th.fg(Token::Fg)));
                         for wl in wrap_line(line, w, &[]) {
-                            let mut spans = vec![indent()];
-                            spans.extend(wl.spans);
-                            lines.push(Line::from(spans));
+                            lines.push(prefixed(vec![indent()], wl));
                         }
                     }
                     for card in &t.cards {
@@ -1512,7 +1514,7 @@ impl DetailView {
                 st = st.patch(theme.focused());
             }
             frame.render_widget(Paragraph::new(Span::styled(COPY_BUTTON_LABEL, st)), b);
-            hits.register(id, b, DetailAction::Copy);
+            hits.register_button(id, b, DetailAction::Copy);
         }
         self.interaction.end_frame(hits);
     }
@@ -1541,6 +1543,8 @@ impl DetailView {
             }
         }
         self.side_scroll = self.side_scroll.min(items.len().saturating_sub(h));
+        let first = self.side_scroll;
+        crate::selection::update("detail.sidebar", |r| r.set_scroll(first));
         let mut lines = Vec::new();
         for (row, (id, line, action)) in
             items.into_iter().skip(self.side_scroll).take(h).enumerate()
@@ -1636,7 +1640,12 @@ impl DetailView {
                     } else {
                         (area.x + h.x, h.width.min(area.width.saturating_sub(h.x)))
                     };
-                    hits.register(h.id.clone(), Rect::new(x, y, w, 1), h.action.clone());
+                    let rect = Rect::new(x, y, w, 1);
+                    if h.width == 0 {
+                        hits.register(h.id.clone(), rect, h.action.clone());
+                    } else {
+                        hits.register_button(h.id.clone(), rect, h.action.clone());
+                    }
                 }
             }
         }
@@ -1646,8 +1655,29 @@ impl DetailView {
                 theme.fg(Token::Muted),
             )));
         }
+        crate::selection::update("detail.log", |r| {
+            r.set_scroll(start);
+            r.set_joins(lines.iter().map(crate::chat::text::soft_join));
+            r.chrome = crate::selection::Chrome::Smart;
+        });
         frame.render_widget(Paragraph::new(lines), area);
     }
+}
+
+/// `prefix` then the spans of `wl`, keeping the soft-wrap marker of a
+/// continuation line first so text selection still rejoins it
+/// ([`crate::chat::text::soft_join`]).
+fn prefixed(prefix: Vec<Span<'static>>, wl: Line<'static>) -> Line<'static> {
+    let style = wl.style;
+    let continues = crate::chat::text::soft_join(&wl) != crate::selection::Join::Hard;
+    let mut spans = wl.spans.into_iter();
+    let mut out: Vec<Span<'static>> = Vec::new();
+    if continues {
+        out.extend(spans.next());
+    }
+    out.extend(prefix);
+    out.extend(spans);
+    Line::from(out).style(style)
 }
 
 #[cfg(test)]

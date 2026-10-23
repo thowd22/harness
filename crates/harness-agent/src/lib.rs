@@ -9,6 +9,7 @@ pub mod compaction;
 pub mod context;
 pub mod cost;
 pub mod dispatch;
+pub mod job_notices;
 pub mod robustness;
 pub mod scheduler;
 pub mod session;

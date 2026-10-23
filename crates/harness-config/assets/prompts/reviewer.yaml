@@ -13,5 +13,6 @@ layers:
 
       Read the diff and the surrounding code, and run the tests with `bash`. Leave the working tree as you found it.
       Report findings with file, line, severity (minor, major or blocker) and a concrete fix, then a verdict: approve or request changes.
+  - file: tools.md
   - file: context.md
 vars: [cwd]

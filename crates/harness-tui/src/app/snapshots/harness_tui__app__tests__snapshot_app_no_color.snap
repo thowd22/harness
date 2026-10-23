@@ -11,7 +11,7 @@ expression: "snapshot(ColorDepth::None)"
           │ tab                     switch view (chat / map)        │
           │ ctrl+p                  command palette                 │
           │ ctrl+y                  copy to clipboard               │
-          │ ctrl+t                  select text in the transcript   │
+          │ ctrl+t                  select text with the keyboard   │
           │ ctrl+c                  interrupt agent                 │
           │ ctrl+q                  quit                            │
           │ ctrl+z                  suspend (resume with fg)        │

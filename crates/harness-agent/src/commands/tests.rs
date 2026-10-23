@@ -97,6 +97,7 @@ fn every_builtin_has_a_description_and_argument_help() {
             "config",
             "doctor",
             "mcp",
+            "jobs",
             "login",
             "quit"
         ]

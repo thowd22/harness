@@ -142,6 +142,17 @@ impl Pty {
     }
 }
 
+impl Drop for Pty {
+    /// A test that fails half way must not leave its harness running (seen:
+    /// TUI processes orphaned for hours after a failed pty test).
+    fn drop(&mut self) {
+        if let Ok(None) = self.child.try_wait() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
 /// A minimal terminal: cursor positioning (`CSI row;col H`), text and
 /// wide characters; other sequences are skipped. Enough for ratatui output.
 fn render_screen(raw: &[u8], rows: usize, cols: usize) -> String {

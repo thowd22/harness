@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use harness_agent::dispatch::{StandardTools, ToolSet};
+use harness_agent::dispatch::{StandardOptions, StandardTools, ToolSet};
 use harness_agent::subagents::{ChildHost, GateFactory};
 use harness_events::store::RunRecorder;
 use harness_remote::node::{HostConnect, RemoteNode};
@@ -216,7 +216,11 @@ impl RemoteSteps {
                         // bash on the host starts from an empty base: the
                         // local environment is never sent (the helper
                         // supplies the remote login `HOME`, `PATH`, ...).
-                        ToolSet::standard_with_bash_env(
+                        // Its background jobs join the session's manager
+                        // (the base set's), so ids stay unique and the
+                        // jobs are listed, reported and stopped with the
+                        // others.
+                        ToolSet::standard_with(
                             StandardTools {
                                 workspace: place.workspace.clone(),
                                 exec: place.exec.clone(),
@@ -225,7 +229,10 @@ impl RemoteSteps {
                                 scrubber: scrubber.clone(),
                                 spill: spill.clone(),
                             },
-                            Vec::new(),
+                            StandardOptions {
+                                base_env: Some(Vec::new()),
+                                jobs: base.jobs(),
+                            },
                         )
                         .fill_from(&base)
                     }),

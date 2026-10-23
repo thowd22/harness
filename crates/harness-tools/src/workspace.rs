@@ -67,8 +67,8 @@ pub enum WsError {
     /// A directory was expected but the path is not one.
     #[error("{0} is not a directory")]
     NotADirectory(PathBuf),
-    /// A glob pattern could not be parsed.
-    #[error("invalid glob pattern {pattern:?}: {reason}")]
+    /// A glob, regex or file-type pattern could not be parsed.
+    #[error("invalid pattern {pattern:?}: {reason}")]
     InvalidPattern {
         /// The pattern as given.
         pattern: String,
@@ -152,6 +152,27 @@ pub trait Workspace: Send + Sync {
     /// `.gitignore` rules are honoured, hidden files are included and the
     /// `.git` directory is skipped.
     async fn glob(&self, pattern: &str) -> WsResult<Vec<PathBuf>>;
+
+    /// Search files under (or at) `query.base` for the grep and glob tools;
+    /// see [`crate::search`] for the walk rules.
+    ///
+    /// The default returns an [`io::ErrorKind::Unsupported`] error, which
+    /// the tools turn into a hint to use bash on this host.
+    async fn find(&self, query: &crate::search::FindQuery) -> WsResult<crate::search::FindResult> {
+        Err(WsError::Io {
+            path: query.base.clone(),
+            source: io::Error::new(
+                io::ErrorKind::Unsupported,
+                "file search is not available on this host",
+            ),
+        })
+    }
+}
+
+/// True when `e` says the host does not support the operation (e.g.
+/// [`Workspace::find`] on a host without it).
+pub fn is_unsupported(e: &WsError) -> bool {
+    matches!(e, WsError::Io { source, .. } if source.kind() == io::ErrorKind::Unsupported)
 }
 
 /// Lexically normalise a path: drop `.` components and fold `..` into its

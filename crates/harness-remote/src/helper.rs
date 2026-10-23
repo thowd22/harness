@@ -30,7 +30,8 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use harness_tools::exec::{Exec, ExecError, ExecRequest, ExitOutcome};
+use harness_tools::exec::{Exec, ExecError, ExecEvent, ExecRequest, ExitOutcome, Liveness};
+use harness_tools::liveness::LIVENESS_INTERVAL;
 use harness_tools::local::{LocalExec, LocalWorkspace};
 use harness_tools::workspace::Workspace;
 use serde::Serialize;
@@ -41,11 +42,11 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::cache::{ContentCache, DEFAULT_CONTENT_CACHE, content_hash};
 use crate::protocol::{
-    AttachParams, AttachResult, ChangesParams, ExecExitNote, ExecOutputNote, ExecStartParams,
-    GlobParams, GlobResult, HELPER_VERSION, HelloParams, HelloResult, JobInfo, JobParams,
-    JobsResult, ListResult, MAX_FRAME, MIN_PROTOCOL_VERSION, Message, PROTOCOL_VERSION, PathParams,
-    ProbeParams, PruneParams, PruneResult, ReadParams, RemoveParams, RootParams, RpcError,
-    SetModeParams, WireEntry, WireStat, WireStream, WriteParams, ZSTD, codes, methods,
+    AttachParams, AttachResult, ChangesParams, ExecExitNote, ExecLivenessNote, ExecOutputNote,
+    ExecStartParams, GlobParams, GlobResult, HELPER_VERSION, HelloParams, HelloResult, JobInfo,
+    JobParams, JobsResult, ListResult, MAX_FRAME, MIN_PROTOCOL_VERSION, Message, PROTOCOL_VERSION,
+    PathParams, ProbeParams, PruneParams, PruneResult, ReadParams, RemoveParams, RootParams,
+    RpcError, SetModeParams, WireEntry, WireStat, WireStream, WriteParams, ZSTD, codes, methods,
 };
 use crate::wire::{Encoder, Frame, Framing, Outbound, Zstd, read_wire_frame, write_loop};
 
@@ -76,6 +77,9 @@ pub struct HelperOptions {
     /// [`DEFAULT_CONTENT_CACHE`]; 0 disables it, so reads and writes always
     /// carry the bytes).
     pub content_cache: usize,
+    /// How often running jobs' process groups are sampled for liveness
+    /// (default [`LIVENESS_INTERVAL`]; `None` sends no `exec.liveness`).
+    pub liveness_interval: Option<Duration>,
 }
 
 impl Default for HelperOptions {
@@ -89,6 +93,7 @@ impl Default for HelperOptions {
             max_protocol: PROTOCOL_VERSION,
             compression: true,
             content_cache: DEFAULT_CONTENT_CACHE,
+            liveness_interval: Some(LIVENESS_INTERVAL),
         }
     }
 }
@@ -205,6 +210,7 @@ impl Helper {
     /// A helper with no jobs.
     pub fn new(opts: HelperOptions) -> Self {
         let cache = Mutex::new(ContentCache::new(opts.content_cache));
+        let exec = LocalExec::new().with_liveness_interval(opts.liveness_interval);
         Self {
             inner: Arc::new(Inner {
                 cache,
@@ -212,7 +218,7 @@ impl Helper {
                 jobs: Mutex::new(HashMap::new()),
                 conns: AtomicUsize::new(0),
                 next_conn: AtomicU64::new(1),
-                exec: LocalExec::new(),
+                exec,
             }),
         }
     }
@@ -585,6 +591,15 @@ impl Helper {
                         .collect(),
                 })
             }
+            methods::FS_FIND => {
+                let mut q: harness_tools::search::FindQuery = parse(params)?;
+                q.base = helper_path(&q.base.to_string_lossy())?;
+                let found = LocalWorkspace::new(q.base.clone())
+                    .find(&q)
+                    .await
+                    .map_err(|e| RpcError::from_ws(&e))?;
+                to_value(found)
+            }
             methods::EXEC_START => self.exec_start(conn, tx, parse(params)?).await,
             methods::EXEC_KILL => {
                 let p: JobParams = parse(params)?;
@@ -810,6 +825,25 @@ fn output_frame(job: &str, seq: u64, stream: WireStream, data: Vec<u8>) -> Frame
     )
 }
 
+/// Send a liveness sample to the attached client, if any. Samples are
+/// ephemeral: not logged, so a reattaching client just waits for the next.
+fn send_liveness(job: &Job, id: &str, l: Liveness) {
+    let st = job.lock();
+    if let Some(sub) = &st.sub {
+        let _ = sub
+            .tx
+            .send(Outbound::Frame(Frame::new(Message::notification(
+                methods::EXEC_LIVENESS,
+                ExecLivenessNote {
+                    job: id.to_owned(),
+                    cpu_ms: l.cpu.as_millis() as u64,
+                    procs: l.procs,
+                    active: l.active,
+                },
+            ))));
+    }
+}
+
 async fn drive_job(
     id: String,
     job: Arc<Job>,
@@ -820,8 +854,9 @@ async fn drive_job(
     let mut killed = false;
     loop {
         tokio::select! {
-            chunk = handle.next_output() => match chunk {
-                Some(c) => push(&job, |seq| output_frame(&id, seq, c.stream.into(), c.data), max, false),
+            event = handle.next_event() => match event {
+                Some(ExecEvent::Output(c)) => push(&job, |seq| output_frame(&id, seq, c.stream.into(), c.data), max, false),
+                Some(ExecEvent::Liveness(l)) => send_liveness(&job, &id, l),
                 None => break,
             },
             _ = &mut kill_rx, if !killed => {

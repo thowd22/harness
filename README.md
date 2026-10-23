@@ -20,6 +20,7 @@ Research and real-world bug reports agree: most failures of AI coding tools come
 
 - **Claude, OpenAI and OpenRouter** behind one normalized provider layer, with streaming, tool calls, reasoning, prompt caching and retries. Add API keys with `harness login` or `/login`, or use a ChatGPT Plus or Pro plan with **Sign in with ChatGPT**. `/model` opens a picker listing every model your credentials can use.
 - **YAML-defined prompts, agents, subagents and workflows.** Workflows look like GitHub Actions (`needs`, `if`, `matrix`, `loop`, retries, approval gates) and run as `/slash` commands.
+- **Focused tools.** Built-in `grep` and `glob` search without bash, independent tool calls run in parallel, and long builds and tests run as background `bash` jobs whose exit is reported to the agent instead of being polled. See [docs/tools.md](docs/tools.md).
 - **Markdown skills.** Drop a `.md` file into `skills/` and it becomes `/skill-name`.
 - **An agent map.** A live graph of every agent and workflow step, with node logs in the style of GitHub Actions, real-time output and reasoning, a request inspector and run replay.
 - **A goal bar.** An opencode-style task pane showing the goal, each task's status and which agent is working on it. It only appears when tasks exist.
@@ -72,7 +73,7 @@ harness ui-demo        # scripted session through the fake provider (--gallery: 
 | `Ctrl+C` | interrupt the running agent |
 | `Ctrl+Q` | quit |
 
-Change any of them in `[keys]` in `harness.ini`. The mouse works on everything visible; set `[ui] mouse = false` to get native terminal text selection back.
+Change any of them in `[keys]` in `harness.ini`. The mouse works on everything visible: drag over any text to select it and it is copied on release (see [docs/tui.md](docs/tui.md#copy-and-paste)); set `[ui] mouse = false` to get native terminal text selection back.
 
 ### Slash commands
 
@@ -155,7 +156,7 @@ CI (`.github/workflows/ci.yml`) runs fmt, clippy, tests and cargo-deny on every 
 | `harness-config` | `harness.ini`, secrets, YAML discovery and layering, trust store, prompt lint |
 | `harness-events` | Event schema, run store (JSONL + blobs), redaction, reducers |
 | `harness-providers` | Normalized messages, `Provider` trait, Anthropic / OpenAI / OpenRouter / Fake, registry, pricing |
-| `harness-tools` | `Workspace`/`Exec` traits, local implementation, read/write/edit/bash, output spill |
+| `harness-tools` | `Workspace`/`Exec` traits, local implementation, read/write/edit/bash, grep/glob, background bash jobs, output spill |
 | `harness-policy` | Rules engine, shell parsing, protected paths, approvals, sandbox |
 | `harness-agent` | Agent loop, tool dispatch, subagents, todo, context, compaction, budgets, commands |
 | `harness-workflow` | Workflow schema, templating, DAG executor, gates, artifacts, re-runs |

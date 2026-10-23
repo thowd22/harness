@@ -100,7 +100,7 @@ fn file_local_errors_are_located() {
         (e.line, e.message.as_str()),
         (
             3,
-            "unknown tool `browse`; known tools: read, write, edit, bash, todo, or mcp:<server>/<tool> for MCP tools"
+            "unknown tool `browse`; known tools: read, write, edit, bash, grep, glob, todo, or mcp:<server>/<tool> for MCP tools"
         )
     );
     assert!(

@@ -8,11 +8,11 @@ file with the same `name` in `~/.config/harness/` or a trusted project's
 
 | Kind | Name | What it is |
 |---|---|---|
-| agent | `coder` | The default agent. Tools: `read`, `write`, `edit`, `bash`, `todo`. Memory: `read-write`. |
-| agent | `researcher` | Read-only investigation: `read`, `bash` (commits, pushes and `rm` denied), memory `read`, low effort. |
-| agent | `reviewer` | Independent review: `read`, `bash` (commits and pushes denied), no memory, high effort. |
-| prompt | `coder` | The identity layer + `base.md` + `coder.md` + `memory.md` + `context.md` + a line with cwd, OS, branch and date. |
-| prompt | `researcher`, `reviewer` | The identity layer, one inline layer and `context.md`. |
+| agent | `coder` | The default agent. Tools: `read`, `write`, `edit`, `bash`, `grep`, `glob`, `todo`. Memory: `read-write`. |
+| agent | `researcher` | Read-only investigation: `read`, `bash` (commits, pushes and `rm` denied), `grep`, `glob`, memory `read`, low effort. |
+| agent | `reviewer` | Independent review: `read`, `bash` (commits and pushes denied), `grep`, `glob`, no memory, high effort. |
+| prompt | `coder` | The identity layer + `base.md` + `coder.md` + `tools.md` + `memory.md` + `context.md` + a line with cwd, OS, branch and date. |
+| prompt | `researcher`, `reviewer` | The identity layer, one inline layer, `tools.md` and `context.md`. |
 | workflow | `dream` | Memory consolidation settings (see [dreaming.md](dreaming.md)). |
 
 ## What the defaults encode
@@ -41,6 +41,10 @@ the known fixes:
   repository, otherwise https://github.com/thowd22/harness. It is the first
   layer, so it sits in the cached prefix. `[general] identity_prompt = off`
   removes it; a custom prompt includes it with `- builtin: identity`.
+- **Focused, parallel tool use.** `tools.md` (all three prompts) says to
+  search with `grep`/`glob` and read with `read` (bash for builds, tests and
+  git), to make independent tool calls in the same turn, and that the bash
+  working directory persists, so commands need no `cd <dir> &&` prefix.
 - **Memory.** Agents with `memory: read-write` include `prompts/memory.md`,
   which is exactly `harness_memory::extract::PROMPT_SECTION` (a test keeps
   them identical).
@@ -59,7 +63,7 @@ name: coder
 description: My coder, pinned to a model with a turn limit
 prompt: coder
 model: sonnet
-tools: [read, write, edit, bash, todo]
+tools: [read, write, edit, bash, grep, glob, todo]
 memory: read-write
 max_turns: 40
 ```

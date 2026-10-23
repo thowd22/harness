@@ -1,0 +1,15 @@
+# With grep: one search shows every match with the enclosing function
+# (gitignored vendor/ is skipped), then the answer is written.
+responses:
+  - content:
+      - tool_use:
+          name: grep
+          input: { pattern: "setsid", glob: "*.rs", output_mode: content, "-B": 8 }
+  - content:
+      - tool_use:
+          name: write
+          input:
+            path: FINDINGS.md
+            content: "src/providers/runner.rs: spawn_job\nsrc/pty/viewer.rs: open_pty\n"
+  - content:
+      - text: "Two places start a process in a new session: `spawn_job` in src/providers/runner.rs and `open_pty` in src/pty/viewer.rs (both through `util::in_new_session`). Written to FINDINGS.md."

@@ -276,7 +276,10 @@ impl Redactor {
                 ro(host);
             }
             EventKind::NodeRetry { reason, .. } => r(reason),
-            EventKind::ModelCallStarted { .. } | EventKind::ToolCall { .. } => {}
+            // Ids and numbers only.
+            EventKind::ModelCallStarted { .. }
+            | EventKind::ToolCall { .. }
+            | EventKind::ToolProgress { .. } => {}
             EventKind::Delta { text, .. } => r(text),
             EventKind::ModelCallFinished { stop_reason, .. } => ro(stop_reason),
             EventKind::ApprovalRequested { action, .. } => r(action),
@@ -295,6 +298,12 @@ impl Redactor {
                 }
             }
             EventKind::UserMessage { text } | EventKind::ToolOutput { text, .. } => r(text),
+            EventKind::BashJob {
+                command, output, ..
+            } => {
+                r(command);
+                ro(output);
+            }
             EventKind::PolicyDecision {
                 rule,
                 reason,

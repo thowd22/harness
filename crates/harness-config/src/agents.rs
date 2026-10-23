@@ -39,7 +39,7 @@ use crate::mcp_tools::{MCP_TOOL_PREFIX, McpSelector};
 use crate::yaml::{YamlError, de};
 
 /// Tools an agent may list in `tools:`.
-pub const TOOL_NAMES: &[&str] = &["read", "write", "edit", "bash", "todo"];
+pub const TOOL_NAMES: &[&str] = &["read", "write", "edit", "bash", "grep", "glob", "todo"];
 
 /// Tool added to requests when `subagents:` is non-empty.
 pub const SPAWN_AGENT_TOOL: &str = "spawn_agent";

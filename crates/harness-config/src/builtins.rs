@@ -40,6 +40,7 @@ pub static BUILTINS: &[BuiltinFile] = &[
     builtin!("prompts/coder.md"),
     builtin!("prompts/memory.md"),
     builtin!("prompts/context.md"),
+    builtin!("prompts/tools.md"),
     builtin!("prompts/coder.yaml"),
     builtin!("prompts/researcher.yaml"),
     builtin!("prompts/reviewer.yaml"),

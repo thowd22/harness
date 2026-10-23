@@ -13,6 +13,10 @@
 //! When an MCP server has failed, a compact indicator (`⚠ mcp docs`, or
 //! `⚠ mcp 2 failed`) shows near the front; the chat registers it as a
 //! button that opens `/mcp` ([`MCP_INDICATOR_ID`]).
+//!
+//! While background bash jobs run (folded from `bash_job` events), a
+//! `⚙ 2 jobs` indicator shows; the chat registers it as a button that opens
+//! `/jobs` ([`JOBS_INDICATOR_ID`]).
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -41,6 +45,9 @@ pub enum VerifyState {
 
 /// Interaction id of the MCP indicator (clicking it opens `/mcp`).
 pub const MCP_INDICATOR_ID: &str = "status.mcp";
+
+/// Interaction id of the background-jobs indicator (clicking it opens `/jobs`).
+pub const JOBS_INDICATOR_ID: &str = "status.jobs";
 
 /// Width of the context usage bar in cells.
 pub const CONTEXT_BAR_CELLS: usize = 8;
@@ -72,6 +79,9 @@ pub struct StatusLine {
     /// MCP servers that failed (from the core), by name.
     pub mcp_failed: Vec<String>,
     running: BTreeMap<NodeId, Option<String>>,
+    /// Running background jobs by (starting call, job id): job ids of
+    /// separate managers (another run) may repeat.
+    jobs: std::collections::BTreeSet<(String, String)>,
 }
 
 impl StatusLine {
@@ -90,6 +100,7 @@ impl StatusLine {
             goal: None,
             mcp_failed: Vec::new(),
             running: BTreeMap::new(),
+            jobs: std::collections::BTreeSet::new(),
         }
     }
 
@@ -105,6 +116,21 @@ impl StatusLine {
             [] => None,
             [one] => Some(format!("⚠ mcp {}", truncate(one, 16))),
             many => Some(format!("⚠ mcp {} failed", many.len())),
+        }
+    }
+
+    /// Number of running background bash jobs.
+    pub fn running_jobs(&self) -> usize {
+        self.jobs.len()
+    }
+
+    /// The background-jobs indicator text while jobs run: `⚙ 1 job`,
+    /// `⚙ 3 jobs`.
+    pub fn jobs_label(&self) -> Option<String> {
+        match self.jobs.len() {
+            0 => None,
+            1 => Some("⚙ 1 job".to_owned()),
+            n => Some(format!("⚙ {n} jobs")),
         }
     }
 
@@ -178,6 +204,19 @@ impl StatusLine {
                 }
             }
             EventKind::Cost { usd } => self.cost = Some(self.cost.unwrap_or(0.0) + usd),
+            EventKind::BashJob {
+                call_id,
+                job_id,
+                state,
+                ..
+            } => {
+                let key = (call_id.clone(), job_id.clone());
+                if state == "running" {
+                    self.jobs.insert(key);
+                } else {
+                    self.jobs.remove(&key);
+                }
+            }
             EventKind::VerifyStarted { .. } => self.verify = VerifyState::Running,
             EventKind::VerifyFinished { passed, .. } => {
                 self.verify = if *passed {
@@ -244,6 +283,12 @@ impl StatusLine {
         if let Some(p) = cache_pct(u.input, u.cached_input) {
             tok.push(Span::styled(format!(" cache {p}%"), muted));
         }
+        if u.cache_write > 0 {
+            tok.push(Span::styled(
+                format!(" wrote {}", fmt_tokens(u.cache_write)),
+                muted,
+            ));
+        }
         segs.push((4, tok));
         segs.push((10, vec![Span::styled(fmt_cost(self.cost), num)]));
         let verify = match self.verify {
@@ -274,6 +319,9 @@ impl StatusLine {
                     theme.fg(Token::Running),
                 )],
             ));
+        }
+        if let Some(label) = self.jobs_label() {
+            segs.push((8, vec![Span::styled(label, theme.fg(Token::Running))]));
         }
         let remotes = self.active_remotes();
         if !remotes.is_empty() {
@@ -386,6 +434,7 @@ mod tests {
                         cached_input: 169_260,
                         output: 14_000,
                         reasoning: 0,
+                        cache_write: 0,
                     },
                     stop_reason: None,
                     response: None,
@@ -413,6 +462,30 @@ mod tests {
             s.apply(&e);
         }
         s
+    }
+
+    #[test]
+    fn footer_shows_cache_writes() {
+        let theme = Theme::default();
+        let mut s = sample();
+        let l = text(&s.line(&theme, &Spinner::new(false), 200));
+        assert!(!l.contains("wrote"), "{l}");
+        s.apply(&ev(
+            None,
+            EventKind::ModelCallFinished {
+                call_id: "c2".into(),
+                usage: Usage {
+                    input: 2_600,
+                    cache_write: 2_600,
+                    ..Usage::default()
+                },
+                stop_reason: None,
+                response: None,
+                duration_ms: 1,
+            },
+        ));
+        let l = text(&s.line(&theme, &Spinner::new(false), 200));
+        assert!(l.contains("cache 92% wrote 2.6k │"), "{l}");
     }
 
     #[test]
@@ -517,6 +590,57 @@ mod tests {
         assert!(text(&line).contains(&label), "kept at 60 cells");
         s.set_mcp_failed(vec!["a".into(), "b".into(), "c".into()]);
         assert_eq!(s.mcp_label().as_deref(), Some("⚠ mcp 3 failed"));
+    }
+
+    fn job(id: &str, state: &str) -> RunEvent {
+        job_of("c1", id, state)
+    }
+
+    fn job_of(call: &str, id: &str, state: &str) -> RunEvent {
+        ev(
+            Some("main"),
+            EventKind::BashJob {
+                call_id: call.into(),
+                job_id: id.into(),
+                command: "cargo test".into(),
+                state: state.into(),
+                exit_code: None,
+                duration_ms: None,
+                output: None,
+            },
+        )
+    }
+
+    #[test]
+    fn jobs_indicator_counts_running_background_jobs() {
+        let theme = Theme::default();
+        let mut s = sample();
+        assert_eq!(s.jobs_label(), None);
+        s.apply(&job("j1", "running"));
+        assert_eq!(s.jobs_label().as_deref(), Some("⚙ 1 job"));
+        s.apply(&job("j2", "running"));
+        assert_eq!(s.running_jobs(), 2);
+        let line = s.line(&theme, &Spinner::new(false), 70);
+        let span = line.spans.iter().find(|x| x.content == "⚙ 2 jobs").unwrap();
+        assert_eq!(span.style, theme.fg(Token::Running));
+        assert!(text(&line).contains("⚙ 2 jobs"), "kept at 70 cells");
+        s.apply(&job("j1", "exited"));
+        s.apply(&job("j2", "stopped"));
+        assert_eq!(s.jobs_label(), None);
+        assert!(!text(&s.line(&theme, &Spinner::new(false), 200)).contains('⚙'));
+    }
+
+    #[test]
+    fn jobs_indicator_keys_jobs_by_call_and_id() {
+        let mut s = sample();
+        // Two runs (separate managers) may both have a `j1`.
+        s.apply(&job_of("c1", "j1", "running"));
+        s.apply(&job_of("c9", "j1", "running"));
+        assert_eq!(s.running_jobs(), 2);
+        s.apply(&job_of("c9", "j1", "stopped"));
+        assert_eq!(s.jobs_label().as_deref(), Some("⚙ 1 job"));
+        s.apply(&job_of("c1", "j1", "exited"));
+        assert_eq!(s.jobs_label(), None);
     }
 
     #[test]

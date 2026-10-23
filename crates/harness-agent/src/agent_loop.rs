@@ -516,6 +516,7 @@ fn event_usage(u: &Usage) -> EventUsage {
         cached_input: u.cache_read_tokens,
         output: u.output_tokens,
         reasoning: u.reasoning_tokens,
+        cache_write: u.cache_write_tokens,
     }
 }
 

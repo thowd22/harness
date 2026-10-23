@@ -32,6 +32,7 @@ fn disabling_memory_keeps_the_notes() {
         .execute(MemoryArgs::Write {
             path: "tools/cargo".into(),
             text: "Use cargo nextest for the slow suite.".into(),
+            bullets: Vec::new(),
             title: None,
         })
         .unwrap();

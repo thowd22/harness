@@ -242,6 +242,8 @@ impl Panel {
         self.view_height = text_area.height.max(1) as usize;
         self.scroll = self.scroll.min(self.max_scroll());
         hits.register_pane(PANEL_PANE, text_area);
+        let first = self.scroll;
+        crate::selection::update(PANEL_PANE, |r| r.set_scroll(first));
         let visible: Vec<Line<'static>> = self
             .lines
             .iter()
@@ -263,7 +265,7 @@ impl Panel {
                     theme.fg(Token::Link)
                 };
                 frame.render_widget(Paragraph::new(Span::styled(label.clone(), style)), rect);
-                hits.register(id.clone(), rect, action.clone());
+                hits.register_button(id.clone(), rect, action.clone());
                 x = x.saturating_add(w + 1);
             }
         }

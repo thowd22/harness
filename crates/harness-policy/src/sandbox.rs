@@ -8,7 +8,13 @@
 //!    `[sandbox] network = deny` and one of them works here, and
 //! 2. under the sandbox launcher ([`launcher_main`]), which applies a
 //!    Landlock ruleset that only allows writes beneath the workspace, the
-//!    temp dirs and a few devices, then `exec`s the command.
+//!    temp dirs and a few devices, and device ioctls only on terminals
+//!    ([`TERMINAL_DEVICES`]), then `exec`s the command.
+//!
+//! When an enforced, sandboxed command fails with `Permission denied` or
+//! `Operation not permitted` that a writable path does not explain, its
+//! output ends with [`DENIAL_NOTE`], so the model learns it hit the sandbox
+//! and which setting controls it.
 //!
 //! When the kernel lacks Landlock or no network tool works, commands still
 //! run, but [`SandboxStatus::warnings`] says so (show it in the UI), every
@@ -19,6 +25,7 @@
 //! __sandbox-exec ...`, see [`LAUNCHER_ARG`]) or the `harness-sandbox`
 //! binary of this crate.
 
+mod denial;
 mod launcher;
 
 use std::path::{Path, PathBuf};
@@ -28,7 +35,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use harness_tools::exec::{Exec, ExecError, ExecHandle, ExecRequest};
 
-pub use launcher::{PROBE_FLAG, WRITE_FLAG, launcher_main};
+pub use launcher::{ABI_FLAG, PROBE_FLAG, WRITE_FLAG, launcher_main};
 
 /// Hidden first argument that makes the main binary act as the launcher.
 pub const LAUNCHER_ARG: &str = "__sandbox-exec";
@@ -36,16 +43,36 @@ pub const LAUNCHER_ARG: &str = "__sandbox-exec";
 /// Prefix of warnings the sandbox prints.
 pub const WARNING_PREFIX: &str = "harness sandbox:";
 
-/// Devices commands may always write to.
-pub const WRITABLE_DEVICES: &[&str] = &[
-    "/dev/null",
-    "/dev/zero",
-    "/dev/full",
-    "/dev/tty",
-    "/dev/ptmx",
-    "/dev/pts",
-    "/dev/shm",
-];
+/// Devices commands may always write to (no device ioctls).
+pub const WRITABLE_DEVICES: &[&str] = &["/dev/null", "/dev/zero", "/dev/full", "/dev/shm"];
+
+/// Terminal devices: always writable, and the only devices that accept
+/// ioctls (`TIOCGWINSZ`, `tcgetattr`, ...) on Landlock ABI 5+. The launcher
+/// adds them itself, together with the terminal on its own stdio.
+pub const TERMINAL_DEVICES: &[&str] = &["/dev/tty", "/dev/ptmx", "/dev/pts"];
+
+/// Appended (on stderr) to the output of a sandboxed command that failed
+/// with a permission error the sandbox may have caused.
+pub const DENIAL_NOTE: &str = "harness sandbox: this may be the bash sandbox (Landlock). Only the workspace, temp dirs and terminals are writable, and only terminals accept device ioctls; work there, or ask the user to change [sandbox] in harness.ini.\n";
+
+/// Whether this kernel's Landlock restricts device ioctls (ABI 5+). On
+/// older kernels the sandbox leaves every ioctl alone. Always false off
+/// Linux.
+pub fn device_ioctls_restricted() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        use landlock::{AccessFs, CompatLevel, Compatible, Ruleset, RulesetAttr};
+        Ruleset::default()
+            .set_compatibility(CompatLevel::HardRequirement)
+            .handle_access(AccessFs::IoctlDev)
+            .and_then(|r| r.create())
+            .is_ok()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
 
 /// Network policy (`[sandbox] network`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
@@ -71,7 +98,8 @@ pub struct SandboxConfig {
 
 impl SandboxConfig {
     /// Writable: the workspace `root`, the temp dirs (`$TMPDIR`, `/tmp`,
-    /// `/var/tmp`) and [`WRITABLE_DEVICES`].
+    /// `/var/tmp`) and [`WRITABLE_DEVICES`]. The launcher adds
+    /// [`TERMINAL_DEVICES`] on its own.
     pub fn for_workspace(root: impl Into<PathBuf>, enabled: bool, network: NetworkPolicy) -> Self {
         let mut writable = vec![
             root.into(),
@@ -407,10 +435,32 @@ fn absolute(p: &Path, cwd: &Path) -> PathBuf {
     }
 }
 
+impl SandboxedExec {
+    /// Landlock is applied and enforced, so denials may come from it.
+    fn enforced(&self) -> bool {
+        self.config.enabled
+            && matches!(
+                self.status.landlock,
+                LandlockState::Full | LandlockState::Partial
+            )
+    }
+}
+
 #[async_trait]
 impl Exec for SandboxedExec {
     async fn spawn(&self, req: ExecRequest) -> Result<ExecHandle, ExecError> {
-        self.inner.spawn(self.wrap(req)).await
+        let cwd = req.cwd.clone();
+        let handle = self.inner.spawn(self.wrap(req)).await?;
+        if !self.enforced() {
+            return Ok(handle);
+        }
+        let roots = self
+            .config
+            .writable
+            .iter()
+            .map(|w| absolute(w, &cwd))
+            .chain(TERMINAL_DEVICES.iter().map(PathBuf::from));
+        Ok(denial::relay(handle, denial::DenialScan::new(roots, &cwd)))
     }
 }
 

@@ -27,7 +27,7 @@ When no rule decides, the autonomy mode does:
 
 | Action | `ask` | `auto-edit` (default) | `auto` |
 |---|---|---|---|
-| read a file | allow | allow | allow |
+| read a file (`read`, `grep`, `glob`) | allow | allow | allow |
 | write / edit a file | ask | allow | allow |
 | bash command | ask | ask | allow |
 | other tools | allow | allow | allow |
@@ -60,7 +60,8 @@ paths.protected = ~/.ssh/**, **/.env*, ~/.aws/**, secrets/**
   Patterns starting with `**` match anywhere. Other patterns are relative
   to the workspace root.
 - `*` does not cross `/`; `**` does. `dir/**` also protects `dir` itself.
-- They apply to the `read`, `write` and `edit` tools and to every bash
+- They apply to the `read`, `write` and `edit` tools, to the `path` of
+  `grep` and `glob` (whose results also leave protected files out), and to every bash
   argument, `--opt=value` value, `VAR=value` prefix and redirect target.
   `~`, `$HOME`, `${HOME}` and `$PWD` are expanded, wildcards (`~/.ss*/id_*`)
   are expanded against the filesystem, and symlinks and `..` are resolved,
@@ -207,9 +208,20 @@ network = allow     ; allow | deny
 
 - **Filesystem** (`enabled = true`): Landlock allows writes only beneath the
   workspace, `$TMPDIR`, `/tmp`, `/var/tmp` and `/dev/null`, `/dev/zero`,
-  `/dev/full`, `/dev/tty`, `/dev/ptmx`, `/dev/pts`, `/dev/shm`. Reads are not
+  `/dev/full`, `/dev/shm`, plus the terminals `/dev/tty`, `/dev/ptmx`,
+  `/dev/pts` and the terminal the command was started on. Reads are not
   restricted (protected paths are enforced by policy). Writing to
   `/dev/stdout` or `/dev/stderr` by path is blocked by Landlock; use `>&2`.
+- **Device ioctls** (kernels with Landlock ABI 5, Linux 6.10+): only the
+  terminals above accept ioctls, so terminal-size probes
+  (`ioctl(TIOCGWINSZ)`, `stty size`, `tput cols`), `tcgetattr` and pty-based
+  TUI tests work, while ioctls on any other device fail with
+  `Permission denied`. On older kernels Landlock cannot restrict ioctls, so
+  none are blocked; writes are still restricted.
+- **Denials are explained**: when a sandboxed command fails with
+  `Permission denied` or `Operation not permitted` that a writable path does
+  not explain, its output ends with one `harness sandbox:` line saying the
+  sandbox may be the cause and that `[sandbox]` in harness.ini controls it.
 - **Network** (`network = deny`): commands run in a new network namespace via
   `bwrap --unshare-net`, or `unshare --net` if bwrap is not installed.
 - **Unsupported systems degrade with a warning**: if the kernel has no
@@ -251,7 +263,11 @@ escaped.
 - `harness_policy::sandbox::SandboxedExec::new(Arc::new(LocalExec::new()), Launcher::current_exe()?, SandboxConfig::from_ini(&cfg.sandbox, root))`
   as the bash tool's `Exec`. The binary must dispatch `harness __sandbox-exec ...`
   to `harness_policy::sandbox::launcher_main` (the crate's `harness-sandbox`
-  binary does the same).
+  binary does the same). The launcher opens rule paths with `O_PATH` itself
+  (std drops `O_PATH` on musl, which used to lose the `/dev/tty` rule in the
+  static release build); `--abi N` targets an older Landlock ABI to test how
+  the sandbox degrades, and `sandbox::device_ioctls_restricted()` says
+  whether this kernel restricts device ioctls.
 - `harness_policy::provenance::Labeler::tool_result(..)` before tool output
   goes into a model request; include `provenance::SYSTEM_PROMPT_SECTION` in
   the system prompt.

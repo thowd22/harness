@@ -118,10 +118,21 @@ impl<A: Clone> HitMap<A> {
         });
     }
 
-    /// Registers a scrollable pane.
+    /// Registers a clickable button: like [`HitMap::register`], and its
+    /// label is not part of the text selection ([`crate::selection::mask`]).
+    pub fn register_button(&mut self, id: impl Into<ElementId>, rect: Rect, action: A) {
+        crate::selection::mask(rect);
+        self.register(id, rect, action);
+    }
+
+    /// Registers a scrollable pane. It is also a text region for mouse and
+    /// keyboard selection ([`crate::selection`]); the view can refine it
+    /// with [`crate::selection::update`].
     pub fn register_pane(&mut self, id: impl Into<PaneId>, rect: Rect) {
+        let id = id.into();
+        crate::selection::register(crate::selection::TextRegion::new(id.0.clone(), rect));
         self.panes.push(Pane {
-            id: id.into(),
+            id,
             rect,
             layer: self.layer,
         });
@@ -134,7 +145,17 @@ impl<A: Clone> HitMap<A> {
 
     /// Starts a modal layer covering `rect`: lower layers get no clicks,
     /// scrolls or focus until the next frame.
+    ///
+    /// The modal is also a text region for selection (borders left out),
+    /// covering everything below it.
     pub fn push_modal(&mut self, rect: Rect) {
+        crate::selection::register(
+            crate::selection::TextRegion::new(
+                format!("modal@{},{},{}x{}", rect.x, rect.y, rect.width, rect.height),
+                rect,
+            )
+            .chrome(crate::selection::Chrome::Drawing),
+        );
         self.push_layer();
         self.modals.push((self.layer, rect));
     }
@@ -468,6 +489,16 @@ pub mod testing {
     /// A left click at `(x, y)`.
     pub fn click(x: u16, y: u16) -> Event {
         mouse(MouseEventKind::Down(MouseButton::Left), x, y)
+    }
+
+    /// Moving the mouse with the left button held, to `(x, y)`.
+    pub fn drag(x: u16, y: u16) -> Event {
+        mouse(MouseEventKind::Drag(MouseButton::Left), x, y)
+    }
+
+    /// Releasing the left button at `(x, y)`.
+    pub fn release(x: u16, y: u16) -> Event {
+        mouse(MouseEventKind::Up(MouseButton::Left), x, y)
     }
 
     /// One wheel notch up at `(x, y)`.

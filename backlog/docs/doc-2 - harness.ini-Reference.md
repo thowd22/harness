@@ -3,7 +3,7 @@ id: doc-2
 title: harness.ini Reference
 type: specification
 created_date: '2026-10-22 14:26'
-updated_date: '2026-10-23 08:07'
+updated_date: '2026-10-23 18:08'
 ---
 # harness.ini Reference
 
@@ -50,6 +50,7 @@ api_key = sk-or-...
 app_name = harness
 provider_order = anthropic,openai   ; OpenRouter routing preference
 allow_fallbacks = true
+cache_ttl = 5m                      ; Anthropic prompt-cache lifetime (5m | 1h)
 
 [models]
 ; aliases used by agents/workflows and /model
@@ -72,20 +73,20 @@ interrupt = ctrl+c
 switch_view = tab
 quit      = ctrl+q
 copy      = ctrl+y                ; copy the focused message, code block, output or diff
-select    = ctrl+t                ; keyboard text selection in the transcript
+select    = ctrl+t                ; keyboard text selection (transcript lines; a cursor on the map and screens)
 
 [ui]
 theme = dracula                  ; dracula | none (more themes later)
 background = theme               ; theme (paint Dracula bg) | terminal
 animations = true                ; spinners; false = static indicators
-stall_after = 20                 ; seconds without data before the indicator turns orange
+stall_after = 20                 ; seconds of model silence before the indicator warns; an idle sampled tool gets a soft hint
 timestamps = time                ; time | relative | off
 tool_preview_lines = 8
 terminal_title = true            ; spinner + status in the terminal title
 show_thinking = collapsed        ; hidden | collapsed | expanded
 markdown = true
-mouse = true                     ; click any visible element; false restores native text selection
-clipboard = osc52                ; osc52 (works over SSH/tmux) | system (wl-copy, xclip, xsel, pbcopy) | auto
+mouse = true                     ; click any visible element, drag to select and copy text; false restores native text selection
+clipboard = osc52                ; where copies and drag selections go: osc52 (works over SSH/tmux) | system (wl-copy, xclip, xsel, pbcopy) | auto
 goal_bar = auto                  ; auto (shown only when tasks exist) | off
 goal_bar_width = 36
 live_preview = true              ; one-line live output/reasoning preview on map nodes
@@ -128,6 +129,8 @@ bash_max_timeout = 600           ; seconds, cap for a call's timeout
 spill_over_bytes = 16000         ; larger outputs go to a blob + head/tail
 spill_head_lines = 40
 spill_tail_lines = 40
+bash_max_jobs = 4                ; background bash jobs (run_in_background) running at once
+bash_job_output_bytes = 33554432 ; output kept in a background job's log; later output is dropped
 
 [context]
 compact_at = 0.8                 ; fraction of model window
@@ -205,8 +208,8 @@ auth = oauth                     ; none | oauth
 - Durations (`stall_after`, `model_list_ttl`): bare number = seconds, or suffix `ms`, `s`, `m`, `h`.
 - Paths (`data_dir`, `memory.drive`, `identity_file`) expand a leading `~/`; `remote.*.workdir` is a remote path and is not expanded locally.
 - `[pricing]` values take 2 to 4 numbers: `input,output[,cache_read[,cache_write]]`.
-- `[keys]` accepts only the actions `palette, send, newline, cancel, interrupt, switch_view, quit`. `[models]` values must be `provider/model`. `[theme]` values must be `#rrggbb`, and keys must be token names: `bg, surface, fg, muted, reasoning, running, path, link, ok, warn, approval, stalled, user, keyword, accent, agent, error, number, highlight, border, border.focus, card.pending, card.ok, card.error, card.approval, diff.added, diff.removed, diff.added.bg, diff.removed.bg` (see docs/tui.md). `[keys]` chords are `mod+key` (`ctrl`, `alt`, `shift`, `super`); a chord bound to two actions, or to the fixed suspend key `ctrl+z`, is a load error.
-- `provider.<id>` accepts `anthropic`, `openai`, `openrouter`. Every provider takes `api_key`, `api_key_cmd`, `api_key_env` and `base_url`. Only openrouter also takes `app_name`, `provider_order` and `allow_fallbacks`. Only openai also takes `auth` (`api_key`, the default, or `chatgpt`: Sign in with ChatGPT, using the user's ChatGPT plan; requests then never use the API key, with no fallback) and `chatgpt_headless` (boolean, default `false`; headless runs, workflows and evals refuse `auth = chatgpt` unless it is `true`, and refuse it whenever `CI` is set, because the credential is personal). Only anthropic also takes `gzip_requests` (`auto`, the default, or `off`) and `gzip_level` (1 to 9, default 3). With `auto`, request bodies of 4 KiB or more are gzipped only when `base_url` is `https://api.anthropic.com` on the default port and no proxy (`HTTPS_PROXY`, `ALL_PROXY`) or custom CA (`SSL_CERT_FILE`, `SSL_CERT_DIR`) is set. The environment variable `HARNESS_GZIP_REQUEST_BODIES=0` also turns it off. See docs/providers-anthropic.md.
+- `[keys]` accepts only the actions `palette, send, newline, cancel, interrupt, switch_view, quit`. `[models]` values must be `provider/model`. `[theme]` values must be `#rrggbb`, and keys must be token names: `bg, surface, fg, muted, reasoning, running, path, link, ok, warn, approval, stalled, user, keyword, accent, agent, error, number, highlight, selection, border, border.focus, card.pending, card.ok, card.error, card.approval, diff.added, diff.removed, diff.added.bg, diff.removed.bg` (see docs/tui.md). `[keys]` chords are `mod+key` (`ctrl`, `alt`, `shift`, `super`); a chord bound to two actions, or to the fixed suspend key `ctrl+z`, is a load error.
+- `provider.<id>` accepts `anthropic`, `openai`, `openrouter`. Every provider takes `api_key`, `api_key_cmd`, `api_key_env` and `base_url`. Only openrouter also takes `app_name`, `provider_order`, `allow_fallbacks` and `cache_ttl` (`5m`, the default, or `1h`: the lifetime of the prompt-cache breakpoints sent for `anthropic/` models; one-hour cache writes cost more; see docs/providers-openrouter.md). Only openai also takes `auth` (`api_key`, the default, or `chatgpt`: Sign in with ChatGPT, using the user's ChatGPT plan; requests then never use the API key, with no fallback) and `chatgpt_headless` (boolean, default `false`; headless runs, workflows and evals refuse `auth = chatgpt` unless it is `true`, and refuse it whenever `CI` is set, because the credential is personal). Only anthropic also takes `gzip_requests` (`auto`, the default, or `off`) and `gzip_level` (1 to 9, default 3). With `auto`, request bodies of 4 KiB or more are gzipped only when `base_url` is `https://api.anthropic.com` on the default port and no proxy (`HTTPS_PROXY`, `ALL_PROXY`) or custom CA (`SSL_CERT_FILE`, `SSL_CERT_DIR`) is set. The environment variable `HARNESS_GZIP_REQUEST_BODIES=0` also turns it off. See docs/providers-anthropic.md.
 - `remote.<name>` requires `host`. Defaults: `port = 22`, `max_jobs = 1`, `sync = rsync`, `compression = auto`, `compression_below_mbps = 20`. A remote can only tighten policy, with `policy.bash.deny` and `policy.bash.ask`.
 - `remote.<name> compression` sets SSH channel compression for that host: `yes` adds `Compression=yes` to the host's ControlMaster, `no` adds `Compression=no`, and `auto` (the default) compresses only when the host's last measured link throughput is below `compression_below_mbps` (a positive number of Mbit/s). The link is measured by `/remote test` and, when no measurement younger than 24 hours exists, when a remote step connects; an unmeasured host is not compressed. Compressed connections use their own ControlMaster socket (`cmz-%C`). rsync sync uses `--compress-choice=zstd` when both rsyncs support zstd, and rsync's default compression otherwise. See docs/remote.md.
 - `mcp.<name>` (name: letters, digits, `_`, `-`) defines one MCP server and requires exactly one of `command` (stdio: with `args`, a comma-separated list, `cwd`, `~` expanded, and `env.<NAME>`) or `url` (`http://` or `https://`, streamable HTTP, with `header.<Name>`). Every server also takes `enabled` (default `true`), `timeout` (per request, default `60s`), `startup` (`lazy`, the default: start on first use, or `eager`: start with the session) and `startup_timeout` (start plus handshake, default `30s`); both timeouts must be greater than 0. `env.*` on a remote server, `header.*`, `args` or `cwd` on the wrong kind of server, and unknown keys are load errors. Every `env.<NAME>` / `header.<Name>` value is a credential with the provider-key sources: inline `env.NAME`, `env.NAME_cmd` (a command, like `api_key_cmd`) and `env.NAME_env` (an environment variable, like `api_key_env`), first non-empty wins in that order; a key ending in `_cmd` / `_env` always names a source. Values never print (`config show` shows `[redacted]`), are added to the server's redactor, and an inline value makes the file subject to the `0600` rule like an inline `api_key`. Stdio servers get the bash tool's environment scrubbing (default provider key names, `HARNESS_*`, provider `api_key_env` variables, variables named by `env.*_env` / `header.*_env`, and values containing a resolved provider key) before their own `env.*` is added. HTTP redirects are not followed, so `header.*` credentials reach only `url`. A remote server also takes `auth` (`none`, the default, or `oauth`: OAuth per the MCP authorization spec, with tokens from `harness login mcp <name>` or the TUI `/login mcp <name>` kept in `<data_dir>/auth/mcp/<name>.json`, mode `0600`, inside the protected `auth/` directory, never in harness.ini, refreshed automatically; runs never open a browser and fail with a message naming the login command) and, with `auth = oauth` only, `oauth_client_id` (a pre-registered client, used instead of dynamic registration), `oauth_client_metadata_url` (an `https://` Client ID Metadata Document URL, used when the authorization server supports them) and `oauth_scopes` (comma-separated scopes instead of the ones the server asks for). `auth = oauth` together with `header.Authorization`, `auth = oauth` with a plain `http://` url on a non-loopback host (only `127.0.0.1`, `localhost` and `[::1]` may use `http://`; bearer tokens travel only over TLS, per RFC 6750 section 5.3 and OAuth 2.1 section 1.5, and login, runs and discovery refuse it as well), or any of these keys on a stdio server, is a load error. `harness login mcp <name>` sets `auth = oauth` itself. Project YAML can reference a server by name but never define one. See docs/mcp.md.

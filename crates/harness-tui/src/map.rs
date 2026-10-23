@@ -672,6 +672,11 @@ impl MapView {
         let max_x = layout.width.saturating_sub(area.width);
         let max_y = layout.height.saturating_sub(area.height);
         self.pan = (self.pan.0.min(max_x), self.pan.1.min(max_y));
+        let top = usize::from(self.pan.1);
+        crate::selection::update(MAP_PANE, |r| {
+            r.set_scroll(top);
+            r.chrome = crate::selection::Chrome::Drawing;
+        });
         let view = Rect::new(self.pan.0, self.pan.1, area.width, area.height);
         let mut c = Canvas::new(view, theme.base());
         let edge = theme.fg(Token::Border);
@@ -995,7 +1000,7 @@ impl MapView {
             theme.fg(Token::Muted)
         };
         frame.render_widget(Paragraph::new(Span::styled("[x]", style)), close);
-        hits.register(LIVE_CLOSE_ID, close, MapAction::CloseLive);
+        hits.register_button(LIVE_CLOSE_ID, close, MapAction::CloseLive);
         hits.register_pane(PaneId::from(LIVE_PANE), inner);
         let lines = match self.selected.as_ref().and_then(|s| self.live.stream(s)) {
             Some(st) => LivePane {

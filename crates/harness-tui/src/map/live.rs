@@ -547,6 +547,7 @@ mod tests {
                     cached_input: 0,
                     output: 5,
                     reasoning,
+                    cache_write: 0,
                 },
                 stop_reason: None,
                 response,

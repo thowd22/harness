@@ -121,14 +121,19 @@ pub enum Action {
 }
 
 impl Action {
-    /// Map a tool call to an action: `read` → read, `write`/`edit` →
-    /// write, `bash` → bash (argument names as in `harness-tools`).
+    /// Map a tool call to an action: `read`, `grep` and `glob` → read,
+    /// `write`/`edit` → write, `bash` → bash (argument names as in `harness-tools`).
     pub fn from_tool_call(tool: &str, args: &Value) -> Action {
         let s = |k: &str| args.get(k).and_then(Value::as_str).map(str::to_string);
         match (tool, s("path"), s("command")) {
             ("read", Some(p), _) => Action::Read {
                 tool: tool.into(),
                 path: p.into(),
+            },
+            // Search tools read under `path` (default: the working directory).
+            ("grep" | "glob", p, _) => Action::Read {
+                tool: tool.into(),
+                path: p.unwrap_or_else(|| ".".into()).into(),
             },
             ("write" | "edit", Some(p), _) => Action::Write {
                 tool: tool.into(),
@@ -552,6 +557,16 @@ impl PolicyEngine {
         std::iter::once(&self.ini).chain(self.overlays.iter())
     }
 
+    /// True when reading `path` (a concrete path, not a pattern) is denied
+    /// as a protected path. Search tools use it to drop protected files
+    /// from their results.
+    pub fn read_protected(&self, path: &Path, cwd: &Path) -> bool {
+        let raw = path.to_string_lossy();
+        let cands = paths::candidates(&raw, cwd, self.home.as_deref());
+        self.protected_candidates(&raw, &cands, Access::Read)
+            .is_some()
+    }
+
     /// A deny rule if `raw` names a protected path.
     fn protected(&self, raw: &str, access: Access, cwd: &Path) -> Option<MatchedRule> {
         let mut cands = paths::candidates(raw, cwd, self.home.as_deref());
@@ -564,7 +579,16 @@ impl PolicyEngine {
                 cands.extend(paths::candidates(&e.to_string_lossy(), cwd, None));
             }
         }
-        for c in &cands {
+        self.protected_candidates(raw, &cands, access)
+    }
+
+    fn protected_candidates(
+        &self,
+        raw: &str,
+        cands: &[PathBuf],
+        access: Access,
+    ) -> Option<MatchedRule> {
+        for c in cands {
             if let Some(hit) = self.builtin.check(c, access) {
                 let (rule, what) = match hit {
                     BuiltInHit::Root(r) => (

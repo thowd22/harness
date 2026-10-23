@@ -1626,3 +1626,282 @@ async fn login_mcp_authorizes_from_slash_palette_and_panel_buttons() {
 }
 
 mod mcp;
+
+/// `/jobs`: background bash jobs are listed with their state, their output
+/// opens and a running one stops (mouse and keyboard on the panel buttons);
+/// ending the session stops the rest.
+#[tokio::test]
+async fn jobs_panel_lists_opens_and_stops_background_jobs() {
+    use harness_tui::interaction::testing::{buffer_text, click, find_text, key};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let env = Env::new();
+    let bg = |file: &str| {
+        format!(
+            "  - content: [ {{ tool_use: {{ name: bash, input: {{ command: \"echo serving; sleep 60 & echo $! > {file}; wait\", run_in_background: true }} }} }} ]\n  - content: [ {{ text: started }} ]\n"
+        )
+    };
+    let script = env.script(&format!("responses:\n{}{}", bg("pid1"), bg("pid2")));
+    let mut h = Harness::start(&env, &script).await;
+    h.d.request(UiRequest::ModeChanged(Mode::Auto)).await;
+    let wait_pid = |file: &str| {
+        let path = env.project.join(file);
+        async move {
+            for _ in 0..200 {
+                if let Ok(s) = std::fs::read_to_string(&path)
+                    && s.ends_with('\n')
+                {
+                    return s.trim().parse::<u32>().unwrap();
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            panic!("{} never written", path.display());
+        }
+    };
+    let dead = |pid: u32| async move {
+        for _ in 0..100 {
+            if harness_tools::conformance::local_process_gone(pid) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("process {pid} survived");
+    };
+
+    h.d.request(UiRequest::Submit("start the server".into()))
+        .await;
+    h.finish_turn().await;
+    let pid1 = wait_pid("pid1").await;
+    h.until(|e| matches!(e, AppEvent::Run(ev) if matches!(&ev.kind, EventKind::BashJob { state, .. } if state == "running")))
+        .await;
+
+    h.seen.clear();
+    h.d.request(UiRequest::Submit("/jobs".into())).await;
+    let (lines, buttons) = match h
+        .until(
+            |e| matches!(e, AppEvent::Core(CoreEvent::Panel { title, .. }) if title == jobs::TITLE),
+        )
+        .await
+    {
+        AppEvent::Core(CoreEvent::Panel { lines, buttons, .. }) => (lines.clone(), buttons.clone()),
+        _ => unreachable!(),
+    };
+    assert_eq!(lines[0], "1 running · 0 ended", "{lines:?}");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("j1") && l.contains("running") && l.contains("echo serving")),
+        "{lines:?}"
+    );
+    assert!(lines.iter().any(|l| l.contains("log ")), "{lines:?}");
+    let ids: Vec<&str> = buttons.iter().map(|b| b.id.as_str()).collect();
+    assert_eq!(ids, ["jobs.output:j1", "jobs.stop:j1", "jobs.refresh"]);
+
+    // Output opens in its own panel.
+    h.d.request(UiRequest::PanelAction("jobs.output:j1".into()))
+        .await;
+    let out = h.panel("Job j1").await;
+    assert!(out.iter().any(|l| l == "serving"), "{out:?}");
+
+    // The real app renders the list; Right + Enter and a click both ask to stop.
+    let (tx, mut requests) = mpsc::unbounded_channel();
+    let mut app = App::new(AppConfig::default(), tx);
+    let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    app.handle(AppEvent::Core(CoreEvent::Panel {
+        title: jobs::TITLE.into(),
+        lines,
+        buttons,
+    }));
+    term.draw(|f| app.render(f)).unwrap();
+    let text = buffer_text(term.backend().buffer());
+    assert!(text.contains("[ stop j1 ]"), "{text}");
+    app.handle(AppEvent::Terminal(key("right")));
+    app.handle(AppEvent::Terminal(key("enter")));
+    let stop = UiRequest::PanelAction("jobs.stop:j1".into());
+    assert_eq!(requests.try_recv().expect("Enter on stop"), stop);
+    term.draw(|f| app.render(f)).unwrap();
+    let (x, y) = find_text(term.backend().buffer(), "[ stop j1 ]").unwrap();
+    app.handle(AppEvent::Terminal(click(x + 2, y)));
+    assert_eq!(requests.try_recv().expect("a click on stop"), stop);
+
+    h.seen.clear();
+    h.d.request(stop).await;
+    h.until(
+        |e| matches!(e, AppEvent::Core(CoreEvent::Notify { title, .. }) if title == "stopped j1"),
+    )
+    .await;
+    dead(pid1).await;
+    let after = h.panel(jobs::TITLE).await;
+    assert_eq!(after[0], "0 running · 1 ended", "{after:?}");
+    assert!(
+        after
+            .iter()
+            .any(|l| l.starts_with("j1") && l.contains("stopped")),
+        "{after:?}"
+    );
+
+    // Ending the session (quit, /new, /resume) stops the jobs still running.
+    h.d.request(UiRequest::Submit("again".into())).await;
+    h.finish_turn().await;
+    let pid2 = wait_pid("pid2").await;
+    h.d.finish_core().await;
+    dead(pid2).await;
+}
+
+/// A subagent's background jobs live in the session's manager: the
+/// subagent hears about the job that ended while it ran, the job still
+/// running when it ended is listed and stopped in `/jobs`, and its end is
+/// reported to the top-level agent.
+#[tokio::test]
+async fn subagent_jobs_are_reported_listed_and_stopped_with_the_session() {
+    let env = Env::new();
+    let agents = env.project.join(".harness/agents");
+    std::fs::create_dir_all(&agents).unwrap();
+    std::fs::write(
+        agents.join("coder.yaml"),
+        "name: coder\nprompt_text: You lead.\ntools: [bash]\nsubagents: [worker]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        agents.join("worker.yaml"),
+        "name: worker\ndescription: Works\nprompt_text: You work.\ntools: [bash]\n",
+    )
+    .unwrap();
+    let mut cfg = harness_config::ini::load_str("", None).unwrap();
+    cfg.general.data_dir = env.root.join("data");
+    let data = harness_config::paths::DataDir::from_config(&cfg)
+        .open()
+        .unwrap();
+    let snap = harness_config::trust::snapshot_project(&env.project)
+        .unwrap()
+        .unwrap();
+    harness_config::trust::TrustStore::from_data_dir(&data)
+        .trust(&env.project, &snap)
+        .unwrap();
+    let script = env.script(
+        r#"responses:
+  - content: [ { tool_use: { name: spawn_agent, input: { agent: worker, brief: "build it" } } } ]
+  - content: [ { tool_use: { name: bash, input: { command: "sleep 0.3; echo child-out; exit 7", run_in_background: true } } } ]
+  - content: [ { tool_use: { name: bash, input: { command: "sleep 1" } } } ]
+  - content: [ { tool_use: { name: bash, input: { command: "sleep 60 & echo $! > pid; wait", run_in_background: true } } } ]
+  - content: [ { text: "worker done" } ]
+  - content: [ { text: "lead done" } ]
+  - content: [ { text: "ok" } ]
+"#,
+    );
+    let mut h = Harness::start(&env, &script).await;
+    h.d.request(UiRequest::ModeChanged(Mode::Auto)).await;
+    h.d.request(UiRequest::Submit("build".into())).await;
+    h.finish_turn().await;
+    let pid_file = env.project.join("pid");
+    let mut pid = None;
+    for _ in 0..200 {
+        if let Ok(s) = std::fs::read_to_string(&pid_file)
+            && s.ends_with('\n')
+        {
+            pid = Some(s.trim().parse::<u32>().unwrap());
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let pid = pid.expect("the worker's job wrote its pid");
+
+    // Requests as recorded: (child?, messages).
+    let requests = |seen: &[AppEvent]| -> Vec<(bool, String)> {
+        seen.iter()
+            .filter_map(|e| match e {
+                AppEvent::Run(ev) => match &ev.kind {
+                    EventKind::ModelCallStarted {
+                        request: harness_events::schema::Payload::Json(v),
+                        ..
+                    } => Some((ev.parent_node_id.is_some(), v["messages"].to_string())),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    };
+    let notice = "Notice from harness: background job";
+    // 2 requests of the top-level agent, 4 of the worker.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while requests(&h.seen).len() < 6 {
+        match tokio::time::timeout_at(deadline, h.rx.recv()).await {
+            Ok(Some(ev)) => h.seen.push(ev),
+            _ => panic!("requests missing: {:?}", requests(&h.seen)),
+        }
+    }
+    let reqs = requests(&h.seen);
+    let child: Vec<&String> = reqs.iter().filter(|r| r.0).map(|r| &r.1).collect();
+    assert_eq!(child.len(), 4, "{reqs:?}");
+    assert!(
+        child[2].contains(&format!("{notice} j1 ended (exit code 7)")),
+        "the worker hears about its own job: {}",
+        child[2]
+    );
+    assert!(child[2].contains("child-out"), "{}", child[2]);
+    assert!(!child[3].contains("j2 ended"), "{}", child[3]);
+    let top: Vec<&String> = reqs.iter().filter(|r| !r.0).map(|r| &r.1).collect();
+    assert!(
+        top.iter().all(|m| !m.contains(notice)),
+        "the worker's job is not reported twice: {top:?}"
+    );
+
+    // /jobs lists the worker's jobs (one manager per session) and stops
+    // the one still running.
+    h.seen.clear();
+    h.d.request(UiRequest::Submit("/jobs".into())).await;
+    let (lines, buttons) = match h
+        .until(
+            |e| matches!(e, AppEvent::Core(CoreEvent::Panel { title, .. }) if title == jobs::TITLE),
+        )
+        .await
+    {
+        AppEvent::Core(CoreEvent::Panel { lines, buttons, .. }) => (lines.clone(), buttons.clone()),
+        _ => unreachable!(),
+    };
+    assert_eq!(lines[0], "1 running · 1 ended", "{lines:?}");
+    let ids: Vec<&str> = buttons.iter().map(|b| b.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        [
+            "jobs.output:j1",
+            "jobs.output:j2",
+            "jobs.stop:j2",
+            "jobs.refresh"
+        ]
+    );
+    h.d.request(UiRequest::PanelAction("jobs.stop:j2".into()))
+        .await;
+    h.until(
+        |e| matches!(e, AppEvent::Core(CoreEvent::Notify { title, .. }) if title == "stopped j2"),
+    )
+    .await;
+    for _ in 0..100 {
+        if harness_tools::conformance::local_process_gone(pid) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(harness_tools::conformance::local_process_gone(pid));
+    h.until(|e| matches!(e, AppEvent::Run(ev) if matches!(&ev.kind, EventKind::BashJob { job_id, state, .. } if job_id == "j2" && state == "stopped")))
+        .await;
+
+    // The worker is gone, so the top-level agent hears about j2.
+    h.seen.clear();
+    h.d.request(UiRequest::Submit("next".into())).await;
+    h.finish_turn().await;
+    h.until(
+        |e| matches!(e, AppEvent::Run(ev) if matches!(ev.kind, EventKind::ModelCallStarted { .. })),
+    )
+    .await;
+    let reqs = requests(&h.seen);
+    assert_eq!(reqs.len(), 1, "{reqs:?}");
+    let last = &reqs.last().unwrap().1;
+    assert!(
+        last.contains(&format!("{notice} j2 ended (stopped)")),
+        "{last}"
+    );
+    assert!(!last.contains(&format!("{notice} j1")), "{last}");
+    h.d.finish_core().await;
+}

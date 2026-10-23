@@ -38,6 +38,7 @@ use crate::chat::text::{truncate, width};
 use crate::fuzzy::{self, Fuzzy};
 use crate::interaction::{ElementId, HitMap};
 use crate::keys::Action;
+use crate::selection::{Join, TextRegion};
 use crate::theme::{Theme, Token};
 use nucleo_matcher::Utf32String;
 
@@ -760,8 +761,17 @@ impl Input {
     /// `(text, paste index)` pieces. Returns the rows and the cursor's
     /// `(row, col)`.
     fn rows(&self, width: usize) -> (Vec<Row>, (usize, usize)) {
+        let (rows, cursor, _) = self.layout_rows(width);
+        (rows, cursor)
+    }
+
+    /// [`Input::rows`], plus for each row whether it starts a line of the
+    /// text (the first row, or after a newline) rather than continuing a
+    /// width-wrapped one.
+    fn layout_rows(&self, width: usize) -> (Vec<Row>, (usize, usize), Vec<bool>) {
         let avail = width.saturating_sub(width_of(PROMPT)).max(1);
         let mut rows: Vec<Row> = vec![Vec::new()];
+        let mut hard = vec![true];
         let mut w = 0;
         let mut cursor = (0, 0);
         let mut pos = 0;
@@ -779,6 +789,7 @@ impl Input {
             pos += c.len_utf8();
             if c == '\n' {
                 rows.push(Vec::new());
+                hard.push(true);
                 w = 0;
                 continue;
             }
@@ -792,6 +803,7 @@ impl Input {
             let cw = width_of(&s);
             if w + cw > avail && w > 0 {
                 rows.push(Vec::new());
+                hard.push(false);
                 w = 0;
                 if pos - c.len_utf8() == self.cursor {
                     cursor = (rows.len() - 1, 0);
@@ -803,11 +815,40 @@ impl Input {
         if pos == self.cursor {
             if w >= avail {
                 rows.push(Vec::new());
+                hard.push(false);
                 w = 0;
             }
             cursor = (rows.len() - 1, w);
         }
-        (rows, cursor)
+        (rows, cursor, hard)
+    }
+
+    /// Registers the visible text (without the prompt) for text selection.
+    /// A row that continues a width-wrapped row joins it with a space when
+    /// the wrap fell on one, else directly.
+    fn register_text(&self, area: Rect, rows: &[Row], hard: &[bool], h: usize) {
+        let prompt = width_of(PROMPT) as u16;
+        let rect = Rect {
+            x: area.x + prompt.min(area.width),
+            width: area.width.saturating_sub(prompt),
+            ..area
+        };
+        let mut region = TextRegion::new("input", rect).scrolled(self.scroll);
+        let joins = (self.scroll..self.scroll + h).map(|r| {
+            if hard.get(r).is_none_or(|h| *h) {
+                Join::Hard
+            } else if rows
+                .get(r - 1)
+                .and_then(|row| row.last())
+                .is_some_and(|(t, _)| t.ends_with(' '))
+            {
+                Join::Space
+            } else {
+                Join::Direct
+            }
+        });
+        region.set_joins(joins);
+        crate::selection::register(region);
     }
 
     /// Rows the input needs at `width` (1..=[`MAX_INPUT_ROWS`]).
@@ -835,7 +876,7 @@ impl Input {
         wrap: &dyn Fn(InputAction) -> A,
     ) {
         hits.register(INPUT_ID, area, wrap(InputAction::Focus));
-        let (rows, (crow, ccol)) = self.rows(area.width as usize);
+        let (rows, (crow, ccol), hard) = self.layout_rows(area.width as usize);
         let h = area.height as usize;
         if h == 0 || area.width == 0 {
             return;
@@ -844,6 +885,9 @@ impl Input {
             self.scroll = crow;
         } else if crow >= self.scroll + h {
             self.scroll = crow + 1 - h;
+        }
+        if !self.text.is_empty() {
+            self.register_text(area, &rows, &hard, h);
         }
         let base = if focused {
             theme.focused()
@@ -869,7 +913,7 @@ impl Input {
                             st = st.patch(theme.focused());
                         }
                         spans.push(Span::styled(text.clone(), st));
-                        hits.register(
+                        hits.register_button(
                             id,
                             Rect::new(
                                 x,

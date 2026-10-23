@@ -266,7 +266,10 @@ async fn standard_tools_work_end_to_end() {
         scrubber: EnvScrubber::new(Vec::new(), Vec::new()),
         spill: Arc::new(RunBlobSink(BlobStore::new(blobs.path()))),
     });
-    assert_eq!(tools.names(), ["read", "write", "edit", "bash"]);
+    assert_eq!(
+        tools.names(),
+        ["read", "write", "edit", "bash", "bash_jobs", "grep", "glob"]
+    );
     let mut msg = message(vec![
         use_block("w", "write", json!({"path": "a.txt", "content": "hello\n"})),
         use_block("b", "bash", json!({"command": "cat a.txt"})),
@@ -278,6 +281,62 @@ async fn standard_tools_work_end_to_end() {
     assert!(!out[0].is_error, "{}", out[0].text());
     assert!(out[1].text().contains("hello"), "{}", out[1].text());
     assert!(matches!(events.events()[0].1, ToolEvent::FileChanged(_)));
+}
+
+#[tokio::test]
+async fn search_tools_are_parallel_policy_checked_reads() {
+    use harness_policy::rules::PolicyConfig;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    for (rel, text) in [
+        ("src/lib.rs", "pub fn needle() {}\n"),
+        ("secrets/key.rs", "needle = 1\n"),
+        ("notes.md", "needle\n"),
+    ] {
+        std::fs::create_dir_all(root.join(rel).parent().unwrap()).unwrap();
+        std::fs::write(root.join(rel), text).unwrap();
+    }
+    let tools = ToolSet::standard(StandardTools {
+        workspace: Arc::new(harness_tools::local::LocalWorkspace::new(&root)),
+        exec: Arc::new(harness_tools::local::LocalExec::new()),
+        cwd: root.clone(),
+        config: ToolsConfig::default(),
+        scrubber: EnvScrubber::new(Vec::new(), Vec::new()),
+        spill: Arc::new(harness_tools::spill::MemoryBlobSink::new()),
+    });
+    let config = PolicyConfig {
+        paths_protected: vec!["secrets/**".into()],
+        ..Default::default()
+    };
+    let engine = PolicyEngine::new(&config, &root).unwrap();
+    let broker = ApprovalBroker::new(engine.grants().clone(), Arc::new(DenyUi), &root);
+    let gate = PolicyGate::new(engine, Arc::new(broker), Mode::Ask);
+    let mut msg = message(vec![
+        use_block("g1", "grep", json!({"pattern": "needle"})),
+        use_block("g2", "glob", json!({"pattern": "**/*.rs"})),
+        use_block(
+            "g3",
+            "grep",
+            json!({"pattern": "needle", "path": "secrets"}),
+        ),
+        use_block("r1", "read", json!({"path": "notes.md"})),
+    ]);
+    let calls = prepare_calls(&mut msg, &tools);
+    assert!(
+        calls[..2]
+            .iter()
+            .all(|c| c.plan == CallPlan::Run { read_only: true }),
+        "{calls:?}"
+    );
+    let d = Dispatcher::new(tools, Arc::new(gate));
+    let out = d.run(None, &calls, &CancellationToken::new(), &nop).await;
+    // Ask mode still runs reads without approval; protected files are hidden.
+    assert_eq!(out[0].text(), "notes.md\nsrc/lib.rs\n[2 files match.]");
+    assert_eq!(out[1].text(), "src/lib.rs");
+    assert!(out[2].is_error, "{}", out[2].text());
+    assert!(out[2].text().contains("secrets/**"), "{}", out[2].text());
+    assert!(!out[3].is_error, "{}", out[3].text());
 }
 
 #[test]
@@ -386,6 +445,25 @@ async fn live_output_and_policy_decisions_reach_the_run_log() {
         })
         .collect();
     assert_eq!(output, "héllo\n");
+    // The bash call reports its timeout as tool progress for the UI.
+    let progress: Vec<Option<u64>> = events
+        .iter()
+        .filter_map(|e| match &e.kind {
+            EventKind::ToolProgress {
+                call_id,
+                timeout_ms,
+                ..
+            } if call_id == "b1" => Some(*timeout_ms),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        progress.first(),
+        Some(&Some(
+            ToolsConfig::default().bash_timeout().as_millis() as u64
+        )),
+        "{progress:?}"
+    );
     let decisions: Vec<(&str, &str, &str)> = events
         .iter()
         .filter_map(|e| match &e.kind {

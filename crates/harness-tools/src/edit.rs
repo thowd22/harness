@@ -23,7 +23,7 @@ use crate::write::{Mutator, to_crlf, uses_crlf};
 pub const NAME: &str = "edit";
 
 /// One-line description shown to the model.
-pub const DESCRIPTION: &str = "Replace an exact string in a file you have read. old_string must be unique unless replace_all is true.";
+pub const DESCRIPTION: &str = "Replace an exact string in a file you have read with the read tool (bash output does not count). old_string must be unique unless replace_all is true.";
 
 /// Arguments of the edit tool.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

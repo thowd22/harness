@@ -359,3 +359,202 @@ async fn every_remote_operation_is_audited_with_its_host() {
     assert_eq!(ev[5].target.as_deref(), Some("true"));
     assert!(ev[0].target.as_deref().unwrap().ends_with("a.txt"));
 }
+
+/// Liveness samples of a remote bash call come through the helper, so a busy
+/// quiet command on the host shows advancing CPU like a local one.
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_bash_reports_liveness_through_the_helper() {
+    let helper = Helper::new(HelperOptions {
+        liveness_interval: Some(std::time::Duration::from_millis(150)),
+        ..Default::default()
+    });
+    let client = RemoteClient::connect(
+        Arc::new(InProcessConnector::new(helper)),
+        ClientOptions::new("gpu-box"),
+    )
+    .await
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let exec: Arc<dyn Exec> = Arc::new(RemoteExec::new(client, RemoteEnv::default()));
+    let tool = bash(exec, dir.path());
+    let events = Arc::new(RecordingEvents::new());
+    let ctx = ToolContext::new("r1").with_events(events.clone());
+    tool.call(
+        &ctx,
+        json!({"command": "end=$((SECONDS+2)); while [ $SECONDS -lt $end ]; do :; done"}),
+    )
+    .await
+    .unwrap();
+    let samples: Vec<_> = events
+        .events()
+        .into_iter()
+        .filter_map(|(_, e)| match e {
+            ToolEvent::Progress(p) => p.liveness,
+            _ => None,
+        })
+        .collect();
+    assert!(samples.len() >= 3, "{samples:?}");
+    assert!(
+        samples[samples.len() - 1].cpu > samples[0].cpu,
+        "CPU advances on the host: {samples:?}"
+    );
+}
+
+/// Runs the same grep and glob calls (and one bad regex) over `ws`.
+async fn search_session(ws: Arc<dyn Workspace>) -> Vec<String> {
+    use harness_tools::glob::GlobTool;
+    use harness_tools::grep::GrepTool;
+    let root = ws.root().to_path_buf();
+    for (rel, text, age) in [
+        (".gitignore", "build/\n", 500),
+        ("src/lib.rs", "pub fn connect() {}\n// TODO\n", 300),
+        ("src/net.rs", "fn connect_tcp() {}\n", 10),
+        ("build/out.rs", "connect\n", 1),
+    ] {
+        ws.write(Path::new(rel), text.as_bytes()).await.unwrap();
+        let t = std::time::SystemTime::now() - std::time::Duration::from_secs(age);
+        std::fs::File::options()
+            .write(true)
+            .open(root.join(rel))
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
+    }
+    let spill = || Spiller::new(Arc::new(MemoryBlobSink::new()), &ToolsConfig::default());
+    let grep = GrepTool::new(ws.clone(), spill());
+    let glob = GlobTool::new(ws.clone(), spill());
+    let ctx = ToolContext::new("c");
+    let mut out = Vec::new();
+    for args in [
+        json!({"pattern": "connect"}),
+        json!({"pattern": "connect|TODO", "output_mode": "content", "-C": 1}),
+        json!({"pattern": "o", "output_mode": "count", "type": "rust"}),
+        json!({"pattern": "a("}),
+    ] {
+        out.push(match grep.call(&ctx, args).await {
+            Ok(o) => o.text().to_owned(),
+            Err(e) => format!("error: {e}"),
+        });
+    }
+    out.push(
+        glob.call(&ctx, json!({"pattern": "**/*.rs"}))
+            .await
+            .unwrap()
+            .text()
+            .to_owned(),
+    );
+    out
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn grep_and_glob_run_through_the_helper_like_local() {
+    let local_dir = tempfile::tempdir().unwrap();
+    let remote_dir = tempfile::tempdir().unwrap();
+    let s = setup().await;
+    let local = search_session(Arc::new(LocalWorkspace::new(local_dir.path()))).await;
+    let remote = search_session(Arc::new(RemoteWorkspace::new(
+        s.client.clone(),
+        remote_dir.path().to_string_lossy(),
+    )))
+    .await;
+    assert_eq!(local[0], "src/lib.rs\nsrc/net.rs\n[2 files match.]");
+    assert_eq!(local[4], "src/net.rs\nsrc/lib.rs");
+    assert!(local[3].contains("invalid regex"), "{}", local[3]);
+    assert_eq!(remote, local, "same results over the helper");
+}
+
+/// Polls `jobs` until a finished job is handed out.
+async fn finished_job(
+    jobs: &harness_tools::jobs::JobManager,
+) -> (harness_tools::jobs::JobInfo, String) {
+    for _ in 0..400 {
+        if let Some(done) = jobs.take_finished().pop() {
+            return done;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("no job finished: {:?}", jobs.list());
+}
+
+/// Background bash jobs run on a remote host through the helper like
+/// locally: the call returns at once, output and the exit come back, and a
+/// stop kills the job's whole process group on the host.
+#[tokio::test(flavor = "multi_thread")]
+async fn background_jobs_run_and_stop_through_the_helper() {
+    let s = setup().await;
+    let dir = tempfile::tempdir().unwrap();
+    let exec: Arc<dyn Exec> = Arc::new(RemoteExec::new(
+        s.client.clone(),
+        RemoteEnv::new(scrubber()),
+    ));
+    let tool = bash(exec, dir.path());
+    let ctx = ToolContext::new("r1");
+    let out = tool
+        .call(
+            &ctx,
+            json!({"command": "echo \"remote $FOO\"; exit 4", "run_in_background": true}),
+        )
+        .await
+        .unwrap();
+    assert!(
+        out.text().contains("background job j1 started"),
+        "{}",
+        out.text()
+    );
+    let (info, tail) = finished_job(tool.jobs()).await;
+    assert_eq!(info.status, harness_tools::jobs::JobStatus::Exited(4));
+    assert_eq!(tail, "remote visible\n");
+
+    tool.call(
+        &ctx,
+        json!({"command": "sleep 60 & echo $! > pid; wait", "run_in_background": true}),
+    )
+    .await
+    .unwrap();
+    let pid_file = dir.path().join("pid");
+    let mut pid = String::new();
+    for _ in 0..200 {
+        if let Ok(p) = std::fs::read_to_string(&pid_file)
+            && p.ends_with('\n')
+        {
+            pid = p.trim().to_owned();
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let pid: u32 = pid.parse().expect("the job wrote its child's pid");
+    let info = tool.jobs().stop("j2").await.unwrap();
+    assert_eq!(info.status, harness_tools::jobs::JobStatus::Stopped);
+    for _ in 0..100 {
+        if harness_tools::conformance::local_process_gone(pid) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("the job's child {pid} survived the stop");
+}
+
+/// Without the helper (the degraded shell fallback) background jobs still
+/// work: harness supervises the shell session and reports the exit.
+#[tokio::test(flavor = "multi_thread")]
+async fn background_jobs_work_on_the_shell_fallback() {
+    use harness_remote::shell::{LocalShell, ShellExec};
+    let dir = tempfile::tempdir().unwrap();
+    let exec: Arc<dyn Exec> = Arc::new(ShellExec::new(Arc::new(LocalShell::default())));
+    let tool = bash(exec, dir.path());
+    let out = tool
+        .call(
+            &ToolContext::new("s1"),
+            json!({"command": "sleep 0.2; echo fallback", "run_in_background": true}),
+        )
+        .await
+        .unwrap();
+    assert!(
+        out.text().contains("background job j1 started"),
+        "{}",
+        out.text()
+    );
+    let (info, tail) = finished_job(tool.jobs()).await;
+    assert_eq!(info.status, harness_tools::jobs::JobStatus::Exited(0));
+    assert!(tail.contains("fallback\n"), "{tail}");
+}

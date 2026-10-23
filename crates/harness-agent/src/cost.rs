@@ -507,10 +507,14 @@ impl CostReport {
 }
 
 fn hit_suffix(t: &Totals) -> String {
-    match t.cache_hit_rate() {
+    let mut out = match t.cache_hit_rate() {
         Some(r) => format!(" · cache {:.0}%", r * 100.0),
         None => String::new(),
+    };
+    if t.usage.cache_write > 0 {
+        out.push_str(&format!(" · {} written to cache", t.usage.cache_write));
     }
+    out
 }
 
 #[cfg(test)]

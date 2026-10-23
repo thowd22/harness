@@ -41,7 +41,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{Event, KeyEvent, KeyEventKind, MouseEvent};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+};
 use futures::StreamExt;
 use harness_config::ini::config::Config;
 use harness_events::blobs::BlobStore;
@@ -76,6 +78,7 @@ use crate::model_picker::{ModelPicker, PickerAction, PickerOutcome};
 use crate::notify::Level;
 use crate::palette::{EntryKind, Invocation, PaletteEntry};
 use crate::panel::{Panel, PanelButton, PanelOutput};
+use crate::selection::{self, Chrome, KeyOutcome, MouseOutcome, Scroll, Selector, TextRegion};
 use crate::session_picker::{SessionAction, SessionOutcome, SessionPicker, SessionRow};
 use crate::status::StatusLine;
 use crate::theme::{ColorDepth, Theme, ThemeError, Token};
@@ -137,6 +140,10 @@ pub enum UiAction {
     ShowHelp,
     /// Close the key help overlay.
     CloseHelp,
+    /// Keyboard selection: copy the selection and leave.
+    SelectCopy,
+    /// Keyboard selection: leave without copying.
+    SelectDone,
 }
 
 /// Commands other components (palette, slash commands) send to the app.
@@ -636,7 +643,15 @@ pub struct App {
     requests: mpsc::UnboundedSender<UiRequest>,
     suspend: KeyChord,
     clipboard: Clipboard,
+    select: Selector,
+    /// A press on a `/model` or `/resume` picker row, delivered on the
+    /// release when no drag (a text selection) happened in between.
+    held_press: Option<MouseEvent>,
+    clock: Clock,
 }
+
+/// The time source for double and triple clicks ([`App::set_clock`]).
+pub type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
 
 impl App {
     /// Creates the app. Requests for the core go to `requests`.
@@ -696,6 +711,9 @@ impl App {
             requests,
             suspend: KeyChord::parse(SUSPEND_CHORD).expect("suspend chord parses"),
             clipboard: Clipboard::new(cfg_clipboard),
+            select: Selector::new(),
+            held_press: None,
+            clock: Arc::new(Instant::now),
         }
     }
 
@@ -703,6 +721,16 @@ impl App {
     pub fn with_redactor(mut self, redactor: Arc<harness_events::redact::Redactor>) -> App {
         self.clipboard = self.clipboard.with_redactor(redactor);
         self
+    }
+
+    /// The text selection (mouse and keyboard).
+    pub fn selection(&self) -> &Selector {
+        &self.select
+    }
+
+    /// Replaces the clock that times double and triple clicks (tests).
+    pub fn set_clock(&mut self, clock: Clock) {
+        self.clock = clock;
     }
 
     /// Replaces the clipboard (tests, custom tools).
@@ -769,6 +797,10 @@ impl App {
     /// Whether animation ticks are needed (something animates and
     /// animations are on).
     pub fn needs_tick(&self) -> bool {
+        // A drag held past an edge scrolls on every tick.
+        if self.select.autoscroll().is_some() {
+            return true;
+        }
         if !self.cfg.animations {
             return false;
         }
@@ -933,6 +965,10 @@ impl App {
     /// Handles one animation tick.
     pub fn tick(&mut self) {
         self.ticks += 1;
+        if let Some(s) = self.select.autoscroll() {
+            self.wheel(s);
+            self.dirty = true;
+        }
         if self.needs_tick() {
             self.spinner = (self.spinner + 1) % SPINNER.len();
             let outs = self.chat.tick(Instant::now());
@@ -949,6 +985,8 @@ impl App {
     /// Handles one event.
     pub fn handle(&mut self, ev: AppEvent) {
         self.chat.set_screen_open(self.screen.is_some());
+        self.chat
+            .set_covered(self.screen.is_some() || self.view != View::Chat);
         match ev {
             AppEvent::Terminal(Event::Key(k)) => self.handle_key(&k),
             AppEvent::Terminal(Event::Mouse(m)) => self.handle_mouse(&m),
@@ -1238,6 +1276,14 @@ impl App {
                 self.help_open = false;
                 self.interaction.clear_focus();
             }
+            UiAction::SelectCopy => {
+                let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+                let out = self.select.key(&enter);
+                self.selection_outcome(out);
+            }
+            UiAction::SelectDone => {
+                self.select.clear();
+            }
         }
         self.dirty = true;
     }
@@ -1304,6 +1350,11 @@ impl App {
             if let Some(node) = self.checkpoint_target() {
                 self.request(UiRequest::RestoreCheckpoint(node));
             }
+            return;
+        }
+        if inv.id == crate::chat::copy::ids::SELECT {
+            // Only reaches the app while the chat is covered.
+            self.start_key_selection();
             return;
         }
         if inv.id == FOCUS_GOALBAR_ID {
@@ -1623,6 +1674,36 @@ impl App {
             Some(Action::Interrupt) => return self.request(UiRequest::Interrupt),
             _ => {}
         }
+        if self.select.keyboard() {
+            let out = if action == Some(Action::Copy) {
+                self.select
+                    .key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            } else {
+                self.select.key(k)
+            };
+            return self.selection_outcome(out);
+        }
+        if self.select.selection().is_some() {
+            // Esc clears a mouse selection; the copy key copies it again;
+            // any other key clears it and goes on as usual.
+            if k.code == KeyCode::Esc && k.modifiers.is_empty() {
+                self.select.clear();
+                return;
+            }
+            let text = self.select.text();
+            if action == Some(Action::Copy) && !text.is_empty() {
+                return self.copy_effect("selection", text);
+            }
+            self.select.clear();
+        }
+        let covered = self.view != View::Chat || self.screen.is_some();
+        // Over the pickers too: a press on a picker row picks it, so the
+        // keyboard is how to copy a row's text.
+        let picker = self.models.is_some() || self.sessions.is_some();
+        let overlay = self.login.is_some() || self.chat.palette().is_open() || self.goal_focused;
+        if action == Some(Action::Select) && (covered || picker) && !overlay {
+            return self.start_key_selection();
+        }
         if self.login.is_some() {
             return self.login_event(&Event::Key(*k));
         }
@@ -1703,11 +1784,106 @@ impl App {
         self.chat_outputs(outs);
     }
 
+    /// Starts keyboard selection in the view or screen that is shown.
+    fn start_key_selection(&mut self) {
+        if !self.select.start_keyboard() {
+            self.chat
+                .notify(Level::Warning, "nothing to select", None, Instant::now());
+        }
+        self.dirty = true;
+    }
+
+    fn selection_outcome(&mut self, out: KeyOutcome) {
+        match out {
+            KeyOutcome::Ignored | KeyOutcome::Changed | KeyOutcome::Exit => {}
+            KeyOutcome::Scroll(s) => self.wheel(s),
+            KeyOutcome::Copy(text) if text.is_empty() => {
+                self.chat
+                    .notify(Level::Warning, "nothing to copy", None, Instant::now())
+            }
+            KeyOutcome::Copy(text) => self.copy_effect("selection", text),
+        }
+        self.dirty = true;
+    }
+
+    /// One wheel notch at `s` (autoscroll while selecting).
+    fn wheel(&mut self, s: Scroll) {
+        let kind = if s.up {
+            MouseEventKind::ScrollUp
+        } else {
+            MouseEventKind::ScrollDown
+        };
+        self.route_mouse(&MouseEvent {
+            kind,
+            column: s.x,
+            row: s.y,
+            modifiers: KeyModifiers::NONE,
+        });
+    }
+
+    /// Mouse input: the selection layer sees it first (drags select,
+    /// releases copy); everything else is routed as a click or a wheel.
     fn handle_mouse(&mut self, m: &MouseEvent) {
         if !self.mouse {
             return;
         }
         self.dirty = true;
+        let footer = self.footer;
+        let on_footer = m.column >= footer.x
+            && m.column < footer.right()
+            && m.row >= footer.y
+            && m.row < footer.bottom();
+        if self.select.keyboard() && on_footer {
+            // The selection bar's buttons.
+            return self.route_mouse(m);
+        }
+        let (outcome, scroll) = self.select.mouse(m, (self.clock)());
+        if let Some(s) = scroll {
+            self.wheel(s);
+        }
+        let press = m.kind == MouseEventKind::Down(crossterm::event::MouseButton::Left);
+        let release = m.kind == MouseEventKind::Up(crossterm::event::MouseButton::Left);
+        if press {
+            self.held_press = None;
+        }
+        match outcome {
+            MouseOutcome::Pass if press && self.picker_row_at(m.column, m.row) => {
+                // Picking a model or resuming a session is a click: it
+                // waits for the release, so a drag selects the row's text.
+                self.held_press = Some(*m);
+            }
+            MouseOutcome::Pass => {
+                if release && let Some(p) = self.held_press.take() {
+                    self.route_mouse(&p);
+                }
+                self.route_mouse(m)
+            }
+            MouseOutcome::Consumed | MouseOutcome::Copy(_) if release => {
+                self.held_press = None;
+                if let MouseOutcome::Copy(text) = outcome {
+                    self.copy_effect("selection", text);
+                }
+            }
+            MouseOutcome::Consumed => {}
+            MouseOutcome::Copy(text) => self.copy_effect("selection", text),
+        }
+    }
+
+    /// Whether `(x, y)` is on a clickable element of the open `/model` or
+    /// `/resume` picker.
+    fn picker_row_at(&self, x: u16, y: u16) -> bool {
+        if self.help_open || self.login.is_some() {
+            return false;
+        }
+        if let Some(m) = &self.models {
+            return m.interaction.hits().hit(x, y).is_some();
+        }
+        self.sessions
+            .as_ref()
+            .is_some_and(|m| m.interaction.hits().hit(x, y).is_some())
+    }
+
+    fn route_mouse(&mut self, m: &MouseEvent) {
         if self.login.is_some() && !self.help_open {
             return self.login_event(&Event::Mouse(*m));
         }
@@ -1791,6 +1967,11 @@ impl App {
         let indicator = self.goalbar.indicator(&self.goals, area.width);
         self.chat.status_mut().set_goal_indicator(indicator);
 
+        selection::begin_frame();
+        // Fallback text regions: anything a view does not register itself
+        // (headers, plain text) is still selectable; panes, modals and
+        // masks registered while rendering lie on top.
+        selection::register(TextRegion::new("screen", main).chrome(Chrome::Drawing));
         match &mut self.screen {
             Some(Screen::Detail(d)) => d.render(frame, main, wall),
             Some(Screen::Diff(d)) => d.render(frame, main),
@@ -1822,6 +2003,7 @@ impl App {
             self.chat.render_toast_overlay(frame, below);
         }
         if let Some(p) = pane {
+            selection::register(TextRegion::new("goalbar", p).chrome(Chrome::Drawing));
             self.goalbar.render(frame, p, &self.goals, &self.run);
         }
 
@@ -1847,6 +2029,18 @@ impl App {
                 .render(frame, area, &theme, &mut login_hits, &|a: LoginAction| a);
             l.interaction.end_frame(login_hits);
         }
+        // Over a modal only the newest toast shows (e.g. "copied selection"
+        // after a drag inside a picker), at the bottom right where it hides
+        // the modal's help line rather than the rows being worked on.
+        if self.models.is_some() || self.sessions.is_some() || self.login.is_some() {
+            let h = 4.min(area.height);
+            let at = Rect {
+                y: area.bottom() - h,
+                height: h,
+                ..area
+            };
+            self.chat.render_toast_overlay(frame, at);
+        }
         if self.help_open {
             HelpOverlay::new(&self.cfg.keymap, &theme).render(
                 frame,
@@ -1858,6 +2052,10 @@ impl App {
         if self.interaction.end_frame(hits) {
             self.dirty = true;
         }
+        let regions = selection::end_frame();
+        let style = theme.selection();
+        self.select
+            .end_frame(regions, frame.buffer_mut(), style, style);
     }
 
     fn render_footer(
@@ -1867,6 +2065,9 @@ impl App {
         theme: &Theme,
         hits: &mut HitMap<UiAction>,
     ) {
+        if self.select.keyboard() {
+            return render_select_bar(frame, area, theme, hits);
+        }
         let mut x = area.x;
         let mut spans = Vec::new();
         for v in [View::Chat, View::Map] {
@@ -1942,6 +2143,52 @@ impl App {
             hits.register(id, rect, UiAction::ShowHelp);
         }
     }
+}
+
+/// Element id of the keyboard selection bar's copy button.
+pub const SELECT_COPY_ID: &str = "footer.select.copy";
+/// Element id of the keyboard selection bar's done button.
+pub const SELECT_DONE_ID: &str = "footer.select.done";
+
+/// The footer in keyboard selection mode:
+/// `SELECT [copy] [done] ←↑↓→ move · shift extend · … · esc done`.
+fn render_select_bar(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    theme: &Theme,
+    hits: &mut HitMap<UiAction>,
+) {
+    let mut spans = vec![
+        Span::styled(" SELECT ", theme.fg_on(Token::Bg, Token::Accent)),
+        Span::raw(" "),
+    ];
+    let mut x = area.x
+        + spans
+            .iter()
+            .map(|s| crate::chat::text::width(&s.content) as u16)
+            .sum::<u16>();
+    for (id, label, action) in [
+        (SELECT_COPY_ID, "[copy]", UiAction::SelectCopy),
+        (SELECT_DONE_ID, "[done]", UiAction::SelectDone),
+    ] {
+        let w = crate::chat::text::width(label) as u16;
+        let eid = ElementId::from(id);
+        let mut st = theme.fg(Token::Accent);
+        if hits.is_focused(&eid) {
+            st = st.patch(theme.focused());
+        }
+        spans.push(Span::styled(label, st));
+        spans.push(Span::raw(" "));
+        if x + w <= area.right() {
+            hits.register(eid, Rect::new(x, area.y, w, 1), action);
+        }
+        x = x.saturating_add(w + 1);
+    }
+    spans.push(Span::styled(
+        " ←↑↓→ move · shift extend · tab next pane · enter copy · esc done",
+        theme.fg(Token::Muted),
+    ));
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 /// Raw-mode and screen control, abstracted so the loop can be tested.
@@ -2280,3 +2527,6 @@ impl TerminalControl for RecordingControl {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod selection_tests;

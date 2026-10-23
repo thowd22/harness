@@ -8,8 +8,14 @@
 //!   retrying, waiting for approval, verifying, compacting, syncing) from run
 //!   events, keeps phase and turn timers and live token and cost counts, and
 //!   renders the activity line shown above the input.
-//! - When no provider data or tool output arrives for `[ui] stall_after`,
-//!   [`Activity::stall`] reports it and the line turns `stalled` (orange).
+//! - When no provider data arrives for `[ui] stall_after`, [`Activity::stall`]
+//!   reports it and the line turns `stalled` (orange): waiting on the model.
+//! - A running tool is shown as working, with its elapsed time against its
+//!   timeout and, when the executor samples it, its process group's CPU
+//!   time (`tool_progress` events). Only a tool with no output, no CPU
+//!   progress and nothing runnable for `stall_after` (at least
+//!   [`QUIET_FLOOR`]) gets a soft "quiet" hint naming it and the cancel key;
+//!   a tool whose liveness is unknown is never flagged.
 //! - [`Spinner`] is the shared braille spinner. With `[ui] animations =
 //!   false` it is a static `◐` and never needs ticks.
 //! - [`node_glyph`] gives map nodes, goal-bar tasks and subagent cards their
@@ -24,7 +30,7 @@ use std::time::{Duration, Instant};
 
 use harness_events::reducer::RunState;
 use harness_events::schema::{
-    DeltaChannel, EventKind, NodeId, NodeKind, NodeStatus, RunEvent, Usage,
+    DeltaChannel, EventKind, NodeId, NodeKind, NodeStatus, ProcessLiveness, RunEvent, Usage,
 };
 use ratatui::text::{Line, Span};
 
@@ -40,6 +46,10 @@ pub const STATIC_ICON: char = '◐';
 pub const PAUSE_ICON: char = '⏸';
 /// Icon of a stalled indicator.
 pub const STALL_ICON: char = '⚠';
+/// Shortest quiet time before a sampled tool is called quiet, whatever
+/// `stall_after` says: two liveness samples (taken every 3 s), so a busy
+/// tool never flickers between samples.
+pub const QUIET_FLOOR: Duration = Duration::from_secs(6);
 
 /// The shared spinner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,7 +97,7 @@ impl Spinner {
 pub enum StallSource {
     /// The model's response stream.
     Provider,
-    /// A running tool's output.
+    /// A running tool with no output and no CPU progress.
     Tool,
 }
 
@@ -99,6 +109,20 @@ impl StallSource {
             StallSource::Tool => "tool output",
         }
     }
+}
+
+/// The latest liveness of the running tool's process group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolLiveness {
+    /// CPU time used so far by the group.
+    pub cpu: Duration,
+    /// Live processes in the group.
+    pub procs: u32,
+    /// Processes running or runnable.
+    pub active: u32,
+    /// When a sample last showed progress (CPU advanced, a runnable
+    /// process, or the process count changed).
+    pub progressed: Instant,
 }
 
 /// A detected stall.
@@ -223,6 +247,14 @@ pub struct Activity {
     cost: Option<f64>,
     cost_unknown: bool,
     tool_lines: usize,
+    tool_call: Option<String>,
+    tool_timeout: Option<Duration>,
+    tool_live: Option<ToolLiveness>,
+    /// Calls of the current batch that have no result yet, in call order:
+    /// `(call_id, phase)`. The agent loop records every call of a response
+    /// before running any, so the last `ToolCall` is not necessarily the
+    /// one running.
+    in_flight: Vec<(String, Phase)>,
     main: Option<NodeId>,
     /// The main node finished, so the next root agent node (the next turn)
     /// becomes the main node.
@@ -243,6 +275,10 @@ impl Activity {
             cost: None,
             cost_unknown: false,
             tool_lines: 0,
+            tool_call: None,
+            tool_timeout: None,
+            tool_live: None,
+            in_flight: Vec::new(),
             main: None,
             main_done: false,
         }
@@ -321,6 +357,31 @@ impl Activity {
         self.phase_since = now;
         self.turn_since = None;
         self.resume = None;
+        self.in_flight.clear();
+    }
+
+    /// Enters [`Phase::WaitingApproval`] for `action`, remembering the phase
+    /// it interrupts (e.g. the running tool) so
+    /// [`approval_answered`](Self::approval_answered) can resume it. Used
+    /// both for the `approval_requested` event and for the UI's approval
+    /// prompt, whichever arrives first.
+    pub fn enter_approval(&mut self, action: String, now: Instant) {
+        if !matches!(self.phase, Phase::WaitingApproval { .. }) {
+            self.resume = Some((self.phase.clone(), self.phase_since));
+        }
+        self.set_phase(Phase::WaitingApproval { action }, now);
+    }
+
+    /// The pending approval was answered: resumes the phase it interrupted
+    /// (a running tool keeps its call, timeout and liveness), or
+    /// [`Phase::Sending`] when nothing was saved. No-op unless waiting for
+    /// approval.
+    pub fn approval_answered(&mut self, now: Instant) {
+        if !matches!(self.phase, Phase::WaitingApproval { .. }) {
+            return;
+        }
+        let phase = self.resume.take().map_or(Phase::Sending, |(p, _)| p);
+        self.set_phase(phase, now);
     }
 
     /// Records that data arrived (provider bytes or tool output).
@@ -332,6 +393,66 @@ impl Activity {
     pub fn tool_output(&mut self, lines: usize, now: Instant) {
         self.tool_lines += lines;
         self.last_data = now;
+    }
+
+    /// The running tool's timeout, once it reported one.
+    pub fn tool_timeout(&self) -> Option<Duration> {
+        self.tool_timeout
+    }
+
+    /// The running tool's latest liveness; `None` while unknown.
+    pub fn tool_liveness(&self) -> Option<ToolLiveness> {
+        self.tool_live
+    }
+
+    /// Records a `tool_progress` event of `call_id` at `now`. Ignored
+    /// unless a tool is running and `call_id` is a call of the current batch
+    /// without a result. Progress from another call of the batch than the
+    /// one shown means that call is the one running now (bash reports its
+    /// timeout when it starts): it becomes the running tool, with a fresh
+    /// elapsed time, timeout and liveness.
+    pub fn tool_progress(
+        &mut self,
+        call_id: &str,
+        timeout: Option<Duration>,
+        liveness: Option<ProcessLiveness>,
+        now: Instant,
+    ) {
+        if !matches!(self.phase, Phase::RunningTool { .. }) {
+            return;
+        }
+        if self.tool_call.as_deref() != Some(call_id) {
+            let Some((_, phase)) = self.in_flight.iter().find(|(id, _)| id == call_id) else {
+                return;
+            };
+            self.phase = phase.clone();
+            self.phase_since = now;
+            self.last_data = now;
+            self.tool_call = Some(call_id.to_owned());
+            self.tool_lines = 0;
+            self.tool_timeout = None;
+            self.tool_live = None;
+        }
+        if timeout.is_some() {
+            self.tool_timeout = timeout;
+        }
+        let Some(l) = liveness else { return };
+        let cpu = Duration::from_millis(l.cpu_ms);
+        let advanced = match self.tool_live {
+            None => !cpu.is_zero() || l.active > 0,
+            Some(p) => cpu != p.cpu || l.active > 0 || l.procs != p.procs,
+        };
+        let progressed = if advanced {
+            now
+        } else {
+            self.tool_live.map_or(self.phase_since, |p| p.progressed)
+        };
+        self.tool_live = Some(ToolLiveness {
+            cpu,
+            procs: l.procs,
+            active: l.active,
+            progressed,
+        });
     }
 
     /// Enters the retry phase for a provider retry (`StreamEvent::Retry`).
@@ -388,7 +509,10 @@ impl Activity {
                     self.set_phase(Phase::Sending, now);
                 }
             }
-            EventKind::ModelCallStarted { .. } => self.set_phase(Phase::WaitingFirstToken, now),
+            EventKind::ModelCallStarted { .. } => {
+                self.in_flight.clear();
+                self.set_phase(Phase::WaitingFirstToken, now);
+            }
             EventKind::Delta { channel, .. } => {
                 let next = match channel {
                     DeltaChannel::Reasoning => Phase::Thinking,
@@ -401,31 +525,48 @@ impl Activity {
                 self.usage.add(usage);
                 self.data(now);
             }
-            EventKind::ToolCall { tool, args, .. } => {
+            EventKind::ToolCall {
+                call_id,
+                tool,
+                args,
+            } => {
                 self.tool_lines = 0;
+                self.tool_call = Some(call_id.clone());
+                self.tool_timeout = None;
+                self.tool_live = None;
                 let summary = crate::cards::payload_json(args)
                     .map(|v| arg_summary(tool, &v))
                     .map(|s| s.strip_prefix("$ ").map(str::to_owned).unwrap_or(s))
                     .unwrap_or_default();
-                self.set_phase(
-                    Phase::RunningTool {
-                        tool: tool.clone(),
-                        summary,
-                    },
-                    now,
-                );
-            }
-            EventKind::ToolResult { .. } => self.set_phase(Phase::Sending, now),
-            EventKind::ApprovalRequested { action, .. } => {
-                if !matches!(self.phase, Phase::WaitingApproval { .. }) {
-                    self.resume = Some((self.phase.clone(), self.phase_since));
+                let phase = Phase::RunningTool {
+                    tool: tool.clone(),
+                    summary,
+                };
+                self.in_flight.push((call_id.clone(), phase.clone()));
+                if matches!(self.phase, Phase::WaitingApproval { .. }) {
+                    // The approval prompt overtook this event: the call runs
+                    // once it is answered.
+                    self.resume = Some((phase, now));
+                } else {
+                    self.set_phase(phase, now);
                 }
-                self.set_phase(
-                    Phase::WaitingApproval {
-                        action: action.clone(),
-                    },
-                    now,
-                );
+            }
+            EventKind::ToolProgress {
+                call_id,
+                timeout_ms,
+                liveness,
+            } => self.tool_progress(
+                call_id,
+                timeout_ms.map(Duration::from_millis),
+                *liveness,
+                now,
+            ),
+            EventKind::ToolResult { call_id, .. } => {
+                self.in_flight.retain(|(id, _)| id != call_id);
+                self.set_phase(Phase::Sending, now);
+            }
+            EventKind::ApprovalRequested { action, .. } => {
+                self.enter_approval(action.clone(), now);
             }
             EventKind::ApprovalResolved { .. } => {
                 if let Some((phase, _)) = self.resume.take() {
@@ -450,12 +591,48 @@ impl Activity {
         }
     }
 
-    /// The current stall, if the phase expects data and none arrived for
-    /// `after` (`[ui] stall_after`).
+    /// The current stall, if any (`after` is `[ui] stall_after`; zero
+    /// disables detection):
+    ///
+    /// - provider phases: no stream data for `after`;
+    /// - a running tool: only when its liveness is known and it produced no
+    ///   output, used no CPU and had nothing runnable for `after` (at least
+    ///   [`QUIET_FLOOR`]). `silent` is then the quiet time. A tool whose
+    ///   liveness is unknown never stalls.
     pub fn stall(&self, now: Instant, after: Duration) -> Option<Stall> {
+        if after.is_zero() {
+            return None;
+        }
         let source = self.phase.stall_source()?;
+        let (since, after) = match source {
+            StallSource::Provider => (self.last_data, after),
+            StallSource::Tool => {
+                let live = self.tool_live?;
+                (self.last_data.max(live.progressed), after.max(QUIET_FLOOR))
+            }
+        };
+        let silent = now.saturating_duration_since(since);
+        (silent >= after).then_some(Stall { source, silent })
+    }
+
+    /// How long a running tool has gone without output, when its liveness
+    /// is unknown and that is at least `after`: shown as a neutral note.
+    fn unsampled_silence(&self, now: Instant, after: Duration) -> Option<Duration> {
+        if after.is_zero()
+            || self.tool_live.is_some()
+            || !matches!(self.phase, Phase::RunningTool { .. })
+        {
+            return None;
+        }
         let silent = now.saturating_duration_since(self.last_data);
-        (!after.is_zero() && silent >= after).then_some(Stall { source, silent })
+        (silent >= after).then_some(silent)
+    }
+
+    fn tool_name(&self) -> &str {
+        match &self.phase {
+            Phase::RunningTool { tool, .. } => tool,
+            _ => "tool",
+        }
     }
 
     /// Plain-text status for the terminal title, e.g. `⠹ thinking · 12.3s`.
@@ -464,7 +641,15 @@ impl Activity {
             return "harness".to_owned();
         }
         let label = match self.stall(now, stall_after) {
-            Some(s) => format!("{STALL_ICON} no data for {}s", s.silent.as_secs()),
+            Some(s) if s.source == StallSource::Provider => {
+                format!("{STALL_ICON} waiting on the model {}s", s.silent.as_secs())
+            }
+            Some(s) => format!(
+                "{} {} quiet {}s",
+                self.icon(spinner),
+                self.tool_name(),
+                s.silent.as_secs()
+            ),
             None => format!(
                 "{} {}",
                 self.icon(spinner),
@@ -504,13 +689,13 @@ impl Activity {
         let sep = || Span::styled(" · ", theme.fg(Token::Muted));
         let phase_ms = self.phase_elapsed(now).as_millis() as u64;
         let mut spans = Vec::new();
-        match self.stall(now, stall_after) {
-            Some(stall) => {
+        let stall = self.stall(now, stall_after);
+        match stall {
+            Some(stall) if stall.source == StallSource::Provider => {
                 spans.push(Span::styled(
                     format!(
-                        "{STALL_ICON} no data for {}s ({})",
-                        stall.silent.as_secs(),
-                        stall.source.label()
+                        "{STALL_ICON} waiting on the model: no data for {}s",
+                        stall.silent.as_secs()
                     ),
                     theme.fg(Token::Stalled),
                 ));
@@ -520,7 +705,7 @@ impl Activity {
                     muted,
                 ));
             }
-            None => {
+            _ => {
                 let token = match self.phase {
                     Phase::WaitingApproval { .. } => Token::Approval,
                     Phase::Retrying { .. } => Token::Warn,
@@ -538,12 +723,55 @@ impl Activity {
         }
         spans.push(Span::raw(" "));
         spans.push(Span::styled(fmt_ms(phase_ms), num));
-        if matches!(self.phase, Phase::RunningTool { .. }) && self.tool_lines > 0 {
-            spans.push(sep());
-            spans.push(Span::styled(
-                format!("streaming {} lines", self.tool_lines),
-                muted,
-            ));
+        let running_tool = matches!(self.phase, Phase::RunningTool { .. });
+        let mut cancel_shown = false;
+        if running_tool {
+            if let Some(t) = self.tool_timeout {
+                spans.push(Span::styled(format!(" of {}", fmt_limit(t)), muted));
+            }
+            if let Some(l) = self.tool_live {
+                spans.push(sep());
+                let n = l.procs;
+                let procs = if n == 1 { "process" } else { "processes" };
+                spans.push(Span::styled(
+                    format!("cpu {} ({n} {procs})", fmt_ms(l.cpu.as_millis() as u64)),
+                    muted,
+                ));
+            }
+            if self.tool_lines > 0 {
+                spans.push(sep());
+                spans.push(Span::styled(
+                    format!("streaming {} lines", self.tool_lines),
+                    muted,
+                ));
+            }
+            if let Some(stall) = stall.filter(|s| s.source == StallSource::Tool) {
+                // Soft: a quiet, idle tool may be hung, or just waiting
+                // (`sleep`, a network call). Say what is known.
+                spans.push(sep());
+                spans.push(Span::styled(
+                    format!(
+                        "{} quiet for {}s (no output, no CPU)",
+                        sanitize(self.tool_name()),
+                        stall.silent.as_secs()
+                    ),
+                    theme.fg(Token::Warn),
+                ));
+                if !interrupt_hint.is_empty() {
+                    spans.push(sep());
+                    spans.push(Span::styled(
+                        format!("{interrupt_hint} to cancel"),
+                        theme.fg(Token::Warn),
+                    ));
+                    cancel_shown = true;
+                }
+            } else if let Some(silent) = self.unsampled_silence(now, stall_after) {
+                spans.push(sep());
+                spans.push(Span::styled(
+                    format!("no output for {}s", silent.as_secs()),
+                    muted,
+                ));
+            }
         }
         spans.push(sep());
         spans.push(Span::styled(format!("turn {}", self.turn), muted));
@@ -571,7 +799,7 @@ impl Activity {
             spans.push(sep());
             spans.push(Span::styled(fmt_cost(self.cost), num));
         }
-        if !interrupt_hint.is_empty() {
+        if !interrupt_hint.is_empty() && !cancel_shown {
             spans.push(sep());
             spans.push(Span::styled(
                 format!("{interrupt_hint} to interrupt"),
@@ -579,6 +807,19 @@ impl Activity {
             ));
         }
         Line::from(spans)
+    }
+}
+
+/// A limit such as a timeout: whole minutes or hours without seconds
+/// (`10m`, `1h`), anything else like [`fmt_ms`].
+fn fmt_limit(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs >= 3600 && secs.is_multiple_of(3600) {
+        format!("{}h", secs / 3600)
+    } else if secs >= 60 && secs.is_multiple_of(60) {
+        format!("{}m", secs / 60)
+    } else {
+        fmt_ms(d.as_millis() as u64)
     }
 }
 
@@ -906,6 +1147,7 @@ mod tests {
                         cached_input: 11_900,
                         output: 812,
                         reasoning: 0,
+                        cache_write: 0,
                     },
                     stop_reason: None,
                     response: None,
@@ -944,12 +1186,18 @@ mod tests {
             &theme,
             "",
         );
-        assert!(text(&line).starts_with("⚠ no data for 21s (provider stream)"));
+        assert!(
+            text(&line).starts_with("⚠ waiting on the model: no data for 21s"),
+            "{}",
+            text(&line)
+        );
         assert_eq!(line.spans[0].style, theme.fg(Token::Stalled));
         // Data resets the clock.
         a.data(t0 + Duration::from_secs(21));
         assert_eq!(a.stall(t0 + Duration::from_secs(22), after), None);
-        // Tool phases stall on missing tool output.
+        // `stall_after = 0` disables detection.
+        assert_eq!(a.stall(t0 + Duration::from_secs(600), Duration::ZERO), None);
+        // A tool whose liveness is unknown is never a stall.
         a.set_phase(
             Phase::RunningTool {
                 tool: "bash".into(),
@@ -957,15 +1205,404 @@ mod tests {
             },
             t0,
         );
-        assert_eq!(
-            a.stall(t0 + Duration::from_secs(30), after).unwrap().source,
-            StallSource::Tool
-        );
-        a.tool_output(3, t0 + Duration::from_secs(29));
-        assert_eq!(a.stall(t0 + Duration::from_secs(30), after), None);
+        assert_eq!(a.stall(t0 + Duration::from_secs(600), after), None);
         // Waiting on the user is never a stall.
         a.set_phase(Phase::WaitingApproval { action: "x".into() }, t0);
         assert_eq!(a.stall(t0 + Duration::from_secs(300), after), None);
+    }
+
+    fn tool_call(seq: u64, call_id: &str, command: &str) -> RunEvent {
+        ev(
+            seq,
+            Some("main"),
+            EventKind::ToolCall {
+                call_id: call_id.into(),
+                tool: "bash".into(),
+                args: Payload::Json(serde_json::json!({ "command": command })),
+            },
+        )
+    }
+
+    fn progress(call_id: &str, timeout_s: Option<u64>, live: Option<(u64, u32, u32)>) -> RunEvent {
+        ev(
+            9,
+            Some("main"),
+            EventKind::ToolProgress {
+                call_id: call_id.into(),
+                timeout_ms: timeout_s.map(|s| s * 1000),
+                liveness: live.map(|(cpu_ms, procs, active)| ProcessLiveness {
+                    cpu_ms,
+                    procs,
+                    active,
+                }),
+            },
+        )
+    }
+
+    /// An activity running `command` as call `t1` since `t0`, with a 10m
+    /// timeout reported.
+    fn running(t0: Instant, command: &str) -> Activity {
+        let mut a = Activity::new(t0);
+        a.start_turn(t0);
+        a.apply(
+            &ev(1, Some("main"), started("main", NodeKind::Agent, None)),
+            t0,
+        );
+        a.apply(&tool_call(2, "t1", command), t0);
+        a.apply(&progress("t1", Some(600), None), t0);
+        a
+    }
+
+    #[test]
+    fn busy_quiet_tool_shows_elapsed_of_timeout_and_cpu_without_warning() {
+        let theme = Theme::default();
+        let t0 = Instant::now();
+        let after = Duration::from_secs(20);
+        let mut a = running(t0, "cargo test --workspace");
+        assert_eq!(a.tool_timeout(), Some(Duration::from_secs(600)));
+        // Eight minutes of silence on stdout while the group burns CPU,
+        // sampled every 3s.
+        let mut cpu = 0;
+        for i in 1..=170u64 {
+            cpu += 10_500;
+            a.apply(
+                &progress("t1", Some(600), Some((cpu, 9, 3))),
+                t0 + Duration::from_secs(i * 3),
+            );
+        }
+        let now = t0 + Duration::from_millis(510_500);
+        assert_eq!(a.stall(now, after), None, "busy is not stalled");
+        let line = a.line(now, &Spinner::new(true), after, &theme, "ctrl+c");
+        let l = text(&line);
+        assert!(
+            l.starts_with(
+                "⠋ running bash: cargo test --workspace 8m30s of 10m · cpu 29m45s (9 processes)"
+            ),
+            "{l}"
+        );
+        assert!(
+            !l.contains('⚠') && !l.contains("no data") && !l.contains("quiet"),
+            "{l}"
+        );
+        assert!(l.ends_with("ctrl+c to interrupt"), "{l}");
+        assert_eq!(line.spans[0].style, theme.fg(Token::Running));
+        // A runnable process with no measurable CPU yet is alive too.
+        let mut b = running(t0, "make");
+        for i in 1..=20u64 {
+            b.apply(
+                &progress("t1", None, Some((0, 2, 1))),
+                t0 + Duration::from_secs(i * 3),
+            );
+        }
+        assert_eq!(b.stall(t0 + Duration::from_secs(61), after), None);
+        assert_eq!(b.tool_timeout(), Some(Duration::from_secs(600)), "kept");
+        assert_eq!(b.tool_liveness().map(|l| l.active), Some(1));
+    }
+
+    #[test]
+    fn idle_tool_gets_a_soft_quiet_hint_naming_it_and_the_cancel_key() {
+        let theme = Theme::default();
+        let t0 = Instant::now();
+        let after = Duration::from_secs(20);
+        let mut a = running(t0, "sleep 600");
+        // Shell start-up CPU in the first sample, then nothing.
+        for i in 1..=20u64 {
+            a.apply(
+                &progress("t1", Some(600), Some((4, 2, 0))),
+                t0 + Duration::from_secs(i * 3),
+            );
+        }
+        // Quiet since the first sample (3s).
+        assert_eq!(a.stall(t0 + Duration::from_secs(22), after), None);
+        let stall = a.stall(t0 + Duration::from_secs(24), after).unwrap();
+        assert_eq!(stall.source, StallSource::Tool);
+        assert_eq!(stall.silent, Duration::from_secs(21));
+        let now = t0 + Duration::from_secs(62);
+        let line = a.line(now, &Spinner::new(true), after, &theme, "ctrl+c");
+        let l = text(&line);
+        assert!(
+            l.starts_with("⠋ running bash: sleep 600 1m02s of 10m · cpu 4ms (2 processes) · bash quiet for 59s (no output, no CPU) · ctrl+c to cancel · turn 1"),
+            "{l}"
+        );
+        // Soft, not an alarm: no warning icon, never claims a hang, the
+        // spinner keeps its running colour and the hint is `warn`.
+        assert!(
+            !l.contains('⚠') && !l.contains("hung") && !l.contains("stalled"),
+            "{l}"
+        );
+        assert!(!l.contains("to interrupt"), "one cancel hint: {l}");
+        assert_eq!(line.spans[0].style, theme.fg(Token::Running));
+        let hint = line
+            .spans
+            .iter()
+            .find(|s| s.content.contains("quiet for"))
+            .unwrap();
+        assert_eq!(hint.style, theme.fg(Token::Warn));
+        assert_eq!(
+            a.title(now, &Spinner::new(true), after),
+            "⠋ bash quiet 59s · 1m02s — harness"
+        );
+        // Output resets the quiet clock.
+        a.tool_output(1, now);
+        assert_eq!(a.stall(now + Duration::from_secs(19), after), None);
+        // CPU progress resets it too.
+        let later = now + Duration::from_secs(30);
+        assert!(a.stall(later, after).is_some());
+        a.apply(&progress("t1", None, Some((90, 2, 0))), later);
+        assert_eq!(a.stall(later + Duration::from_secs(19), after), None);
+        // So does a change in the process count (a child started).
+        let later = later + Duration::from_secs(40);
+        assert!(a.stall(later, after).is_some());
+        a.apply(&progress("t1", None, Some((90, 3, 0))), later);
+        assert_eq!(a.stall(later + Duration::from_secs(1), after), None);
+    }
+
+    #[test]
+    fn quiet_needs_two_samples_whatever_stall_after_says() {
+        let t0 = Instant::now();
+        let mut a = running(t0, "sleep 9");
+        a.apply(
+            &progress("t1", None, Some((0, 2, 0))),
+            t0 + Duration::from_secs(3),
+        );
+        let after = Duration::from_secs(1);
+        assert_eq!(a.stall(t0 + Duration::from_secs(5), after), None);
+        assert!(a.stall(t0 + Duration::from_secs(6), after).is_some());
+    }
+
+    #[test]
+    fn unknown_liveness_falls_back_to_elapsed_and_timeout() {
+        let theme = Theme::default();
+        let t0 = Instant::now();
+        let after = Duration::from_secs(20);
+        let mut a = running(t0, "ssh-only-host-command");
+        // Progress for another call is ignored.
+        a.apply(&progress("other", Some(5), Some((0, 1, 0))), t0);
+        assert_eq!(a.tool_timeout(), Some(Duration::from_secs(600)));
+        assert_eq!(a.tool_liveness(), None);
+        let now = t0 + Duration::from_secs(252);
+        assert_eq!(a.stall(now, after), None);
+        let l = text(&a.line(now, &Spinner::new(true), after, &theme, "ctrl+c"));
+        assert!(
+            l.starts_with(
+                "⠋ running bash: ssh-only-host-command 4m12s of 10m · no output for 252s · turn 1"
+            ),
+            "{l}"
+        );
+        assert!(!l.contains('⚠') && !l.contains("quiet"), "{l}");
+        // Before stall_after there is no note at all, and with no timeout
+        // reported only the elapsed time shows.
+        let mut b = Activity::new(t0);
+        b.start_turn(t0);
+        b.apply(&tool_call(2, "t2", "true"), t0);
+        let l = text(&b.line(
+            t0 + Duration::from_secs(5),
+            &Spinner::new(true),
+            after,
+            &theme,
+            "",
+        ));
+        assert_eq!(l, "⠋ running bash: true 5.0s · turn 1 · 5.0s");
+        // A new call forgets the previous call's timeout and liveness.
+        let mut c = running(t0, "a");
+        c.apply(&progress("t1", None, Some((5, 1, 0))), t0);
+        c.apply(
+            &ev(
+                3,
+                Some("main"),
+                EventKind::ToolResult {
+                    call_id: "t1".into(),
+                    ok: true,
+                    output: Payload::text(""),
+                    duration_ms: 1,
+                },
+            ),
+            t0,
+        );
+        c.apply(&tool_call(4, "t3", "b"), t0);
+        assert_eq!((c.tool_timeout(), c.tool_liveness()), (None, None));
+    }
+
+    fn read_call(seq: u64, call_id: &str, path: &str) -> RunEvent {
+        ev(
+            seq,
+            Some("main"),
+            EventKind::ToolCall {
+                call_id: call_id.into(),
+                tool: "read".into(),
+                args: Payload::Json(serde_json::json!({ "path": path })),
+            },
+        )
+    }
+
+    #[test]
+    fn progress_from_an_earlier_call_of_the_batch_makes_it_the_running_tool() {
+        let theme = Theme::default();
+        let t0 = Instant::now();
+        let after = Duration::from_secs(20);
+        let mut a = Activity::new(t0);
+        a.start_turn(t0);
+        a.apply(
+            &ev(1, Some("main"), started("main", NodeKind::Agent, None)),
+            t0,
+        );
+        // The loop records every call of the response before running any.
+        a.apply(&tool_call(2, "t1", "cargo test --workspace"), t0);
+        a.apply(&read_call(3, "t2", "Cargo.toml"), t0);
+        // bash reports its timeout when it starts, then samples.
+        let t1 = t0 + Duration::from_secs(1);
+        a.apply(&progress("t1", Some(600), None), t1);
+        let mut cpu = 0;
+        for i in 1..=170u64 {
+            cpu += 10_500;
+            a.apply(
+                &progress("t1", None, Some((cpu, 9, 3))),
+                t1 + Duration::from_secs(i * 3),
+            );
+        }
+        let now = t1 + Duration::from_millis(510_500);
+        assert_eq!(a.stall(now, after), None);
+        let l = text(&a.line(now, &Spinner::new(true), after, &theme, "ctrl+c"));
+        assert!(
+            l.starts_with(
+                "⠋ running bash: cargo test --workspace 8m30s of 10m · cpu 29m45s (9 processes)"
+            ),
+            "{l}"
+        );
+        assert!(!l.contains("read") && !l.contains("no output"), "{l}");
+        // An idle earlier call is flagged too.
+        let mut b = Activity::new(t0);
+        b.start_turn(t0);
+        b.apply(&tool_call(2, "t1", "sleep 600"), t0);
+        b.apply(&tool_call(3, "t2", "git status"), t0);
+        b.apply(&progress("t1", Some(600), Some((4, 2, 0))), t0);
+        for i in 1..=10u64 {
+            b.apply(
+                &progress("t1", None, Some((4, 2, 0))),
+                t0 + Duration::from_secs(i * 3),
+            );
+        }
+        let stall = b.stall(t0 + Duration::from_secs(30), after).unwrap();
+        assert_eq!(stall.source, StallSource::Tool);
+        let l = text(&b.line(
+            t0 + Duration::from_secs(30),
+            &Spinner::new(true),
+            after,
+            &theme,
+            "ctrl+c",
+        ));
+        assert!(
+            l.starts_with("⠋ running bash: sleep 600 30.0s of 10m"),
+            "{l}"
+        );
+        assert!(l.contains("bash quiet for"), "{l}");
+        // Once a call has its result, its late progress is ignored.
+        let mut c = Activity::new(t0);
+        c.start_turn(t0);
+        c.apply(&tool_call(2, "t1", "a"), t0);
+        c.apply(&tool_call(3, "t2", "b"), t0);
+        c.apply(&progress("t2", Some(600), None), t0);
+        c.apply(
+            &ev(
+                4,
+                Some("main"),
+                EventKind::ToolResult {
+                    call_id: "t1".into(),
+                    ok: true,
+                    output: Payload::text(""),
+                    duration_ms: 1,
+                },
+            ),
+            t0,
+        );
+        c.apply(&tool_call(5, "t3", "c"), t0);
+        c.apply(&progress("t1", Some(5), Some((9, 1, 1))), t0);
+        assert_eq!((c.tool_timeout(), c.tool_liveness()), (None, None));
+        assert_eq!(c.phase().label(Duration::ZERO), "running bash: c");
+    }
+
+    #[test]
+    fn approval_resumes_the_interrupted_tool_with_its_progress() {
+        let theme = Theme::default();
+        let t0 = Instant::now();
+        let after = Duration::from_secs(8);
+        let mut a = running(t0, "spin");
+        // The UI's prompt, then the event (which must not overwrite the
+        // saved phase).
+        a.enter_approval("spin".into(), t0);
+        a.apply(
+            &ev(
+                3,
+                Some("main"),
+                EventKind::ApprovalRequested {
+                    approval_id: "a1".into(),
+                    action: "spin".into(),
+                    preview: None,
+                },
+            ),
+            t0,
+        );
+        assert_eq!(a.stall(t0 + Duration::from_secs(60), after), None);
+        let t1 = t0 + Duration::from_secs(2);
+        a.approval_answered(t1);
+        assert_eq!(a.phase().label(Duration::ZERO), "running bash: spin");
+        assert_eq!(a.tool_timeout(), Some(Duration::from_secs(600)), "kept");
+        for i in 1..=5u64 {
+            a.apply(
+                &progress("t1", None, Some((i * 2990, 1, 1))),
+                t1 + Duration::from_secs(i * 3),
+            );
+        }
+        let now = t1 + Duration::from_secs(15);
+        assert_eq!(a.stall(now, after), None);
+        let l = text(&a.line(now, &Spinner::new(true), after, &theme, "ctrl+c"));
+        assert!(
+            l.starts_with("⠋ running bash: spin 15.0s of 10m · cpu 14.9s (1 process)"),
+            "{l}"
+        );
+        assert!(!l.contains("waiting on the model"), "{l}");
+        // A late approval_resolved changes nothing.
+        a.apply(
+            &ev(
+                4,
+                Some("main"),
+                EventKind::ApprovalResolved {
+                    approval_id: "a1".into(),
+                    decision: harness_events::schema::ApprovalDecision::Approved,
+                    by: "user".into(),
+                },
+            ),
+            now,
+        );
+        assert_eq!(a.phase().label(Duration::ZERO), "running bash: spin");
+        // Answering with nothing saved falls back to sending; answering
+        // when not waiting is a no-op.
+        let mut b = Activity::new(t0);
+        b.start_turn(t0);
+        b.set_phase(Phase::WaitingApproval { action: "x".into() }, t0);
+        b.approval_answered(t0);
+        assert_eq!(b.phase(), &Phase::Sending);
+        let mut c = running(t0, "z");
+        c.approval_answered(t0);
+        assert_eq!(c.phase().label(Duration::ZERO), "running bash: z");
+        // A prompt that overtakes its tool_call event resumes that call.
+        let mut d = Activity::new(t0);
+        d.start_turn(t0);
+        d.enter_approval("w".into(), t0);
+        d.apply(&tool_call(2, "t9", "w"), t0);
+        assert!(matches!(d.phase(), Phase::WaitingApproval { .. }));
+        d.approval_answered(t0);
+        d.apply(&progress("t9", Some(600), None), t0);
+        assert_eq!(d.phase().label(Duration::ZERO), "running bash: w");
+        assert_eq!(d.tool_timeout(), Some(Duration::from_secs(600)));
+    }
+
+    #[test]
+    fn limits_print_whole_units() {
+        assert_eq!(fmt_limit(Duration::from_secs(600)), "10m");
+        assert_eq!(fmt_limit(Duration::from_secs(7200)), "2h");
+        assert_eq!(fmt_limit(Duration::from_secs(90)), "1m30s");
+        assert_eq!(fmt_limit(Duration::from_secs(45)), "45.0s");
     }
 
     #[test]

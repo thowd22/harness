@@ -52,6 +52,12 @@ turn is preceded by a shadow-git checkpoint, so `/undo` and the map's
   Spinners tick every 80 ms only while a run or agent is active and
   `[ui] animations = true`; with `animations = false` a static `◐` is shown
   and no timer runs.
+- The activity line's stall and liveness states come from run events only:
+  provider silence is timed from the last stream data, and a running
+  `bash` call's liveness from its `tool_progress` events (sampled by the
+  executor every 3 s, not by the UI). See
+  [tui-views.md](tui-views.md#activity-line) for what each state shows and
+  how `[ui] stall_after` applies.
 - Resizing the terminal redraws at the new size.
 - **Ctrl+Z** suspends harness to your shell; `fg` resumes it with a full
   redraw. Ctrl+Z is fixed and cannot be bound to another action.
@@ -86,6 +92,7 @@ is [Dracula](https://draculatheme.com):
 | `error` | `#ff5555` | errors |
 | `number` | `#f1fa8c` | tokens, cost, durations |
 | `highlight` | = `number` | search matches |
+| `selection` | `accent` at 35 % over `bg` | selected text (mouse and keyboard selection) |
 | `border` | = `muted` | borders |
 | `border.focus` | = `accent` | focused border |
 | `card.pending` | = `surface` | running tool card |
@@ -135,7 +142,7 @@ Only a few actions have keys; everything else is in the command palette.
 | `interrupt` | `ctrl+c` | interrupt the agent |
 | `quit` | `ctrl+q` | quit |
 | `copy` | `ctrl+y` | copy the focused message, code block, output, diff or log entry |
-| `select` | `ctrl+t` | select transcript lines with the keyboard |
+| `select` | `ctrl+t` | select text with the keyboard: transcript lines in the chat, a cursor on the map and other screens |
 
 Rebind them in `[keys]`; a comma-separated list gives several chords:
 
@@ -164,6 +171,8 @@ keyboard:
 - **Click** activates the element under the pointer (the topmost one when
   elements overlap). While an overlay is open, clicks outside it close it.
 - **Mouse wheel** scrolls the pane under the pointer.
+- **Drag** selects text and copies it on release; a press without movement
+  is still a click (see [Copy and paste](#copy-and-paste)).
 - **Shift+Tab** and the **arrow keys** move focus between elements; **Tab**
   does too inside overlays and when an element other than the input has focus
   (in the input, Tab is `switch_view`). **Enter** activates the focused
@@ -177,13 +186,44 @@ keyboard:
   renames the open session; see [sessions.md](sessions.md).
 
 `[ui] mouse = false` starts without mouse capture so the terminal's native
-text selection works; the footer then shows `mouse off`. The palette's
+text selection works (with capture on, harness selects text itself); the footer then shows `mouse off`. The palette's
 "toggle mouse" command switches capture at runtime.
 
 ## Copy and paste
 
-Mouse capture turns off the terminal's own text selection, so harness copies
-by itself (or set `[ui] mouse = false` to keep native selection).
+Mouse capture turns off the terminal's own text selection, so harness selects
+and copies by itself (or set `[ui] mouse = false` to keep native selection).
+
+**Select with the mouse** anywhere text is shown: the chat transcript
+(messages, tool cards and their output), the input box, the agent map and
+node detail, the diff screen, panels (`/mcp`, `/cost`, ...) and pickers
+(`/model`, `/resume`).
+
+- **Press, drag, release** selects from the press to the release, highlights
+  it (`selection` theme token) and copies it on release, with a toast. A
+  press without movement is a click as before, so buttons, cards and focus
+  work unchanged; a drag that starts on a button selects nothing. A click
+  on a tool card (its header, body or `Enter to expand` hint) expands or
+  collapses it and a click on a subagent card opens the agent; on the body
+  that happens on the release, so a drag over the output selects it
+  instead. Picker rows (`/model`, `/resume`) pick on the release too: a
+  click picks the model or session, a drag copies the row's text and picks
+  nothing.
+- **Dragging past the top or bottom edge** of a scrollable view (the chat,
+  node detail, diff, panels, the map) scrolls it and keeps extending the
+  selection, also while the pointer rests there.
+- **Double-click** selects a word (paths like `src/parse.rs` count as one),
+  **triple-click** the whole line, rejoined across soft wraps. Both copy on
+  release.
+- **Esc** or a click elsewhere clears the selection; `ctrl+y` copies it
+  again; typing clears it.
+
+What is copied is the logical text: soft-wrapped lines are rejoined into
+one line, and borders, gutters (line numbers), message bars, status icons,
+button labels and the expand hints are left out. Text under an open
+overlay (the palette, help, a dialog) is not selected through it. Toasts
+are different: a selection cannot start on one, but text under a toast is
+still copied in full (it is not highlighted through the toast).
 
 **What can be copied, and how.** Every target is available by click,
 keyboard and palette:
@@ -195,14 +235,24 @@ keyboard and palette:
 | a tool call's output | `⧉ copy output` on the card's bottom border | focus it, Enter or `ctrl+y` | Copy tool output (focused card, else the latest); Copy tool output with line numbers |
 | a file change (unified diff) | `⧉ copy diff` on the card, `[⧉ copy diff]` in `/diff` | `ctrl+y` on a focused edit card; `y` or `ctrl+y` in `/diff` | Copy diff |
 | a node detail log entry | `[⧉ copy entry]` in the header | `y` or `ctrl+y` on the focused entry | Copy entry |
-| any range of transcript lines | a click moves the selection cursor | `ctrl+t`, then the keys below | Select text |
+| any text | drag over it (double-click: word, triple-click: line) | `ctrl+t`, then the keys below | Select text |
 
-**Keyboard selection** (`ctrl+t`): a bar replaces the input and a cursor
+**Keyboard selection** (`ctrl+t`, or "Select text" in the palette; the key
+is `select` in `[keys]`). In the chat a bar replaces the input and a cursor
 line appears on the bottom visible line. Up/Down (or `k`/`j`), PgUp/PgDn
-and Home/End (or `g`/`G`) move it; Space or `v` sets the mark; `y` or
-Enter copies from the mark to the cursor and leaves; Esc leaves. The bar's
-**[copy]**, **[mark]** and **[done]** buttons are clickable and reachable
-with Tab.
+and Home/End (or `g`/`G`) move it; Shift+Up/Down extends the selection
+(Space or `v` sets the mark by hand); `y` or Enter copies from the mark to
+the cursor and leaves; Esc leaves. The bar's **[copy]**, **[mark]** and
+**[done]** buttons are clickable and reachable with Tab.
+
+On the map and the other screens (node detail, diff, inspector, panels,
+memory) the footer turns into a `SELECT` bar and a cursor appears at the
+top of the largest text pane: the arrows, Home/End and PgUp/PgDn move it
+(moving past the edge of a scrollable pane scrolls it), Shift with any of
+them extends the selection, Tab moves to the next pane, and Enter, `y` or
+`ctrl+y` copies the selection (or the cursor's line when nothing is
+extended) and leaves; Esc leaves. The bar's **[copy]** and **[done]**
+buttons are clickable.
 
 **What gets copied** is plain text: no ANSI codes or control characters, no
 card borders, gutters or copy buttons, and no `read` line numbers unless
@@ -231,4 +281,6 @@ when the palette is open (as one line), to the memory browser's search box,
 and otherwise to the input, from the chat or the map; pasting while an
 approval waits fills the input and leaves the approval open. Large pastes
 collapse to a placeholder in the input (see [tui-views.md](tui-views.md#input))
-and are always sent in full.
+and are always sent in full. Selecting text never changes pasting. With
+mouse capture on, most terminals paste the primary selection on
+Shift+middle-click (plain middle-click goes to harness, which ignores it).

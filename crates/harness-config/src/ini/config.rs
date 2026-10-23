@@ -110,6 +110,13 @@ config_enum!(
         Off = "off" }
 );
 config_enum!(
+    /// Prompt-cache lifetime for Anthropic models on OpenRouter
+    /// (`[provider.openrouter] cache_ttl`).
+    CacheTtl { /// Five minutes (the default).
+        FiveMinutes = "5m", /// One hour; cache writes cost more.
+        OneHour = "1h" }
+);
+config_enum!(
     /// How the OpenAI provider authenticates (`[provider.openai] auth`).
     AuthMode { /// `api_key`, `api_key_cmd` or `api_key_env` (the default).
         ApiKey = "api_key", /// Sign in with ChatGPT (`harness login openai`); usage counts
@@ -191,6 +198,9 @@ pub struct ProviderConfig {
     pub provider_order: Vec<String>,
     /// OpenRouter only: allow routing fallbacks.
     pub allow_fallbacks: Option<bool>,
+    /// OpenRouter only: prompt-cache lifetime for Anthropic models
+    /// (`cache_ttl`, default `5m`).
+    pub cache_ttl: Option<CacheTtl>,
     /// Anthropic only: request-body gzip (`gzip_requests`, default `auto`).
     pub gzip_requests: Option<GzipRequests>,
     /// Anthropic only: gzip level 1 to 9 (`gzip_level`, default 3).
@@ -271,7 +281,9 @@ pub struct Ui {
     pub background: Background,
     /// Animated spinners. Default true.
     pub animations: bool,
-    /// Silence before an indicator turns orange. Default 20s.
+    /// Provider-stream silence before the activity line warns, and the
+    /// quiet time (no output, no CPU) before a running tool gets a soft
+    /// hint. Default 20s; 0 disables both.
     #[serde(serialize_with = "ser_duration")]
     pub stall_after: Duration,
     /// Timestamp style. Default `time`.
@@ -752,6 +764,7 @@ fn read_provider(r: &mut SectionReader<'_>, id: &str) -> ProviderConfig {
         p.app_name = r.nonempty_string("app_name");
         p.provider_order = r.list("provider_order").unwrap_or_default();
         p.allow_fallbacks = r.bool("allow_fallbacks");
+        p.cache_ttl = r.enumerated("cache_ttl");
     }
     p
 }
@@ -1040,6 +1053,7 @@ mod tests {
         let or = &c.providers["openrouter"];
         assert_eq!(or.provider_order, vec!["anthropic", "openai"]);
         assert_eq!(or.allow_fallbacks, Some(true));
+        assert_eq!(or.cache_ttl, Some(CacheTtl::FiveMinutes));
         assert_eq!(
             c.providers["openai"].api_key_env.as_deref(),
             Some("OPENAI_API_KEY")
@@ -1185,6 +1199,16 @@ mod tests {
         assert!(msg.contains("clipboard"), "{msg}");
         let keys = load("[keys]\ncopy = ctrl+y\nselect = ctrl+t\n").unwrap();
         assert_eq!(keys.keys.len(), 2);
+    }
+
+    #[test]
+    fn openrouter_cache_ttl() {
+        let c = load("[provider.openrouter]\ncache_ttl = 1h\n").unwrap();
+        assert_eq!(c.providers["openrouter"].cache_ttl, Some(CacheTtl::OneHour));
+        let c = load("[provider.openrouter]\n").unwrap();
+        assert_eq!(c.providers["openrouter"].cache_ttl, None);
+        let errs = load("[provider.openrouter]\ncache_ttl = 2h\n").unwrap_err();
+        assert!(errs[0].to_string().contains("5m | 1h"), "{errs:?}");
     }
 
     #[test]

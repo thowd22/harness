@@ -351,7 +351,7 @@ impl LoginModal {
             }
             let r = Rect::new(x, by, bw, 1);
             frame.render_widget(Paragraph::new(Span::styled(text, theme.fg(token))), r);
-            hits.register(id, r, wrap(action));
+            hits.register_button(id, r, wrap(action));
             x = x.saturating_add(bw + 2);
         }
         frame.render_widget(

@@ -234,6 +234,8 @@ tokens! {
     Number = "number" => Fixed(Rgb(0xf1, 0xfa, 0x8c)), Some(Ansi16::LightYellow);
     /// Search matches.
     Highlight = "highlight" => Alias(Token::Number), Some(Ansi16::LightYellow);
+    /// Selected text (mouse and keyboard selection; accent at 35 %).
+    Selection = "selection" => Tint(Token::Accent, 35), Some(Ansi16::Blue);
     /// Unfocused borders.
     Border = "border" => Alias(Token::Muted), Some(Ansi16::Gray);
     /// Focused border.
@@ -547,6 +549,16 @@ impl Theme {
     pub fn focused(&self) -> Style {
         if self.has_color() {
             self.bg(Token::Surface)
+        } else {
+            Style::new().add_modifier(Modifier::REVERSED)
+        }
+    }
+
+    /// Style of selected text: the `selection` background in colour,
+    /// reverse video without colour.
+    pub fn selection(&self) -> Style {
+        if self.has_color() {
+            self.bg(Token::Selection)
         } else {
             Style::new().add_modifier(Modifier::REVERSED)
         }

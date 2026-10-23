@@ -503,7 +503,7 @@ impl ApprovalPanel {
             if x >= area.right() {
                 continue;
             }
-            hits.register(
+            hits.register_button(
                 b.id(),
                 Rect::new(
                     x,
@@ -783,7 +783,7 @@ impl IniConfirm {
         for b in buttons {
             let x = area.x + b.x as u16;
             if x < area.right() {
-                hits.register(
+                hits.register_button(
                     b.id(),
                     Rect::new(x, area.y, (b.w as u16).min(area.right() - x), 1),
                     wrap(b.action),

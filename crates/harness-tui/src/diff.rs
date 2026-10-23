@@ -434,7 +434,7 @@ impl DiffView {
             row.spans.push(Span::styled(label, bstyle));
             lines.push(row);
             if !f.reverted && bx < inner.x + inner.width {
-                hits.register(
+                hits.register_button(
                     rid,
                     Rect::new(bx, y + 1, 8.min(inner.x + inner.width - bx), 1),
                     DiffAction::Revert(i),
@@ -453,7 +453,7 @@ impl DiffView {
                 st = st.patch(t.focused());
             }
             frame.render_widget(Paragraph::new(Span::styled(COPY_LABEL, st)), b);
-            hits.register(id, b, DiffAction::Copy);
+            hits.register_button(id, b, DiffAction::Copy);
         }
         // Diff of the selected file.
         hits.register_pane("diff", diff);
@@ -473,6 +473,17 @@ impl DiffView {
             }
         }
         self.scroll = self.scroll.min(dl.len().saturating_sub(self.height));
+        let first = self.scroll;
+        crate::selection::update("diff", |r| {
+            r.rect = Rect::new(
+                diff.x + 1,
+                diff.y,
+                diff.width.saturating_sub(1),
+                diff.height,
+            );
+            r.set_scroll(first);
+            r.chrome = crate::selection::Chrome::Smart;
+        });
         let shown: Vec<Line<'static>> =
             dl.into_iter().skip(self.scroll).take(self.height).collect();
         frame.render_widget(

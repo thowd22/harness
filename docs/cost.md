@@ -14,13 +14,24 @@ them:
 - per UTC day (`daily_spend(data_dir, day)` reads every run of that day),
 - per model and per agent.
 
-Each record also gives its context size and prompt-cache hit rate.
+Each record also gives its context size and prompt-cache hit rate. The
+event's usage splits input into `input` (uncached, including tokens
+written to the cache), `cached_input` (read from the cache) and
+`cache_write` (the part of `input` written to the cache, left out of the
+log when zero). Prices charge each at its own rate: `[pricing]` takes
+`input,output[,cache_read[,cache_write]]`, catalog prices carry the
+provider's cache rates, and missing cache rates default to 0.1x and 1.25x
+the input price. OpenRouter's reported cost is used as is (see
+[providers-openrouter.md](providers-openrouter.md#behaviour)).
 
 ## /cost
 
 `/cost [model|agent|node]` prints `CostReport::lines`: a total line, then
 breakdowns by model, by agent and by node, most expensive first. Each row
-shows cost, tokens, calls and cache hit rate.
+shows cost, tokens, calls and cache hit rate, plus the tokens written to
+the cache when there were any (`· 2600 written to cache`). The status
+line shows the same next to the hit rate (`cache 92% wrote 2.6k`), and a
+turn's header in node detail shows `(cached 11.9k, written 2.6k)`.
 
 ```text
 total: $2.1000 · 4200 tokens · 12 calls · cache 81%

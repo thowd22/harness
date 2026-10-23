@@ -536,6 +536,40 @@ fn from_tool_call_mapping() {
 }
 
 #[test]
+fn search_tools_are_reads_of_their_path() {
+    for tool in ["grep", "glob"] {
+        assert_eq!(
+            Action::from_tool_call(tool, &json!({"pattern": "x", "path": "src"})),
+            Action::Read {
+                tool: tool.into(),
+                path: "src".into()
+            }
+        );
+        assert_eq!(
+            Action::from_tool_call(tool, &json!({"pattern": "x"})),
+            Action::Read {
+                tool: tool.into(),
+                path: ".".into()
+            }
+        );
+    }
+    let f = fx();
+    let e = f.engine();
+    // Searching a protected directory is denied like reading it.
+    let a = Action::from_tool_call("grep", &json!({"pattern": "x", "path": "~/.ssh"}));
+    assert_eq!(e.check(&a, Mode::Auto, &f.root).decision, Decision::Deny);
+    let a = Action::from_tool_call("glob", &json!({"pattern": "**"}));
+    assert_eq!(e.check(&a, Mode::Ask, &f.root).decision, Decision::Allow);
+    // Found files are filtered one by one.
+    assert!(e.read_protected(&f.root.join("app/.env.local"), &f.root));
+    assert!(e.read_protected(&f.root.join(".git/hooks/pre-commit"), &f.root));
+    assert!(e.read_protected(&f.data.join("trust/store.json"), &f.root));
+    assert!(e.read_protected(&f.home.join(".ssh/id_rsa"), &f.root));
+    assert!(!e.read_protected(&f.root.join("src/main.rs"), &f.root));
+    assert!(!e.read_protected(&f.root.join(".harness/agents/a.yaml"), &f.root));
+}
+
+#[test]
 fn invalid_globs_are_reported() {
     let f = fx();
     let mut cfg = f.config();

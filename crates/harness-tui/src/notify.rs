@@ -231,6 +231,9 @@ impl Notifications {
             }
             let rect = Rect::new(x, y, w, h);
             let (icon, token) = n.level.style();
+            // A selection cannot start on a toast, but the text under it
+            // is still copied: toasts come and go (every copy shows one).
+            crate::selection::overlay(rect, frame.buffer_mut());
             frame.render_widget(Clear, rect);
             let block = Block::new()
                 .borders(Borders::ALL)

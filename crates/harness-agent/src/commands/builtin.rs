@@ -46,6 +46,8 @@ pub enum Builtin {
     Doctor,
     /// `/mcp`: MCP servers, their status and actions.
     Mcp,
+    /// `/jobs`: background bash jobs; open their output or stop them.
+    Jobs,
     /// `/login [provider]`, `/login mcp [server]`.
     Login,
     /// `/quit`.
@@ -54,7 +56,7 @@ pub enum Builtin {
 
 impl Builtin {
     /// Every built-in, in help order.
-    pub const ALL: [Builtin; 22] = [
+    pub const ALL: [Builtin; 23] = [
         Builtin::Help,
         Builtin::New,
         Builtin::Resume,
@@ -75,6 +77,7 @@ impl Builtin {
         Builtin::Config,
         Builtin::Doctor,
         Builtin::Mcp,
+        Builtin::Jobs,
         Builtin::Login,
         Builtin::Quit,
     ];
@@ -102,6 +105,7 @@ impl Builtin {
             Self::Config => "config",
             Self::Doctor => "doctor",
             Self::Mcp => "mcp",
+            Self::Jobs => "jobs",
             Self::Login => "login",
             Self::Quit => "quit",
         }
@@ -135,6 +139,7 @@ impl Builtin {
             Self::Config => "Show the effective configuration or check harness.ini",
             Self::Doctor => "Check the setup: config, providers, sandbox, remotes",
             Self::Mcp => "MCP servers: status, tools and auth; restart, disable or view logs",
+            Self::Jobs => "Background bash jobs: elapsed time, output; stop one",
             Self::Login => {
                 "Add, check and save an API key for a provider, or authorize an MCP server"
             }
@@ -205,6 +210,7 @@ impl Builtin {
             | Self::Context
             | Self::Doctor
             | Self::Mcp
+            | Self::Jobs
             | Self::Quit => Vec::new(),
         }
     }

@@ -67,7 +67,8 @@ impl Ui {
     fn click_text(&mut self, text: &str) {
         let (x, y) = find_text(self.term.backend().buffer(), text)
             .unwrap_or_else(|| panic!("`{text}` not on screen:\n{}", self.text()));
-        self.send(vec![click(x, y)]);
+        // A click is a press and a release (picker rows act on the release).
+        self.send(vec![click(x, y), release(x, y)]);
     }
 
     fn text(&self) -> String {

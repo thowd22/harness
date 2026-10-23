@@ -1192,6 +1192,13 @@ pub fn arg_summary(tool: &str, args: &Value) -> String {
             .map(|c| format!("$ {}", c.lines().next().unwrap_or("")))
             .unwrap_or_default(),
         "read" | "write" | "edit" => path.unwrap_or_default(),
+        "grep" | "glob" => {
+            let pattern = str_arg(args, &["pattern"]).unwrap_or_default();
+            match path {
+                Some(p) => format!("{pattern} in {p}"),
+                None => pattern,
+            }
+        }
         _ => match path {
             Some(p) => p,
             None => match args {
@@ -1679,8 +1686,19 @@ mod tests {
             "$ ls -la"
         );
         assert_eq!(
-            arg_summary("grep", &json!({"pattern": "fn", "n": 3})),
+            arg_summary("lookup", &json!({"pattern": "fn", "n": 3})),
             "n=3 pattern=fn"
+        );
+        assert_eq!(
+            arg_summary(
+                "grep",
+                &json!({"pattern": "fn main", "path": "src", "-n": true})
+            ),
+            "fn main in src"
+        );
+        assert_eq!(
+            arg_summary("glob", &json!({"pattern": "**/*.rs"})),
+            "**/*.rs"
         );
         assert_eq!(payload_text(&Payload::Json(json!("hi"))), "hi");
         assert_eq!(

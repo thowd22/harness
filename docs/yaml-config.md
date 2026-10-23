@@ -88,7 +88,8 @@ or labels in `runs_on`, and agent budgets above `[budget] run_usd`.
 - Set exactly one of `prompt:` (the name of a prompt) or `prompt_text:`
   (inline text, not templated).
 - `model:` is optional. Without it the agent uses `[general] default_model`.
-- `tools:` can list `read`, `write`, `edit`, `bash` and `todo`. The model
+- `tools:` can list `read`, `write`, `edit`, `bash`, `grep`, `glob` and
+  `todo` (see [tools.md](tools.md)). The model
   sees only these tools, in the order you list them. In addition,
   `spawn_agent` appears when `subagents:` is not empty, and `memory` appears
   when `memory:` is `read` or `read-write`. No other tool is ever offered.

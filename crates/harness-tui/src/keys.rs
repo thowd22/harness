@@ -54,7 +54,8 @@ pub enum Action {
     /// Copy the focused message, code block, tool output, diff or log
     /// entry (the last assistant message when nothing is focused).
     Copy,
-    /// Start keyboard text selection in the transcript.
+    /// Start keyboard text selection (transcript lines in the chat, a
+    /// cursor on the map and other screens).
     Select,
 }
 
@@ -103,7 +104,7 @@ impl Action {
             Action::SwitchView => "switch view (chat / map)",
             Action::Quit => "quit",
             Action::Copy => "copy to clipboard",
-            Action::Select => "select text in the transcript",
+            Action::Select => "select text with the keyboard",
         }
     }
 
@@ -552,7 +553,7 @@ impl<'a> HelpOverlay<'a> {
             width: label.min(inner_w),
             height: 1,
         };
-        hits.register(HELP_CLOSE_ID, button, close);
+        hits.register_button(HELP_CLOSE_ID, button, close);
     }
 }
 

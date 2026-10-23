@@ -838,7 +838,7 @@ impl InspectorView {
                 t.fg(Token::Muted)
             };
             frame.render_widget(Paragraph::new(Span::styled(label, style)), rect);
-            hits.register(id, rect, InspectorAction::Show(tab));
+            hits.register_button(id, rect, InspectorAction::Show(tab));
             x += w + 1;
         }
         let label = "[export]";
@@ -850,12 +850,14 @@ impl InspectorView {
                 t.fg(Token::Warn)
             };
             frame.render_widget(Paragraph::new(Span::styled(label, style)), rect);
-            hits.register(EXPORT_ID, rect, InspectorAction::Export);
+            hits.register_button(EXPORT_ID, rect, InspectorAction::Export);
         }
         hits.register_pane("inspector", body);
         self.height = usize::from(body.height);
         let lines = self.body(usize::from(body.width));
         self.scroll = self.scroll.min(lines.len().saturating_sub(self.height));
+        let first = self.scroll;
+        crate::selection::update("inspector", |r| r.set_scroll(first));
         let shown: Vec<Line<'static>> = lines
             .into_iter()
             .skip(self.scroll)

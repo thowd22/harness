@@ -27,6 +27,11 @@ pub struct ToolsConfig {
     pub spill_head_lines: usize,
     /// Lines kept from the end of a spilled output (`spill_tail_lines`, default 40).
     pub spill_tail_lines: usize,
+    /// Background bash jobs that may run at once (`bash_max_jobs`, default 4).
+    pub bash_max_jobs: usize,
+    /// Output bytes written to a background job's log (`bash_job_output_bytes`,
+    /// default 32 MiB); later output is dropped.
+    pub bash_job_output_bytes: u64,
 }
 
 impl Default for ToolsConfig {
@@ -41,6 +46,8 @@ impl Default for ToolsConfig {
             spill_over_bytes: 16_000,
             spill_head_lines: 40,
             spill_tail_lines: 40,
+            bash_max_jobs: 4,
+            bash_job_output_bytes: 32 * 1024 * 1024,
         }
     }
 }

@@ -430,7 +430,9 @@ impl ShellExec {
     pub fn new(shell: Arc<dyn RemoteShell>) -> Self {
         Self {
             shell,
-            local: LocalExec::new(),
+            // Sampling the local ssh process says nothing about the remote
+            // command, so the shell fallback reports no liveness.
+            local: LocalExec::new().with_liveness_interval(None),
         }
     }
 

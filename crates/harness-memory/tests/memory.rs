@@ -44,6 +44,7 @@ fn write(t: &MemoryTool, path: &str, text: &str) -> harness_memory::tool::Memory
     t.execute(MemoryArgs::Write {
         path: path.into(),
         text: text.into(),
+        bullets: Vec::new(),
         title: None,
     })
     .unwrap()
@@ -276,6 +277,7 @@ fn writes_are_validated_scanned_and_screened() {
             .execute(MemoryArgs::Write {
                 path: "tools/git".into(),
                 text: text.into(),
+                bullets: Vec::new(),
                 title: None,
             })
             .unwrap_err();
@@ -290,6 +292,7 @@ fn writes_are_validated_scanned_and_screened() {
         .execute(MemoryArgs::Write {
             path: ".harness/usage".into(),
             text: "x".into(),
+            bullets: Vec::new(),
             title: None,
         })
         .unwrap_err();
@@ -361,6 +364,7 @@ fn tool_appears_only_for_agents_with_memory() {
         .execute(MemoryArgs::Write {
             path: "tools/x".into(),
             text: "y".into(),
+            bullets: Vec::new(),
             title: None,
         })
         .unwrap_err();

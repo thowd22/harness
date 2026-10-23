@@ -89,7 +89,7 @@ pub fn palette_entries(keymap: &Keymap) -> Vec<PaletteEntry> {
         e(
             ids::SELECT,
             "Select text",
-            "Select lines of the transcript with the keyboard and copy them",
+            "Select text with the keyboard and copy it: transcript lines in the chat, a cursor on other screens",
         )
         .with_key(key(Action::Select)),
     ]
@@ -148,7 +148,7 @@ pub fn render_bar<A: Clone>(
         spans.push(Span::styled(label, st));
         spans.push(Span::raw(" "));
         if x + w <= area.right() {
-            hits.register(eid, Rect::new(x, area.y, w, 1), wrap(action));
+            hits.register_button(eid, Rect::new(x, area.y, w, 1), wrap(action));
         }
         x = x.saturating_add(w + 1);
     }

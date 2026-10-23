@@ -8,7 +8,7 @@ use std::time::Instant;
 use harness_events::schema::{DeltaChannel, NodeId, NodeStatus};
 use harness_tui::chat::view::{ChatConfig, ChatOutput, ChatView};
 use harness_tui::demo::events::{EventBuilder, NodeSpec, T0};
-use harness_tui::interaction::testing::{buffer_text, click, find_text, key};
+use harness_tui::interaction::testing::{buffer_text, click, drag, find_text, key, release};
 use harness_tui::status::StatusLine;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -130,4 +130,32 @@ fn click_or_enter_opens_the_subagent() {
         out.contains(&ChatOutput::OpenNode(NodeId::from("r1"))),
         "{out:?}"
     );
+}
+
+#[test]
+fn a_click_on_the_card_body_opens_the_subagent_on_release_and_a_drag_does_not() {
+    let mut ui = Ui::new();
+    let mut b = spawn();
+    b.tool_call("r1", "t1", "read", json!({"path": "src/net/mod.rs"}));
+    ui.feed(&b, 0);
+    ui.draw();
+    let (hx, hy) = find_text(ui.term.backend().buffer(), "survey").unwrap();
+    let (x, y) = find_text(ui.term.backend().buffer(), "read src/net/mod.rs").unwrap();
+    assert!(y > hy, "the last action is in the card body");
+    // The press only focuses the card (a drag may follow); the release
+    // opens it.
+    let out = ui.send(click(x, y));
+    assert!(out.is_empty(), "{out:?}");
+    let out = ui.send(release(x, y));
+    assert!(
+        out.contains(&ChatOutput::OpenNode(NodeId::from("r1"))),
+        "{out:?}"
+    );
+    // A release elsewhere (the app keeps the release of a text drag) opens
+    // nothing.
+    let out = ui.send(click(x, y));
+    assert!(out.is_empty(), "{out:?}");
+    ui.send(drag(hx, hy + 20));
+    let out = ui.send(release(hx, hy + 20));
+    assert!(out.is_empty(), "{out:?}");
 }

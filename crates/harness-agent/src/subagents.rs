@@ -758,6 +758,8 @@ impl SubagentRuntime {
             Some(f) => f(&parts.agent),
             None => parts.gate.clone(),
         };
+        // The child hears about the background jobs it starts.
+        let job_notices = crate::job_notices::JobNotices::agent(&tools);
         let mut dispatcher = Dispatcher::new(tools, gate);
         let root = match &req.host {
             Some(h) => Some(&h.root),
@@ -783,6 +785,9 @@ impl SubagentRuntime {
         )
         .with_parent(req.parent.clone())
         .with_node(node.clone());
+        if let Some(n) = job_notices {
+            lp = lp.with_hook(Arc::new(n));
+        }
         if let Some(l) = &self.labeler {
             lp = lp.with_labeler(l.clone());
         }
