@@ -7,7 +7,11 @@ name: CI
 # docs/ci.md. The release workflow requires this workflow to be
 # green on the commit it releases (scripts/release-ci-gate.sh).
 on:
+  # Branches get CI through pull_request; pushing only main and release tags
+  # avoids running every PR branch twice.
   push:
+    branches: [main]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
   workflow_call:
