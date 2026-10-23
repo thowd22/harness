@@ -46,7 +46,7 @@ use futures::StreamExt;
 use harness_config::ini::config::Config;
 use harness_events::blobs::BlobStore;
 use harness_events::reducer::RunState;
-use harness_events::schema::{NodeId, NodeStatus, RunEvent, RunStatus};
+use harness_events::schema::{NodeId, RunEvent, RunStatus};
 use harness_hygiene::report::HygieneReport;
 use harness_policy::approvals::PromptEnvelope;
 use harness_policy::rules::Mode;
@@ -760,18 +760,11 @@ impl App {
             || matches!(&self.screen, Some(Screen::Detail(d)) if d.is_running())
     }
 
-    /// Whether something is working: a node runs, waits or is queued, or
-    /// a run has started and has no node yet. An interactive session's run
-    /// stays open between turns, so finished nodes mean idle.
+    /// Whether something is working (see [`RunState::is_working`]): an idle
+    /// interactive session, including one waiting for its first prompt,
+    /// shows "ready", not "running".
     pub fn is_running(&self) -> bool {
-        let active = self.run.nodes.iter().any(|n| {
-            matches!(
-                n.status,
-                NodeStatus::Running | NodeStatus::Queued | NodeStatus::WaitingApproval
-            )
-        });
-        self.run.event_count > 0
-            && (active || (self.run.status == RunStatus::Running && self.run.nodes.is_empty()))
+        self.run.event_count > 0 && self.run.is_working()
     }
 
     /// Takes pending terminal effects.

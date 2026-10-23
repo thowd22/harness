@@ -212,13 +212,26 @@ async fn idles_without_ticks_and_ticks_only_while_running() {
     assert_eq!(app.frames(), 1, "idle loop draws once");
     assert_eq!(app.ticks(), 0, "idle loop never wakes for ticks");
 
+    // An interactive session opens its run before the first prompt; with
+    // no node running it is idle and must not animate.
     tx.send(started(0)).await.unwrap();
+    let opened = tokio::time::timeout(
+        Duration::from_secs(1),
+        run_loop(&mut term, &mut control, &mut app, &mut rx),
+    )
+    .await;
+    assert!(opened.is_err());
+    assert!(!app.is_running(), "an open session with no turn is ready");
+    assert_eq!(app.ticks(), 0, "no spinner before the first prompt");
+
+    tx.send(node_started(1, "main")).await.unwrap();
     let busy = tokio::time::timeout(
         Duration::from_secs(1),
         run_loop(&mut term, &mut control, &mut app, &mut rx),
     )
     .await;
     assert!(busy.is_err());
+    assert!(app.is_running());
     assert!(app.ticks() >= 10, "ticks {}", app.ticks());
     assert!(app.frames() >= 10);
 
@@ -232,11 +245,13 @@ async fn idles_without_ticks_and_ticks_only_while_running() {
         req_tx,
     );
     tx.send(started(0)).await.unwrap();
+    tx.send(node_started(1, "main")).await.unwrap();
     let _ = tokio::time::timeout(
         Duration::from_secs(1),
         run_loop(&mut term, &mut control, &mut app, &mut rx),
     )
     .await;
+    assert!(app.is_running());
     assert_eq!(app.ticks(), 0);
 }
 

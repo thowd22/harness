@@ -185,6 +185,24 @@ impl RunState {
         Self::default()
     }
 
+    /// Whether the run is doing work: a node runs, is queued or waits for
+    /// approval, or a workflow run has started but not created its first
+    /// node yet. An interactive session's run stays open between turns, so
+    /// an open run with no active node (even no node at all, before the
+    /// first prompt) is idle, not working.
+    pub fn is_working(&self) -> bool {
+        if self.status != RunStatus::Running {
+            return false;
+        }
+        let active = self.nodes.iter().any(|n| {
+            matches!(
+                n.status,
+                NodeStatus::Running | NodeStatus::Queued | NodeStatus::WaitingApproval
+            )
+        });
+        active || (self.nodes.is_empty() && self.workflow.is_some())
+    }
+
     /// Folds a sequence of events into a fresh state.
     pub fn from_events<'a>(events: impl IntoIterator<Item = &'a RunEvent>) -> Self {
         let mut state = Self::new();
@@ -438,6 +456,48 @@ mod tests {
         assert_eq!(a.duration_ms, Some(5000));
         assert_eq!(a.status, NodeStatus::Succeeded);
         assert_eq!(s.node(&"b".into()).unwrap().status, NodeStatus::Running);
+    }
+
+    #[test]
+    fn an_open_session_without_active_nodes_is_not_working() {
+        let session = |workflow: Option<&str>| EventKind::RunStarted {
+            name: "coder".into(),
+            workflow: workflow.map(Into::into),
+            host: None,
+        };
+        // Interactive session before the first prompt: open, no node.
+        let mut s = RunState::new();
+        s.apply(&ev(0, 0, None, session(None)));
+        assert_eq!(s.status, RunStatus::Running);
+        assert!(!s.is_working(), "waiting for the first prompt");
+        // A turn starts, then finishes: working, then idle again.
+        s.apply(&ev(1, 1, Some("a"), started("a", &[])));
+        assert!(s.is_working());
+        s.apply(&ev(
+            2,
+            2,
+            Some("a"),
+            EventKind::NodeFinished {
+                status: NodeStatus::Succeeded,
+                error: None,
+            },
+        ));
+        assert!(!s.is_working(), "between turns");
+        // A workflow run is working from the start, before its first node.
+        let mut w = RunState::new();
+        w.apply(&ev(0, 0, None, session(Some("fix-bug"))));
+        assert!(w.is_working());
+        // A finished run is never working.
+        w.apply(&ev(
+            1,
+            1,
+            None,
+            EventKind::RunFinished {
+                status: RunStatus::Succeeded,
+                error: None,
+            },
+        ));
+        assert!(!w.is_working());
     }
 
     #[test]

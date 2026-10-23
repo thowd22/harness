@@ -555,7 +555,7 @@ impl MapView {
         let r = &self.run;
         let name = r.name.clone().unwrap_or_else(|| "run".into());
         // An interactive session's run stays open between turns.
-        let idle = !r.nodes.is_empty() && r.nodes.iter().all(|n| n.status.is_terminal());
+        let idle = !r.is_working();
         let (glyph, token, status) = match r.status {
             RunStatus::Running if idle => ('●', Token::Ok, "ready"),
             RunStatus::Running => (self.spinner.glyph(), Token::Running, "running"),
