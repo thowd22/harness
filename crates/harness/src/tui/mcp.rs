@@ -72,6 +72,8 @@ pub const RESOURCE_PREFIX: &str = "mcp.resource.";
 pub const MAX_CONTENT_CHARS: usize = 100_000;
 /// Most characters of server-provided text in titles and descriptions.
 const MAX_LABEL_CHARS: usize = 120;
+/// Longest failure reason the panel shows; see [`clean_reason`].
+const MAX_REASON_CHARS: usize = 160;
 
 /// What a running server offers, read when it connects or changes.
 #[derive(Debug, Clone, Default)]
@@ -197,12 +199,31 @@ fn lock(shared: &Mutex<Shared>) -> std::sync::MutexGuard<'_, Shared> {
 /// Server-provided text for a title or description: one line, no control
 /// characters, cut.
 fn clean(s: &str) -> String {
+    harness_agent::robustness::truncate_chars(&clean_line(s), MAX_LABEL_CHARS)
+}
+
+/// One line with control characters and runs of whitespace collapsed.
+fn clean_line(s: &str) -> String {
     let one: String = s
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
-    let one = one.split_whitespace().collect::<Vec<_>>().join(" ");
-    harness_agent::robustness::truncate_chars(&one, MAX_LABEL_CHARS)
+    one.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A failure reason for the panel: one line, cut in the middle when long so
+/// the fix hint at the end (`check `command` ...`) survives long paths.
+fn clean_reason(s: &str) -> String {
+    let one = clean_line(s);
+    let n = one.chars().count();
+    if n <= MAX_REASON_CHARS {
+        return one;
+    }
+    let head = MAX_REASON_CHARS / 3;
+    let tail = MAX_REASON_CHARS - head - 3;
+    let start: String = one.chars().take(head).collect();
+    let end: String = one.chars().skip(n - tail).collect();
+    format!("{start}...{end}")
 }
 
 /// Cuts model-bound text to [`MAX_CONTENT_CHARS`], saying so.
@@ -584,7 +605,7 @@ async fn panel_lines(
             auth_state(h.name(), h.config(), &store)
         ));
         if let Some(r) = reason {
-            lines.push(format!("  reason: {}", clean(&h.redact(&r))));
+            lines.push(format!("  reason: {}", clean_reason(&h.redact(&r))));
         }
         if let Some(l) = listing.filter(|l| !l.prompts.is_empty() || !l.resources.is_empty()) {
             let prompts: Vec<String> = l
@@ -1101,4 +1122,31 @@ async fn attach_read(ctx: &Ctx, h: &ServerHandle, server: &str, uri: &str) {
         ),
     )
     .await;
+}
+
+#[cfg(test)]
+mod reason_tests {
+    use super::*;
+
+    #[test]
+    fn long_reasons_keep_their_fix_hint() {
+        let path = format!(
+            "/var/folders/n6/{}/T/.tmpEBL21u/no-such-mcp-server",
+            "x".repeat(60)
+        );
+        let r = format!(
+            "could not start `{path}`: No such file or directory (os error 2); check `command` and `cwd` in [mcp.bad]"
+        );
+        let shown = clean_reason(&r);
+        assert!(shown.chars().count() <= MAX_REASON_CHARS, "{shown}");
+        assert!(
+            shown.starts_with("could not start `/var/folders"),
+            "{shown}"
+        );
+        assert!(
+            shown.ends_with("check `command` and `cwd` in [mcp.bad]"),
+            "{shown}"
+        );
+        assert_eq!(clean_reason("short\nreason"), "short reason");
+    }
 }
