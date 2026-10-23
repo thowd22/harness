@@ -86,3 +86,11 @@ passes it in a small wrapper and point `CC_aarch64_apple_darwin` at it).
 
 To lint the workflow itself, run [actionlint](https://github.com/rhysd/actionlint)
 on `.github/workflows/`.
+
+## Dependency updates
+
+Dependabot alerts and security updates are enabled for the repository, so a
+vulnerable dependency raises an alert and gets a fix PR automatically.
+`.github/dependabot.yml` adds weekly version updates for `cargo` and
+`github-actions`, with minor and patch bumps grouped into one PR per
+ecosystem. `cargo deny check` in CI still fails a build on known advisories.

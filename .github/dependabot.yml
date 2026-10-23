@@ -1,0 +1,25 @@
+# Dependabot version updates (security updates are enabled in the repo
+# settings and run regardless of this file). Minor and patch bumps are
+# grouped so each ecosystem opens at most one routine PR a week.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      cargo-minor-patch:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: deps
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci
