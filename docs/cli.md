@@ -56,4 +56,6 @@ todo list in the goal bar, a researcher subagent, an edit with its diff, a
 provider rate-limit retry, a bash command that asks for approval (answer
 with `y`), the map (Tab) and the palette (Ctrl+P). `--gallery` shows each
 component on its own page instead; `--print` plays the session without a
-terminal and prints the chat, map and palette screens as text.
+terminal and prints the chat, map and palette screens as text. The demo's
+commands only touch its throwaway project, so it runs them without the
+sandbox; the screens then look the same on every host.

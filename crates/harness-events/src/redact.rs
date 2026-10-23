@@ -435,10 +435,7 @@ mod tests {
             ),
             ("id AKIAIOSFODNN7EXAMPLE ok".into(), format!("id {MASK} ok")),
             ("xoxb-1234567890-abcdef".into(), MASK.into()),
-            (
-                "AIzaSyA-abcdefghijklmnopqrstuvwxyz01234".into(),
-                MASK.into(),
-            ),
+            (format!("AIza{}", "x".repeat(35)), MASK.into()),
             (
                 "Authorization: Bearer abc.def-ghi_jkl123".into(),
                 format!("Authorization: Bearer {MASK}"),

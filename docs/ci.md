@@ -9,8 +9,14 @@ passed on (`scripts/release-ci-gate.sh`).
 |---|---|---|
 | rustfmt | ubuntu-latest | `cargo fmt --all -- --check` |
 | clippy | ubuntu-latest, macos-latest | `cargo clippy --workspace --all-targets -- -D warnings` |
-| test | ubuntu-latest, macos-latest | `cargo test --workspace --locked` |
+| test | ubuntu-latest, macos-latest | `cargo nextest run --workspace --locked --profile ci`, then `cargo test --workspace --locked --doc` |
 | cargo-deny | ubuntu-latest | `cargo deny check` (advisories, licenses, bans, sources from `deny.toml`) |
+
+Tests run under [cargo-nextest](https://nexte.st) with the `ci` profile in
+`.config/nextest.toml`: a test running longer than 60 s is reported as slow
+and killed after 5 minutes, so a hang fails with the test's name instead of
+running into the job timeout. nextest does not run doctests, hence the
+separate step.
 
 `RUSTFLAGS=-D warnings` is set for every job, so a warning on either OS fails
 the run. The toolchain comes from `rust-toolchain.toml`.
@@ -66,7 +72,8 @@ sandbox tests with `--nocapture` so their `SKIP` lines show in the log.
 ```sh
 cargo fmt --all -- --check
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --locked
+cargo nextest run --workspace --locked --profile ci   # or: cargo test --workspace --locked
+cargo test --workspace --locked --doc
 cargo deny check
 ```
 

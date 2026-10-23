@@ -843,6 +843,19 @@ fn files_containing(dir: &Path, needle: &str) -> Vec<PathBuf> {
     out
 }
 
+/// [`files_containing`] once the run store's buffered writer has flushed:
+/// polls until a file contains `needle` or 10 s pass.
+async fn files_containing_eventually(dir: &Path, needle: &str) -> Vec<PathBuf> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let found = files_containing(dir, needle);
+        if !found.is_empty() || tokio::time::Instant::now() >= deadline {
+            return found;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 /// What the `/login` modal sends for an inline key.
 fn submitted(provider: &str, key: &str) -> harness_tui::login::LoginSubmission {
     use harness_tui::login::{LoginAction, LoginModal, LoginOutcome};
@@ -947,8 +960,11 @@ async fn login_opens_the_modal_and_saves_a_checked_key_without_leaking_it() {
         .await;
     h.finish_turn().await;
 
+    // Events reach disk through a buffered writer; wait for the flush.
     assert!(
-        !files_containing(&env.root.join("data"), "keys: [REDACTED] and [REDACTED]").is_empty(),
+        !files_containing_eventually(&env.root.join("data"), "keys: [REDACTED] and [REDACTED]")
+            .await
+            .is_empty(),
         "the prompt is stored, masked"
     );
     // No UI event and no stored event or file carries either key.

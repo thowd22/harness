@@ -84,8 +84,15 @@ jobs:
           done
           if [ -t 0 ]; then echo "tty: yes"; else echo "tty: no"; fi
           cargo run --quiet --locked -p harness-policy --bin harness-sandbox -- --probe || true
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      # nextest kills a test after 5 min (.config/nextest.toml), so a hang
+      # fails with the test's name instead of hitting the job timeout.
       - name: Test
-        run: cargo test --workspace --locked
+        run: cargo nextest run --workspace --locked --profile ci
+      - name: Doctests
+        run: cargo test --workspace --locked --doc
       - name: Sandbox tests with skip reasons
         run: cargo test --locked -p harness-policy --test sandbox -- --nocapture
 

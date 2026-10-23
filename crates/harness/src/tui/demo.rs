@@ -111,6 +111,10 @@ fn setup() -> Result<Setup, String> {
     write(script.clone(), SCRIPT)?;
     let mut cfg = Config::defaults_with_data_dir(root.join("data"));
     cfg.memory.enabled = false;
+    // The scripted commands only touch the demo's temp project. Without the
+    // sandbox the screens do not depend on the host (no Landlock warnings on
+    // macOS or older kernels covering the cards).
+    cfg.sandbox.enabled = false;
     let data = DataDir::from_config(&cfg)
         .open()
         .map_err(|e| e.to_string())?;
