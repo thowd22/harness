@@ -52,6 +52,9 @@ to built-in prompts, agents, workflows and `harness.ini` defaults.
 
 ### Fixed
 
+- The `/resume` picker and `harness sessions` shorten long project paths to their last
+  directories (`…/work/proj`) and show the project last, so the time, message count, cost
+  and model stay visible on deep paths such as macOS temp directories.
 - `/new` (and other session restarts) no longer mixes the old run into the new one: the old
   session now finishes before the UI resets, so the palette, map and status show the new run
   (the palette's live run entry no longer stays at "Running for 0ms").

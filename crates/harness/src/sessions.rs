@@ -54,14 +54,50 @@ pub fn local_offset() -> UtcOffset {
     *OFFSET.get_or_init(|| UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC))
 }
 
-/// A project path for lists: the home directory as `~`.
+/// Longest project label in characters; longer paths keep their tail.
+const PROJECT_LABEL_MAX: usize = 32;
+
+/// A project path for lists: the home directory as `~`, and a long path
+/// shortened to its last components (`…/work/proj`), which identify it.
 pub fn project_label(project: &Path) -> String {
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    match home.as_deref().and_then(|h| project.strip_prefix(h).ok()) {
-        Some(rest) if rest.as_os_str().is_empty() => "~".into(),
+    shorten_project(project, home.as_deref())
+}
+
+fn shorten_project(project: &Path, home: Option<&Path>) -> String {
+    let full = match home.and_then(|h| project.strip_prefix(h).ok()) {
+        Some(rest) if rest.as_os_str().is_empty() => return "~".into(),
         Some(rest) => format!("~/{}", rest.display()),
         None => project.display().to_string(),
+    };
+    if full.chars().count() <= PROJECT_LABEL_MAX {
+        return full;
     }
+    // Keep as many trailing components as fit after "…/"; at least one.
+    let parts: Vec<&str> = full.split('/').filter(|p| !p.is_empty()).collect();
+    let mut tail: Vec<&str> = Vec::new();
+    for part in parts.iter().rev() {
+        let len =
+            tail.iter().map(|p| p.chars().count() + 1).sum::<usize>() + part.chars().count() + 2;
+        if !tail.is_empty() && len > PROJECT_LABEL_MAX {
+            break;
+        }
+        tail.insert(0, part);
+    }
+    let short = format!("…/{}", tail.join("/"));
+    if short.chars().count() > PROJECT_LABEL_MAX {
+        // A single very long last component: keep its end.
+        let keep: String = short
+            .chars()
+            .rev()
+            .take(PROJECT_LABEL_MAX - 1)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        return format!("…{keep}");
+    }
+    short
 }
 
 /// The `/resume` picker's row for `meta`.
@@ -353,6 +389,27 @@ mod tests {
     use super::*;
     use time::macros::datetime;
 
+    #[test]
+    fn project_labels_use_tilde_and_keep_the_tail_of_long_paths() {
+        let home = Path::new("/home/me");
+        let label = |p: &str| shorten_project(Path::new(p), Some(home));
+        assert_eq!(label("/home/me"), "~");
+        assert_eq!(label("/home/me/code/proj"), "~/code/proj");
+        assert_eq!(label("/srv/proj"), "/srv/proj");
+        // macOS temp dirs: the project's own directories survive.
+        let mac = label("/private/var/folders/n6/hn37q6pj7sj_9dmqqc2113800000gn/T/.tmpvU3SXL/proj");
+        assert_eq!(mac, "…/T/.tmpvU3SXL/proj");
+        assert!(mac.chars().count() <= PROJECT_LABEL_MAX);
+        let deep = label("/home/me/work/clients/acme/services/billing-api");
+        assert_eq!(deep, "…/acme/services/billing-api");
+        // One huge component keeps its end.
+        let huge = label(&format!("/x/{}", "a".repeat(80)));
+        assert!(
+            huge.starts_with('…') && huge.chars().count() == PROJECT_LABEL_MAX,
+            "{huge}"
+        );
+    }
+
     fn meta(prompt: &str, at: OffsetDateTime) -> SessionMeta {
         let mut m = SessionMeta::new("/srv/proj", "coder", "anthropic/claude-x", prompt);
         m.last_message_at = Some(at);
@@ -374,7 +431,7 @@ mod tests {
         assert_eq!(rows[1].when, "yesterday 09:10");
         assert_eq!(
             rows[1].details(),
-            "yesterday 09:10 · /srv/proj · anthropic/claude-x · 4 msgs · $0.5000"
+            "yesterday 09:10 · 4 msgs · $0.5000 · anthropic/claude-x · /srv/proj"
         );
         let entries = palette_entries(&list, Some(&a.id), UtcOffset::UTC, now);
         assert_eq!(entries.len(), 1, "the open session is left out");

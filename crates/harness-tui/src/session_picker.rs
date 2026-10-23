@@ -82,14 +82,16 @@ pub struct SessionRow {
 }
 
 impl SessionRow {
-    /// The right-hand details: time, project, model, messages and cost.
+    /// The right-hand details: time, messages, cost, model and project.
+    /// The project comes last, so a narrow row trims the path, not the
+    /// numbers.
     pub fn details(&self) -> String {
         [
             self.when.as_str(),
-            self.project.as_str(),
-            self.model.as_str(),
             self.messages.as_str(),
             self.cost.as_str(),
+            self.model.as_str(),
+            self.project.as_str(),
         ]
         .into_iter()
         .filter(|s| !s.is_empty())
@@ -634,7 +636,7 @@ pub(crate) mod tests {
         assert!(text.contains("4 of 4 sessions"), "{text}");
         assert!(
             text.contains(
-                "14:32 today · ~/code/proj · anthropic/claude-sonnet-5-5 · 12 msgs · $0.0412"
+                "14:32 today · 12 msgs · $0.0412 · anthropic/claude-sonnet-5-5 · ~/code/proj"
             ),
             "{text}"
         );
