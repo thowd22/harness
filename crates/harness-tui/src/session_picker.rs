@@ -17,8 +17,9 @@
 //! description. The session already open is marked with `●`.
 //!
 //! Typing filters with fuzzy matching over the name, description,
-//! project and tag; an empty query keeps the given order (newest activity
-//! first), a query orders by match quality. Up / Down / Tab, PgUp / PgDn
+//! project and tag, each field on its own (the best one counts); an
+//! empty query keeps the given order (newest activity first), a query
+//! orders by match quality. Up / Down / Tab, PgUp / PgDn
 //! and Home / End move the selection, Enter resumes, Esc or a click
 //! outside closes; a click on either row of a session resumes it and the
 //! wheel moves the selection.
@@ -124,7 +125,9 @@ pub enum SessionOutcome {
 #[derive(Debug)]
 pub struct SessionPicker {
     rows: Vec<SessionRow>,
-    hay: Vec<Utf32String>,
+    /// Per session: its name, description, project and tag, matched one
+    /// at a time so a query cannot match letters spread across fields.
+    hay: Vec<[Utf32String; 4]>,
     query: String,
     /// Indices into `rows` that match, in display order.
     visible: Vec<usize>,
@@ -141,10 +144,7 @@ impl SessionPicker {
         let hay = rows
             .iter()
             .map(|r| {
-                Utf32String::from(format!(
-                    "{} {} {} {}",
-                    r.name, r.description, r.project, r.tag
-                ))
+                [&r.name, &r.description, &r.project, &r.tag].map(|f| Utf32String::from(f.as_str()))
             })
             .collect();
         let mut p = SessionPicker {
@@ -208,8 +208,11 @@ impl SessionPicker {
             let pattern = query(q);
             let mut scored: Vec<(u32, usize)> = (0..self.rows.len())
                 .filter_map(|i| {
-                    self.fuzzy
-                        .score(&pattern, self.hay[i].slice(..))
+                    let fuzzy = &mut self.fuzzy;
+                    self.hay[i]
+                        .iter()
+                        .filter_map(|f| fuzzy.score(&pattern, f.slice(..)))
+                        .max()
                         .map(|s| (s, i))
                 })
                 .collect();
@@ -708,5 +711,22 @@ pub(crate) mod tests {
         p.set_query("zzzz");
         let (text, _) = render(&mut p, 80, 20);
         assert!(text.contains("no sessions match `zzzz`"), "{text}");
+    }
+
+    #[test]
+    fn a_query_must_match_within_one_field() {
+        // Seen on macOS CI: "header" matched letters spread over the
+        // description ("tHE releAse"), a temp dir ("tmpeQDiem") and
+        // "pRoject" once the fields were joined into one string.
+        let mut rows = sample();
+        rows[2].name = "Write release notes".into();
+        rows[2].description = "write the release notes".into();
+        rows[2].project = "…/T/.tmpeQDiem/project".into();
+        let mut p = SessionPicker::new(rows);
+        for c in "header".chars() {
+            p.handle_key(&key(KeyCode::Char(c)));
+        }
+        let names: Vec<&str> = p.visible().iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["Fix header parser"]);
     }
 }
