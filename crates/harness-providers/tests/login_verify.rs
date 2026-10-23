@@ -110,9 +110,9 @@ async fn rejected_key_is_an_auth_error_without_the_key() {
 
 #[tokio::test]
 async fn unreachable_server_is_a_connection_error() {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    drop(listener);
+    // A privileged port no test can bind (a freed ephemeral port can be
+    // reused by another test's mock server, which then answers).
+    let base = "http://127.0.0.1:1".to_owned();
     let client = reqwest::Client::new();
     let err = verify_api_key(
         &client,
