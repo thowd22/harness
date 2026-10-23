@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@remote'
 created_date: '2026-10-22 14:30'
-updated_date: '2026-10-22 19:55'
+updated_date: '2026-10-23 04:24'
 labels:
   - remote
 milestone: m-10
@@ -81,4 +81,6 @@ cargo test -p harness-remote: 91 tests pass (64 unit, 27 integration in tests/{c
 Integrator update: added scripts/build-remote-helpers.sh (builds harness-remote-agent per musl target, writes harness-<version>-<arch>-linux-musl plus .sha256 sidecar in the layout HelperBinaries::locate expects) and .github/workflows/release.yml (tags/workflow_dispatch: both targets via cargo-zigbuild, sha256sum -c and a static-link check, uploads remote-bin). Verified locally for x86_64 (static-pie, sidecar OK). REMAINING (AC#2, DoD#1): the aarch64 build has not been run (cargo-zigbuild and the aarch64 rustup target are not installed here and installing needs the network); run the Remote helpers workflow once, then check AC#2 and DoD#1. Upload-on-demand and checksum verification are already tested in harness-remote tests/install.rs.
 
 Build lane (aarch64 verification): installed user-local tooling (rustup target aarch64-unknown-linux-musl, cargo-zigbuild 0.24.0; zig 0.16.0 already on PATH). scripts/build-remote-helpers.sh OUT aarch64 and OUT x86_64 both built via cargo-zigbuild: harness-0.1.0-aarch64-linux-musl (ELF AArch64, statically linked, 3.0 MB) and harness-0.1.0-x86_64-linux-musl (statically linked, 3.4 MB); sha256sum -c on both sidecars OK. The aarch64 binary was run under a user-local qemu-aarch64 (extracted from the qemu-user .deb with apt-get download + dpkg-deb -x, no sudo): hello returned arch=aarch64 protocol=1 version=0.1.0, and probe/fs.stat answered. Added scripts/verify-remote-helpers.sh (sidecar match, ELF machine, no PT_INTERP/NEEDED, hello handshake natively or under qemu-<arch>/QEMU_<ARCH>, REQUIRE_RUN=1 makes a missing qemu a failure); negative-checked with a tampered binary (fails on sidecar) and with no qemu + REQUIRE_RUN=1 (fails). release.yml now installs qemu-user and runs the verify script with REQUIRE_RUN=1 for both arches. docs/remote.md documents the tooling and the verify script. cargo test -p harness-remote: 92 pass, 1 ignored (real sshd). The GitHub Remote helpers workflow itself has not been run (no push from here).
+
+The aarch64 musl helper is now built, static-checked and published by the Release workflow: https://github.com/thowd22/harness/releases/tag/v0.1.0 (harness-remote-agent-0.1.0-aarch64-linux-musl.tar.gz plus .sha256), run https://github.com/thowd22/harness/actions/runs/39896827525.
 <!-- SECTION:NOTES:END -->
