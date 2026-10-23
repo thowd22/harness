@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-23 06:01'
-updated_date: '2026-10-23 08:36'
+updated_date: '2026-10-23 10:18'
 labels:
   - tools
   - mcp
@@ -93,6 +93,15 @@ Review fix: child AgentLoops (subagents, workflow agent steps) had no Labeler, s
 
 Review finding confirmed: child AgentLoops in harness-agent/src/subagents.rs had no Labeler, so MCP results in subagents and workflow agent steps (tools: [mcp:...]) were only redacted, not wrapped as trust="untrusted" origin="mcp server". Fix: SubagentRuntime::with_labeler (applied in run_child); core.rs builds one Labeler (redactor + project trust) shared by the top loop and the runtime; workflow.rs builds the same from the trust store (workflow::labeler). Side effect, intended: child built-in tool results are now provenance-labeled like the top agent's. New tests: harness-agent subagents::tests::children_label_mcp_results_untrusted_with_the_runtime_labeler; harness tests/mcp_tools.rs workflow_agent_steps_label_mcp_results_untrusted (verified failing without the workflow.rs wiring). docs/mcp.md notes labeling covers subagents and workflow steps. Validation: cargo nextest -p harness-agent -p harness-workflow -p harness (334 passed), -p harness-eval -p harness-mcp (142 passed, 2 pre-existing skips), clippy -D warnings clean for harness-agent and harness.
 <!-- SECTION:NOTES:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+created: 2026-10-23 10:18
+---
+Shipped in v0.3.0: https://github.com/thowd22/harness/releases/tag/v0.3.0 (commits fcbd379, 74cb913; CI https://github.com/thowd22/harness/actions/runs/39934504416). Installed locally via install.sh: harness 0.3.0 (2cb6cd9e4cd6).
+---
+<!-- COMMENTS:END -->
 
 ## Final Summary
 

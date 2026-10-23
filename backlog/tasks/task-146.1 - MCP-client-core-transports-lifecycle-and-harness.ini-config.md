@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-23 06:01'
-updated_date: '2026-10-23 07:30'
+updated_date: '2026-10-23 10:18'
 labels:
   - tools
   - mcp
@@ -79,6 +79,15 @@ Review fixes (round 1):
 - Finding 4 (confirmed): stdio spawn now applies harness_tools::bash::EnvScrubber (DEFAULT_SECRET_NAMES, HARNESS_*, configured names, value matching on known_secrets) before adding the server's env.*; harness-mcp depends on harness-tools. ClientOptions::from_config now resolves provider keys into known_secrets (redactor + value scrubbing); doctor computes it once. Tests: stdio.rs environment_uses_the_bash_scrub_policy and tests/env_scrub.rs (re-runs itself with ANTHROPIC_API_KEY, HARNESS_*, a copy of a resolved key etc. in the inherited env, with HOME/XDG/HARNESS_CONFIG at a tempdir).
 Docs: docs/mcp.md, doc-2, CHANGELOG. Validation: cargo nextest run -p harness-mcp 44/44 (3x), -p harness-eval -p harness-config 215 passed; clippy -D warnings and fmt clean for harness-mcp/harness-eval; harness builds; hermetic-guard nextest -p harness-mcp ok; no leftover test-server or sleep processes.
 <!-- SECTION:NOTES:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+created: 2026-10-23 10:18
+---
+Shipped in v0.3.0: https://github.com/thowd22/harness/releases/tag/v0.3.0 (commits fcbd379, 74cb913; CI https://github.com/thowd22/harness/actions/runs/39934504416). Installed locally via install.sh: harness 0.3.0 (2cb6cd9e4cd6).
+---
+<!-- COMMENTS:END -->
 
 ## Final Summary
 

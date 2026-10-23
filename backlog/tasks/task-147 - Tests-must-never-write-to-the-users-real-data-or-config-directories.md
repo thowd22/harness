@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-23 06:44'
-updated_date: '2026-10-23 09:29'
+updated_date: '2026-10-23 10:18'
 labels:
   - testing
   - eval
@@ -63,6 +63,15 @@ Validation: scripts/hermetic-guard.sh nextest run --no-fail-fast -p harness -p h
 
 Integration check: the harness-eval defaults_changelog failure noted at handoff is resolved. The [mcp] defaults entry in CHANGELOG Defaults now matches, and the test passes. The full workspace suite and the hermetic guard (harness, harness-eval, harness-mcp) pass locally. The CI guard step and macOS still wait for the orchestrator's push.
 <!-- SECTION:NOTES:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+created: 2026-10-23 10:18
+---
+Shipped in v0.3.0: https://github.com/thowd22/harness/releases/tag/v0.3.0 (commits fcbd379, 74cb913; CI https://github.com/thowd22/harness/actions/runs/39934504416). Installed locally via install.sh: harness 0.3.0 (2cb6cd9e4cd6).
+---
+<!-- COMMENTS:END -->
 
 ## Final Summary
 

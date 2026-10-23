@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-23 06:01'
-updated_date: '2026-10-23 09:16'
+updated_date: '2026-10-23 10:18'
 labels:
   - tui
   - mcp
@@ -75,6 +75,15 @@ Review fixes (both findings verified real):
 Docs: docs/mcp.md (background work, redaction with server credentials).
 Validation: cargo nextest -p harness -p harness-mcp 234 passed (MCP TUI tests 5x repeated green), clippy -D warnings and fmt clean.
 <!-- SECTION:NOTES:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+created: 2026-10-23 10:18
+---
+Shipped in v0.3.0: https://github.com/thowd22/harness/releases/tag/v0.3.0 (commits fcbd379, 74cb913; CI https://github.com/thowd22/harness/actions/runs/39934504416). Installed locally via install.sh: harness 0.3.0 (2cb6cd9e4cd6).
+---
+<!-- COMMENTS:END -->
 
 ## Final Summary
 

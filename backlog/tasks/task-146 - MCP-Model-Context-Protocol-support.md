@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-23 06:01'
-updated_date: '2026-10-23 09:29'
+updated_date: '2026-10-23 10:18'
 labels:
   - tools
   - mcp
@@ -66,6 +66,15 @@ Validation: cargo nextest run -p harness -p harness-mcp -p harness-tui: 602 pass
 
 Integration check (2026-10-23, all MCP subtasks and TASK-147 merged in the tree): cargo fmt --all --check clean; cargo clippy --workspace --all-targets --locked -D warnings clean; cargo nextest run --workspace --locked --profile ci 1701 passed / 8 skipped; cargo test --workspace --doc ok; cargo deny check ok (advisories, bans, licenses, sources); bash tests/install-test.sh passed; shellcheck on install.sh, scripts/*.sh, tests/*.sh clean; actionlint reports only the known-valid macos-15-intel label; scripts/hermetic-guard.sh over -p harness -p harness-eval -p harness-mcp: 298 passed, nothing written to HOME/XDG. Release: cargo zigbuild --release -p harness --bin harness --target x86_64-unknown-linux-musl builds a statically linked binary that prints its version; cargo check and clippy -D warnings for aarch64-apple-darwin (zig cc for the C deps) are clean for the whole workspace. release-harness.yml and scripts need no change: they build only -p harness --bin harness (the harness-mcp-test-server bin is test-only), and harness-mcp adds no new native dependencies (reqwest with rustls is shared with harness-providers). README gains an MCP highlight, /mcp in the slash commands, login mcp in the CLI table and docs/mcp.md in the docs index; docs/guide/README.md points to docs/mcp.md. CI DoD 'passes in CI' still waits for the orchestrator's push.
 <!-- SECTION:NOTES:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+created: 2026-10-23 10:18
+---
+Shipped in v0.3.0: https://github.com/thowd22/harness/releases/tag/v0.3.0 (commits fcbd379, 74cb913; CI https://github.com/thowd22/harness/actions/runs/39934504416). Installed locally via install.sh: harness 0.3.0 (2cb6cd9e4cd6).
+---
+<!-- COMMENTS:END -->
 
 ## Final Summary
 

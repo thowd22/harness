@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-23 06:01'
-updated_date: '2026-10-23 08:08'
+updated_date: '2026-10-23 10:18'
 labels:
   - mcp
   - security
@@ -73,6 +73,15 @@ Validation: cargo nextest run --workspace 1655 passed / 0 failed; harness-mcp te
 
 Review fix (cleartext bearer tokens), both blocking findings confirmed and fixed: (1) harness-config check: auth = oauth with an http:// url on a host other than 127.0.0.1/localhost/[::1] is a load error on the url line (loopback_http helper, userinfo/port aware); test ini::mcp::tests::oauth_needs_tls_except_on_loopback. (2) harness-mcp: new AuthError::InsecureUrl; Authorize::run refuses before the probe (no request, no browser, nothing stored); OAuthSession::access_token/record refuse before reading or refreshing tokens; HttpTransport::token refuses before attaching Authorization to POST, GET stream and DELETE (refresh_after_rejection only runs after token() succeeded). discovery::protected_resource now skips any PRM URL failing secure_endpoint, including same-origin (same_origin helper removed). Integration test tests/oauth.rs oauth_refuses_cleartext_http_to_remote_hosts (http://mcp.example.invalid: login, session with stored tokens, ServerHandle list_tools, PRM via well-known and via challenge). Docs: docs/mcp.md (load errors, discovery, troubleshooting row), doc-2 via backlog doc update, CHANGELOG Unreleased OAuth entry. Validation: cargo nextest -p harness-mcp 82/82, -p harness-config 165/165, -p harness mcp/login/oauth filter 19/19, clippy -p harness-mcp -p harness-config --all-targets -D warnings clean, rustdoc -D warnings clean. (cargo fmt --check reports a diff in crates/harness-tui/src/cards.rs owned by another task; not touched.)
 <!-- SECTION:NOTES:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+created: 2026-10-23 10:18
+---
+Shipped in v0.3.0: https://github.com/thowd22/harness/releases/tag/v0.3.0 (commits fcbd379, 74cb913; CI https://github.com/thowd22/harness/actions/runs/39934504416). Installed locally via install.sh: harness 0.3.0 (2cb6cd9e4cd6).
+---
+<!-- COMMENTS:END -->
 
 ## Final Summary
 
