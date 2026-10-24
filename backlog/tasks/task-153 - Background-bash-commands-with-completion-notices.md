@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-23 16:14'
-updated_date: '2026-10-23 19:22'
+updated_date: '2026-10-24 01:16'
 labels:
   - tools
   - agent
@@ -75,7 +75,5 @@ Committed in 58b1512; CI green on Ubuntu and macOS: https://github.com/thowd22/h
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-bash gains run_in_background: the command runs as a session-owned job (own process group, any Exec: local, sandbox, remote helper, shell fallback) and the call returns at once with a job id and log path. When a job ends, the JobNotices request hook appends one redacted notice (command, exit status, run time, last 20 lines, log path) to the agent's next unsent request, so the model no longer polls with long sleeps. A new bash_jobs tool (list/output/stop) comes automatically with bash. Jobs stop when the session ends (Core::finish: quit including Ctrl+C quit, /new, /resume, headless end) and when the manager is dropped. At most 4 run at once and each log holds up to 32 MiB. A new bash_job event drives the TUI: a '⚙ N jobs' status-line button and a /jobs panel listing jobs with elapsed time, with output/stop/refresh buttons that work by mouse and keyboard. Verified by unit, integration, remote (helper + shell fallback) and TUI tests. Results: workspace nextest 1831 passed, clippy and fmt clean, hermetic guard ok, no orphan processes. Golden snapshots were reviewed and docs updated (tools, events, commands, tui-views, doc-2, CHANGELOG). 'Pass in CI' is still pending until the integrator pushes; nothing is committed.
-
-Review fix: one JobManager per session is now shared by the top-level agent, subagents, workflow agent steps and remote-host steps. Each child loop gets a JobNotices hook for its own jobs; the top-level agent also hears about jobs of subagents that have ended; /jobs lists and stops them all; workflow runs stop their own jobs when they end. A dropped manager still emits the job's final bash_job event, and the status line keys jobs by (call_id, job_id). Verified by new jobs unit tests, a TUI subagent /jobs + notice test and a wf run CLI test; 1088 tests passed in the touched crates, clippy and fmt clean.
+bash gains run_in_background: the command runs as a session-owned job (own process group, any Exec: local, sandbox, remote helper, shell fallback) and the call returns at once with a job id and log path. When a job ends, the JobNotices request hook appends one redacted notice (command, exit status, run time, last 20 lines, log path) to the agent's next unsent request, so the model no longer polls with long sleeps. A new bash_jobs tool (list/output/stop) comes automatically with bash. Jobs stop when the session ends (Core::finish: quit including Ctrl+C quit, /new, /resume, headless end) and when the manager is dropped. At most 4 run at once and each log holds up to 32 MiB. A new bash_job event drives the TUI: a '⚙ N jobs' status-line button and a /jobs panel listing jobs with elapsed time, with output/stop/refresh buttons that work by mouse and keyboard. Verified by unit, integration, remote (helper + shell fallback) and TUI tests. Results: workspace nextest 1831 passed, clippy and fmt clean, hermetic guard ok, no orphan processes. Golden snapshots were reviewed and docs updated (tools, events, commands, tui-views, doc-2, CHANGELOG). Committed in 58b1512; CI green on Ubuntu and macOS: https://github.com/thowd22/harness/actions/runs/40009831788.
 <!-- SECTION:FINAL_SUMMARY:END -->

@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@tui-views'
 created_date: '2026-10-22 14:43'
-updated_date: '2026-10-22 16:58'
+updated_date: '2026-10-24 01:16'
 labels:
   - tui
   - visibility
@@ -65,3 +65,9 @@ Implemented crates/harness-tui/src/indicators.rs and ChatView wiring. Tests: pha
 
 AC4 closed by visibility-tui: map nodes and goal-bar tasks draw their status with indicators::node_glyph (map.rs draw_full/draw_line, goalbar::TaskStatus::glyph). Test: map::tests::running_nodes_and_goal_bar_tasks_spin (spinner frame advances on map nodes; goal-bar in-progress glyph == node_glyph(Running)); subagent cards and status-line counts were already tested.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Delivered activity indicators in crates/harness-tui/src/indicators.rs with ChatView wiring (commit 58b1512 and earlier). They add an activity line above the input with spinner, phase, phase/turn timers, tokens, cost and interrupt hint, and cover every phase: sending, first token, thinking, writing, tool, retry countdown, approval, verifying, compacting and syncing. The indicator turns orange with the reason after [ui] stall_after. There are spinners on map nodes, goal-bar tasks and subagent cards via node_glyph, running-agent and remote counts in the status line, and an optional OSC terminal title ([ui] terminal_title). [ui] animations = false gives static icons, and a spinner tick redraws only one cell. Verified: cargo nextest -p harness-tui indicators::tests, map::tests::running_nodes_and_goal_bar_tasks_spin and the ChatView activity/title tests pass (19/19); main CI green at cfb7027 (run 40048623347). Docs: docs/tui.md, docs/tui-views.md.
+<!-- SECTION:FINAL_SUMMARY:END -->

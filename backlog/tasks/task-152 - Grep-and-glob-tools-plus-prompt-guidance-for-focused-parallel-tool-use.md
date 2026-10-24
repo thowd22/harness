@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-23 16:14'
-updated_date: '2026-10-23 19:22'
+updated_date: '2026-10-24 01:16'
 labels:
   - tools
   - agent
@@ -83,3 +83,9 @@ AC3 live evidence (2026-10-23, user-authorized, Opus 5.5 via OpenRouter): HARNES
 
 CI green on Ubuntu and macOS with the batch: https://github.com/thowd22/harness/actions/runs/40009831788.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Added built-in grep and glob tools to harness-tools (search.rs parallel ignore/regex/globset walker, grep.rs, glob.rs; commit 58b1512). They respect .gitignore and protected paths, take the output-budget/spill path, and fall back on remote helpers that lack fs.find. The built-in coder, researcher and reviewer agents list them, and a shared prompts/tools.md layer steers search/read away from bash and toward parallel calls. The Defaults CHANGELOG entry carries fingerprint 45850933b6b6, and docs/tools.md, docs/remote.md and docs/evals.md are updated. AC3 is met by a user-authorized live run (Opus 5.5 via OpenRouter, suites/search): 5 model calls vs 6 for the bash-only replay. Verified: cargo nextest -p harness-tools grep/glob/search tests (17/17), -p harness-eval search and defaults_changelog, and -p harness-agent initial_context all pass. CI green at run 40009831788 and on current main cfb7027 (run 40048623347).
+<!-- SECTION:FINAL_SUMMARY:END -->

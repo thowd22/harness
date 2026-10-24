@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-10-22 19:32'
-updated_date: '2026-10-22 22:55'
+updated_date: '2026-10-24 01:15'
 labels:
   - provider
   - spike
@@ -75,4 +75,6 @@ Status: In Progress. AC#1 is met for OpenRouter only. The OpenAI live run is sti
 Review follow-up 2026-10-22: reviewer finding confirmed. OPENAI_API_KEY is still absent (env check), and live_probe_openai only prints 'skipping live probe: OPENAI_API_KEY is not set' and returns, so its 'ok' result verifies nothing. No code change can close AC#1/AC#3 for OpenAI. Offline tests: cargo test -p harness-providers --test compression_probe -> 5 passed, 2 ignored. Task stays In Progress until someone with a key runs the OpenAI probe (command above).
 
 Integration audit 2026-10-22: status stays In Progress. AC#1 and AC#3 still need a live OpenAI probe, and no OPENAI_API_KEY exists in this environment (only OPENROUTER_API_KEY). To finish: OPENAI_API_KEY=... HARNESS_LIVE_TESTS=1 cargo test -p harness-providers --test compression_probe live_probe_openai -- --ignored --nocapture. Then record the accepted encodings in docs/providers.md and, if gzip is accepted, ask the user before creating the follow-up task. Offline workspace suite is green.
+
+Backlog audit 2026-10-24: blocked, not actively in progress. Nothing has changed since 2026-10-22: no OPENAI_API_KEY in the environment, and ~/.config/harness/harness.ini configures only [provider.openrouter]. The ChatGPT sign-in token (~/.local/share/harness/auth) does not help, because it is for the ChatGPT backend, not api.openai.com. Offline probe tests still pass: cargo nextest run -p harness-providers -E 'binary(compression_probe)' gives 5 passed, 2 skipped (live). Left: AC#1 (OpenAI live probe) and AC#3 (follow-up task only if OpenAI accepts gzip). The OpenRouter half is finished and recorded in docs/providers.md. Status is left In Progress for the user to decide: keep it open until a key exists, or close it with OpenAI recorded as not probed.
 <!-- SECTION:NOTES:END -->

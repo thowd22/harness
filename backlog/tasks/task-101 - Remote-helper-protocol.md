@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@remote'
 created_date: '2026-10-22 14:30'
-updated_date: '2026-10-23 04:24'
+updated_date: '2026-10-24 01:16'
 labels:
   - remote
 milestone: m-10
@@ -84,3 +84,9 @@ Build lane (aarch64 verification): installed user-local tooling (rustup target a
 
 The aarch64 musl helper is now built, static-checked and published by the Release workflow: https://github.com/thowd22/harness/releases/tag/v0.1.0 (harness-remote-agent-0.1.0-aarch64-linux-musl.tar.gz plus .sha256), run https://github.com/thowd22/harness/actions/runs/39896827525.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Delivered the harness-remote helper: harness remote-agent --stdio (and the harness-remote-agent bin) speaks versioned NDJSON JSON-RPC (protocol.rs: hello, fs.*, exec.*, probe, sync.*). install.rs uploads static musl helpers on demand with remote sha256 verification and re-uploads on version or handshake mismatch. shell.rs provides a POSIX shell fallback Workspace/Exec for hosts where upload is not allowed. Static x86_64 and aarch64 musl builds come from scripts/build-remote-helpers.sh and are checked by scripts/verify-remote-helpers.sh in release.yml; both were published in v0.1.0 (https://github.com/thowd22/harness/releases/tag/v0.1.0, run 39896827525; commit dbb9f45). Verified: cargo nextest -p harness-remote conformance/install/wire_compat plus protocol:: and shell:: unit tests (30/30 pass) and -p harness remote_agent pass; main CI green at cfb7027 (run 40048623347). Docs: docs/remote.md.
+<!-- SECTION:FINAL_SUMMARY:END -->

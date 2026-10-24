@@ -2,9 +2,10 @@
 id: TASK-129
 title: Per-host SSH compression and zstd rsync
 status: Done
-assignee: []
+assignee:
+  - '@claude'
 created_date: '2026-10-22 19:32'
-updated_date: '2026-10-22 21:16'
+updated_date: '2026-10-24 01:15'
 labels:
   - remote
   - config
@@ -62,6 +63,8 @@ Limit how many times you test and fix. If the same test, build or check still fa
 Decisions: a mux client cannot change the master's compression, so compressed connections use their own ControlPath (cmz-%C). Off states pass Compression=no explicitly so the displayed state is accurate (recorded under CHANGELOG Defaults). Link measurement = time 'true' then 'head -c 256KiB /dev/urandom' over ssh, difference is the transfer; random bytes so compression does not inflate the figure; 10s timeout records an upper bound (always slow). Measurements persist in <data_dir>/remote-links.json (LinkStore), trusted 24h; SshHosts measures on connect only for auto hosts without a fresh sample. Shared-file edits: crates/harness/src/tui.rs (Driver::new uses crate::remote::probe_cache so /remote reads persisted measurements; 2 lines), Remote struct literal in crates/harness-tui/src/palette.rs and harness-config agents/tests.rs (2 added fields each). Not verified against a real SSH host (no host available); all tests offline (LocalShell, in-process helper). Validation: cargo test --workspace green; clippy -D warnings clean for harness-remote, harness-config, harness, harness-tui, harness-workflow; cargo fmt --check clean.
 
 Review fixes (link measurement): (1) measure_link now runs an untimed 'true' first to bring up the ControlMaster (TCP connect, kex, auth), then times a second 'true' on the warm mux as overhead, then times the 256 KiB sample, so the SSH handshake is no longer subtracted from the transfer. Uses tokio::time::Instant so tests run under paused time. Test the_ssh_handshake_does_not_inflate_the_throughput reproduces the reviewer's 10 Mbit/s / 50 ms RTT example (300 ms handshake, 100 ms overhead, 310 ms sample) and asserts 9.99 Mbit/s and compression on; the old ordering would have given 210 Mbit/s. (2) Connection setup and the overhead round trip each have their own timeout and a timeout or failure there is Err (measure_host_link then stores nothing, so auto stays unmeasured/uncompressed or keeps the previous sample); only a transfer that does not finish within MEASURE_TIMEOUT records the upper bound. a_measurement_that_times_out_records_an_upper_bound now uses a shell whose transfer (not first call) hangs, same assertions; new tests a_connection_setup_that_hangs_is_an_error_and_stores_nothing and a_failing_connection_setup_is_an_error. docs/remote.md updated. Added tokio test-util to harness-remote dev-deps. Remaining gap: the SshHosts::compression connect-time path still has no direct test (it builds a real SshShell internally); it calls the same measure_host_link covered above. Still not verified against a real SSH host. Validation: cargo test -p harness-remote 83 passed / 1 ignored (pre-existing), clippy -p harness-remote --all-targets -D warnings clean, cargo fmt applied, cargo check -p harness OK.
+
+Backlog audit 2026-10-24: assignee was empty on a Done task. Set to @claude, matching the sibling tasks created in the same batch on 2026-10-22 (TASK-127, 128, 130, 131, 133, 134 are all @claude). Metadata only; no code change.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

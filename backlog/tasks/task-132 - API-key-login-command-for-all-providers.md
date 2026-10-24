@@ -2,9 +2,10 @@
 id: TASK-132
 title: API key login command for all providers
 status: Done
-assignee: []
+assignee:
+  - '@claude'
 created_date: '2026-10-22 19:47'
-updated_date: '2026-10-22 21:56'
+updated_date: '2026-10-24 01:15'
 labels:
   - provider
   - config
@@ -86,6 +87,8 @@ Review fixes (round 2):
 - Tests: harness-tui login::tests (7: keyboard, Esc, mouse, paste/unknown provider, theme tokens, app keyboard, app mouse + toast), harness tui::tests::login_opens_the_modal_and_saves_a_checked_key_without_leaking_it (palette entry, /login and /login openrouter, rejected key saves nothing, accepted key saved 0600 and resolved, both keys redacted, a new session stores a prompt quoting them masked, no UI event / run event / data-dir file contains either key).
 - Verification: cargo test --workspace (0 failures), cargo clippy --workspace --all-targets -D warnings clean, cargo fmt --all --check clean, cargo test -p harness-config --lib x20 green. Live: none added (no Anthropic/OpenAI keys; TUI verify uses a fake Verifier).
 - Docs: docs/providers.md 'In the TUI: /login', docs/commands.md row, CHANGELOG. Note: cargo fmt --all ran across the workspace.
+
+Backlog audit 2026-10-24: assignee was empty on a Done task. Set to @claude, matching the sibling tasks created in the same batch on 2026-10-22 (TASK-127, 128, 130, 131, 133, 134 are all @claude). Metadata only; no code change.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

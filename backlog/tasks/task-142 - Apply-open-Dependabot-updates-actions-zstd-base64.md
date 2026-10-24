@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-23 02:40'
-updated_date: '2026-10-23 04:08'
+updated_date: '2026-10-24 01:16'
 labels:
   - infra
   - deps
@@ -67,3 +67,9 @@ Integration (2026-10-23): with every lane merged, the full workspace is green lo
 
 Verified in CI on GitHub: green on ubuntu-latest and macos-latest at c3a4fa8 (https://github.com/thowd22/harness/actions/runs/39896376900) and 84d24e7 (https://github.com/thowd22/harness/actions/runs/39897339759); also green inside the v0.1.0 release gate (https://github.com/thowd22/harness/actions/runs/39896827525).
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Applied Dependabot PRs #1-#3 in-tree (commit c3a4fa8). The workflows move to actions/checkout@v7, mlugg/setup-zig@v2, upload-artifact@v7 and download-artifact@v8, with the release artifact semantics reviewed. dtolnay/rust-toolchain deliberately stays at the rust-toolchain.toml channel (1.93.1): Dependabot now ignores it, docs/ci.md explains how to upgrade the toolchain, and ci_workflow::workflows_install_the_pinned_toolchain fails on any mismatch. zstd 0.14.3 and base64 0.23.1 needed no code changes. crates/harness-remote/tests/wire_compat.rs pins golden frames from zstd 0.13.3 and base64 0.22.1 so already-deployed helpers stay compatible. Verified: cargo nextest -p harness-remote wire_compat and -p harness ci_workflow pass; CI green at c3a4fa8 (run 39896376900), 84d24e7 (run 39897339759) and current main cfb7027 (run 40048623347).
+<!-- SECTION:FINAL_SUMMARY:END -->

@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@context-cost-commands'
 created_date: '2026-10-22 14:30'
-updated_date: '2026-10-22 16:46'
+updated_date: '2026-10-24 01:15'
 labels:
   - context
   - testing
@@ -39,7 +39,7 @@ Limit how many times you test and fix. If the same test, build or check still fa
 <!-- DOD:BEGIN -->
 - [x] #1 Tests: automated tests cover every acceptance criterion (unit and/or integration as appropriate) and pass locally and in CI; no existing test is deleted, skipped, ignored or weakened to get a green run
 - [x] #2 Docs: user-facing behaviour is documented (docs/ and, if the design changed, the relevant backlog doc), public APIs have rustdoc, and any new config keys appear in the harness.ini reference
-- [ ] #3 Loop guard respected: no more than 3 fix attempts per failing test or check; if still failing, stop, record attempts, output and hypothesis in implementation notes, and ask the user instead of looping
+- [x] #3 Loop guard respected: no more than 3 fix attempts per failing test or check; if still failing, stop, record attempts, output and hypothesis in implementation notes, and ask the user instead of looping
 - [x] #4 UI interaction: if this task makes anything visible in the TUI, every visible interactive element is clickable with the mouse and fully operable with the keyboard (arrows/Tab to focus, Enter to activate, Esc to back out), with tests for both input paths; tasks with no visible UI mark this N/A
 <!-- DOD:END -->
 
@@ -53,6 +53,8 @@ context::initial::InitialContext measures system/tools/memory index/skills of a 
 
 <!-- SECTION:NOTES:BEGIN -->
 CI runs cargo test --workspace, so the test gates CI. The report line is written straight to stderr (bypassing libtest capture) so it appears in CI output even on success, e.g. 'initial context 1308 tokens (threshold 4000): system 475, tools 818, memory index 15, skills 0'. Added harness-memory as a dev-dependency of harness-agent.
+
+Audit 2026-10-24: DoD#3 (loop guard) checked. It is a process item: the notes record no unresolved failing check and no fix loop. Re-verified: cargo nextest run -p harness-agent -E 'binary(initial_context)' passes (default_agent_initial_context_is_within_budget); main CI green at cfb7027 (https://github.com/thowd22/harness/actions/runs/40048623347).
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
