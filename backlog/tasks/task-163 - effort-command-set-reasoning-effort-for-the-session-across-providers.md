@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-10-23 23:58'
-updated_date: '2026-10-24 00:30'
+updated_date: '2026-10-24 00:49'
 labels:
   - feature
   - tui
@@ -79,4 +79,6 @@ AC evidence (tests):
 - DoD4: picker keyboard (Right+Enter, Esc) and mouse click tests; completion keyboard + click tests.
 
 Gates in the worktree: cargo fmt --check OK; cargo clippy --workspace --all-targets -D warnings OK; cargo nextest run --workspace 2059 passed, 10 skipped; cargo test --workspace --doc OK; harness-eval defaults_changelog and golden_requests pass unchanged (no default or snapshot change). No live provider calls were made (the OpenRouter reasoning.effort wire was already exercised live in TASK-161.7). DoD1 left unchecked pending CI after merge.
+
+Rebased onto main 4f50337; gates x3 in the worktree: fmt, clippy -D warnings, nextest 2059 passed/10 skipped each run, doctests, defaults_changelog + golden_requests, deny, hermetic guard. Live via OpenRouter Opus 5.5 (cached catalog, $0.037): researcher effort low and reviewer effort high were accepted (the response carries reasoning_hidden, so the reasoning object was sent), and coder with no effort sent none. Anthropic-direct and OpenAI were not tested live (no keys here; ChatGPT login over SSH is TASK-162); covered by wire unit tests.
 <!-- SECTION:NOTES:END -->
