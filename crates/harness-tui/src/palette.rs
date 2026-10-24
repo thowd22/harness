@@ -1528,13 +1528,14 @@ mod tests {
             assert!(!p.matches().is_empty());
             worst
         };
+        // 16 ms in release builds; debug builds (plain `cargo test`, as CI
+        // runs it) get 4x, like the frame budgets in tests/perf.rs.
+        const FRAME_BUDGET: std::time::Duration =
+            std::time::Duration::from_millis(if cfg!(debug_assertions) { 64 } else { 16 });
         // Best of five runs: a slow implementation is slow every run, while
         // a scheduler hiccup on a shared CI runner only hits some of them.
         let worst = (0..5).map(|_| sequence()).min().unwrap();
-        assert!(
-            worst < std::time::Duration::from_millis(16),
-            "worst frame {worst:?}"
-        );
+        assert!(worst < FRAME_BUDGET, "worst frame {worst:?}");
     }
 
     #[test]

@@ -2106,11 +2106,15 @@ mod tests {
         // Every number with two 9s after the gap-matched "cmdnum" prefix.
         assert_eq!(got.len(), 28, "{got:?}");
         assert!(got.iter().any(|n| n == "project:command-number-99"));
+        // 16 ms in release builds; debug builds (plain `cargo test`, as CI
+        // runs it) get 4x, like the frame budgets in tests/perf.rs.
+        const FRAME_BUDGET: std::time::Duration =
+            std::time::Duration::from_millis(if cfg!(debug_assertions) { 64 } else { 16 });
         // Best of five runs: a slow implementation is slow every run, while
         // a scheduler hiccup on a shared CI runner only hits some of them.
         let (worst, steps, _) = (0..5).map(|_| sequence()).min_by_key(|r| r.0).unwrap();
         assert!(
-            worst < std::time::Duration::from_millis(16),
+            worst < FRAME_BUDGET,
             "worst frame {worst:?}; (key, ranked, drawn): {steps:?}"
         );
     }
