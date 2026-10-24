@@ -204,6 +204,10 @@ to built-in prompts, agents, workflows and `harness.ini` defaults.
 
 ### Fixed
 
+- A background job still running when a session or workflow run ended
+  could miss its `bash_job` `stopped` event: the run log could close
+  between the job's exit and the event. Stopping, waiting for and shutting
+  down jobs now wait until the end is recorded.
 - OpenRouter: a model whose catalog entry lacks the `reasoning` parameter
   no longer gets a `reasoning` object when an effort is set.
 - TUI: `/model NAME` typed while the agent works ran as a prompt after the

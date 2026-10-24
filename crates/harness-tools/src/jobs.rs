@@ -254,12 +254,21 @@ struct Job {
     tail: VecDeque<u8>,
     read_offset: u64,
     reported: bool,
+    /// The end event has been emitted. Waiters ([`JobManager::stop`],
+    /// `wait`, `shutdown`) wait for this, not just the exit, so a run log
+    /// closed right after `shutdown` still records every job's end.
+    recorded: bool,
     kill: Option<oneshot::Sender<()>>,
     owner: Option<u64>,
     scope: u64,
 }
 
 impl Job {
+    /// Ended, and its end event emitted.
+    fn settled(&self) -> bool {
+        !self.status.is_running() && self.recorded
+    }
+
     fn info(&self) -> JobInfo {
         let end = self.ended.unwrap_or_else(Instant::now);
         JobInfo {
@@ -489,6 +498,7 @@ impl JobManager {
             tail: VecDeque::new(),
             read_offset: 0,
             reported: false,
+            recorded: false,
             kill: Some(kill_tx),
             owner: owner.map(JobOwner::id),
             scope: self.scope,
@@ -617,9 +627,7 @@ impl JobManager {
             let _ = tx.send(());
         }
         self.wait_until(STOP_WAIT, |jobs| {
-            jobs.iter()
-                .find(|j| j.id == id)
-                .is_none_or(|j| !j.status.is_running())
+            jobs.iter().find(|j| j.id == id).is_none_or(Job::settled)
         })
         .await;
         self.get(id).ok_or_else(|| self.unknown(id))
@@ -632,9 +640,7 @@ impl JobManager {
             return Err(self.unknown(id));
         }
         self.wait_until(limit, |jobs| {
-            jobs.iter()
-                .find(|j| j.id == id)
-                .is_none_or(|j| !j.status.is_running())
+            jobs.iter().find(|j| j.id == id).is_none_or(Job::settled)
         })
         .await;
         self.inner
@@ -664,9 +670,7 @@ impl JobManager {
             let _ = tx.send(());
         }
         self.wait_until(STOP_WAIT, |jobs| {
-            jobs.iter()
-                .filter(|j| mine(j))
-                .all(|j| !j.status.is_running())
+            jobs.iter().filter(|j| mine(j)).all(Job::settled)
         })
         .await;
     }
@@ -823,16 +827,12 @@ async fn drive(
     drop(log);
     let status = JobStatus::from_outcome(outcome);
     let info = match inner.upgrade() {
-        Some(inner) => {
-            let info = inner.with_job(&id, |j| {
-                j.status = status;
-                j.ended = Some(Instant::now());
-                j.kill = None;
-                j.info()
-            });
-            inner.changed.notify_waiters();
-            info
-        }
+        Some(inner) => inner.with_job(&id, |j| {
+            j.status = status;
+            j.ended = Some(Instant::now());
+            j.kill = None;
+            j.info()
+        }),
         None => None,
     };
     // The manager is gone (or forgot the job): report the end from what
@@ -847,6 +847,10 @@ async fn drive(
     });
     let call_id = info.call_id.clone();
     events.emit(&call_id, ToolEvent::Job(info));
+    if let Some(inner) = inner.upgrade() {
+        inner.with_job(&id, |j| j.recorded = true);
+        inner.changed.notify_waiters();
+    }
 }
 
 /// Arguments of the `bash_jobs` tool.

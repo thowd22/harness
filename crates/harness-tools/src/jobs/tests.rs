@@ -288,6 +288,38 @@ fn job_events(events: &RecordingEvents) -> Vec<JobInfo> {
         .collect()
 }
 
+/// Records events, taking a while over each job's end (a busy run log).
+struct SlowEnds(RecordingEvents);
+
+impl ToolEventSink for SlowEnds {
+    fn emit(&self, call_id: &str, event: ToolEvent) {
+        if matches!(&event, ToolEvent::Job(j) if !j.status.is_running()) {
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        self.0.emit(call_id, event);
+    }
+}
+
+// Multi-threaded, as harness runs: the job driver can emit on another
+// worker while shutdown resumes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_returns_only_after_every_end_is_recorded() {
+    // The run log closes right after shutdown, so an end event emitted
+    // after it returns would be lost.
+    let mut f = fx();
+    let slow = Arc::new(SlowEnds(RecordingEvents::new()));
+    f.ctx = ToolContext::new("b1").with_events(slow.clone());
+    f.bg("sleep 60 & echo $! > pid; wait").await;
+    f.wait_file("pid").await;
+    f.jobs().shutdown().await;
+    let ends: Vec<JobInfo> = job_events(&slow.0)
+        .into_iter()
+        .filter(|j| !j.status.is_running())
+        .collect();
+    assert_eq!(ends.len(), 1, "{ends:?}");
+    assert_eq!(ends[0].status, JobStatus::Stopped);
+}
+
 #[tokio::test]
 async fn dropping_the_manager_still_reports_the_end_of_a_running_job() {
     let mut f = fx();
