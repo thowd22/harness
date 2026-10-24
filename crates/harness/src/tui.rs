@@ -479,8 +479,20 @@ impl Driver {
             }
         }
         commands::after_turn(self).await;
-        if let Some(next) = self.queue.pop_front() {
+        // Queued commands (`/model`, `/effort` while busy) run now; the
+        // first queued prompt starts the next turn.
+        while let Some(next) = self.queue.pop_front() {
+            if next.trim_start().starts_with('/') {
+                commands::slash(self, next.trim()).await;
+                if self.busy() {
+                    // The command started a turn (a skill, a workflow
+                    // step): the rest waits for it.
+                    break;
+                }
+                continue;
+            }
             self.start_turn(next);
+            break;
         }
     }
 
