@@ -533,10 +533,8 @@ async fn cached_catalog_is_instant_and_works_offline() {
         svc.refresh(false).await;
     }
     // "Offline": the sources point at a port nobody listens on.
-    let dead = {
-        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        format!("http://{}", l.local_addr().unwrap())
-    };
+    // Port 1: a freed ephemeral port could be reused by a parallel test.
+    let dead = "http://127.0.0.1:1".to_owned();
     let svc = service(&cache, &dead, &clock);
     let c = svc.catalog();
     // Base URLs differ from the cached ones, so the lists are stale, but

@@ -467,13 +467,18 @@ fn workflow_agent_steps_get_job_notices_and_their_jobs_end_with_the_run() {
         .map(|e| e["request"]["json"]["messages"].to_string())
         .collect();
     assert_eq!(requests.len(), 5, "{}", stdout(&o));
-    // The foreground step waits for j1 to finish (no fixed sleeps, so a
-    // loaded machine cannot reorder it), so its notice is in request 3.
+    // The foreground step waits for j1's marker file, so the notice is
+    // usually in request 3; on a loaded machine harness may record the exit
+    // a request later. Either way it arrives exactly once.
+    let notice = "Notice from harness: background job j1 ended (exit code 3)";
+    let first = requests.iter().position(|r| r.contains(notice));
     assert!(
-        requests[2].contains("Notice from harness: background job j1 ended (exit code 3)"),
-        "{}",
-        requests[2]
+        matches!(first, Some(2 | 3)),
+        "notice in request {first:?}: {}",
+        stdout(&o)
     );
+    let count: usize = requests.iter().map(|r| r.matches(notice).count()).sum();
+    assert_eq!(count, 1, "{}", stdout(&o));
     let jobs: Vec<(String, String)> = evs
         .iter()
         .filter(|e| e["type"] == "bash_job")

@@ -892,11 +892,9 @@ mod tests {
 
     #[tokio::test]
     async fn cached_rejection_stands_offline_and_unknown_models_are_fetched() {
-        // Nothing listens here: every download fails.
-        let dead = {
-            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            format!("http://{}/v1", l.local_addr().unwrap())
-        };
+        // Nothing listens on port 1 (a freed ephemeral port could be
+        // reused by a parallel test's mock server): every download fails.
+        let dead = "http://127.0.0.1:1/v1".to_owned();
         let tmp = tempfile::tempdir().unwrap();
         let cache = seeded_cache(tmp.path(), &dead, 10);
         let p = provider(&dead).with_model_cache(cache, TTL);
