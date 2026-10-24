@@ -1,11 +1,11 @@
 ---
 id: TASK-163
 title: '/effort command: set reasoning effort for the session, across providers'
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-23 23:58'
-updated_date: '2026-10-24 00:49'
+updated_date: '2026-10-24 00:54'
 labels:
   - feature
   - tui
@@ -33,7 +33,7 @@ Reasoning effort can only be changed today by copying an agent's YAML into the g
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Tests: automated tests cover every acceptance criterion (unit and/or integration as appropriate) and pass locally and in CI; no existing test is deleted, skipped, ignored or weakened to get a green run
+- [x] #1 Tests: automated tests cover every acceptance criterion (unit and/or integration as appropriate) and pass locally and in CI; no existing test is deleted, skipped, ignored or weakened to get a green run
 - [x] #2 Docs: user-facing behaviour is documented (docs/ and, if the design changed, the relevant backlog doc), public APIs have rustdoc, and any new config keys appear in the harness.ini reference
 - [x] #3 Loop guard respected: no more than 3 fix attempts per failing test or check; if still failing, stop, record attempts, output and hypothesis in implementation notes, and ask the user instead of looping
 - [x] #4 UI interaction: if this task makes anything visible in the TUI, every visible interactive element is clickable with the mouse and fully operable with the keyboard (arrows/Tab to focus, Enter to activate, Esc to back out), with tests for both input paths; tasks with no visible UI mark this N/A
@@ -81,4 +81,12 @@ AC evidence (tests):
 Gates in the worktree: cargo fmt --check OK; cargo clippy --workspace --all-targets -D warnings OK; cargo nextest run --workspace 2059 passed, 10 skipped; cargo test --workspace --doc OK; harness-eval defaults_changelog and golden_requests pass unchanged (no default or snapshot change). No live provider calls were made (the OpenRouter reasoning.effort wire was already exercised live in TASK-161.7). DoD1 left unchecked pending CI after merge.
 
 Rebased onto main 4f50337; gates x3 in the worktree: fmt, clippy -D warnings, nextest 2059 passed/10 skipped each run, doctests, defaults_changelog + golden_requests, deny, hermetic guard. Live via OpenRouter Opus 5.5 (cached catalog, $0.037): researcher effort low and reviewer effort high were accepted (the response carries reasoning_hidden, so the reasoning object was sent), and coder with no effort sent none. Anthropic-direct and OpenAI were not tested live (no keys here; ChatGPT login over SSH is TASK-162); covered by wire unit tests.
+
+Hosted CI green on Ubuntu and macOS for 6d4b685: https://github.com/thowd22/harness/actions/runs/40046847667
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Added /effort low|medium|high|default. It sets the reasoning effort of the session's main agent; the next request carries it and resume restores it. A bare /effort opens a panel (mouse and keyboard) that shows the source and the provider mapping, and the status line shows 'effort X', or 'no reasoning' on models that do not reason. OpenRouter no longer sends reasoning to catalog models without it. Slash completion now offers argument choices for every command. Slash commands queued during a turn now run as commands. Verified by per-AC unit and TUI tests (keyboard and click), wire tests for Opus 5.5, Haiku 4.5, OpenRouter, gpt-5 and gpt-4o, a live OpenRouter Opus 5.5 check ($0.037) and hosted CI https://github.com/thowd22/harness/actions/runs/40046847667.
+<!-- SECTION:FINAL_SUMMARY:END -->
