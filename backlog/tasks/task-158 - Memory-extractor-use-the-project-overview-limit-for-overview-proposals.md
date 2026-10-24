@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-23 19:43'
-updated_date: '2026-10-23 21:08'
+updated_date: '2026-10-24 00:41'
 labels:
   - memory
 dependencies: []
@@ -52,6 +52,8 @@ Limit how many times you test and fix. If the same test, build or check still fa
 guard::limit_for_path(&str) is the single per-path limit definition; it recognises the alias project/overview and stored projects/<key>/overview(.md); limit_for(&NotePath)/is_overview delegate to it. New guard::validate_for_path used by extract::screen and the dream pass lesson intake (dream also applied 400 to every lesson). Tool already used validate_for -> limit_for, so tool and extractor share one function. Extractor system prompt left unchanged (no defaults change; defaults_changelog test passes). DoD#4 N/A: no TUI change. Validation: cargo nextest run -p harness-memory 69/69 pass; clippy -D warnings clean; fmt clean; harness-eval defaults_changelog passes.
 
 Integration validation (2026-10-23, tree including other engineers' in-progress TASK-160/161 work): cargo fmt --all --check, cargo clippy --workspace --all-targets --locked -D warnings, cargo nextest run --workspace --locked --profile ci x3 (1948/1948 passed each run, no flakes), cargo test --workspace --doc, cargo deny check, scripts/hermetic-guard.sh nextest run -p harness -p harness-eval (230 passed, nothing written to HOME/XDG), no .snap.new files, defaults_changelog passes (no defaults changed). CI part of DoD#1 pending until the orchestrator pushes.
+
+Committed in 63eb3bf; hosted CI green on Ubuntu and macOS: https://github.com/thowd22/harness/actions/runs/40045278391
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

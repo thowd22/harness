@@ -3,11 +3,11 @@ id: TASK-161
 title: >-
   Model speed: measure and remove every avoidable latency without losing
   precision or features
-status: In Progress
+status: Done
 assignee:
   - '@claude-bench'
 created_date: '2026-10-23 19:49'
-updated_date: '2026-10-23 23:45'
+updated_date: '2026-10-24 00:41'
 labels:
   - performance
   - providers
@@ -44,12 +44,12 @@ Limit how many times you test and fix. If the same test, build or check still fa
 - [x] #1 A repeatable benchmark (fake-provider and live modes) reports TTFT, tokens/s, turn time, tool time and harness overhead per call; a baseline report is recorded in the task
 - [x] #2 Each idea above is measured or reasoned out with numbers, and ranked by gain, risk and cost in the task notes
 - [x] #3 No-regret wins are implemented with before/after numbers and no eval or snapshot regression; anything trading cost or behaviour is proposed as a subtask for the user
-- [ ] #4 A CI check guards harness overhead (fake provider) against regressions; docs/performance.md explains the measurements and settings
+- [x] #4 A CI check guards harness overhead (fake provider) against regressions; docs/performance.md explains the measurements and settings
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Tests: automated tests cover every acceptance criterion (unit and/or integration as appropriate) and pass locally and in CI; no existing test is deleted, skipped, ignored or weakened to get a green run
+- [x] #1 Tests: automated tests cover every acceptance criterion (unit and/or integration as appropriate) and pass locally and in CI; no existing test is deleted, skipped, ignored or weakened to get a green run
 - [x] #2 Docs: user-facing behaviour is documented (docs/ and, if the design changed, the relevant backlog doc), public APIs have rustdoc, and any new config keys appear in the harness.ini reference
 - [x] #3 Loop guard respected: no more than 3 fix attempts per failing test or check; if still failing, stop, record attempts, output and hypothesis in implementation notes, and ask the user instead of looping
 - [x] #4 UI interaction: if this task makes anything visible in the TUI, every visible interactive element is clickable with the mouse and fully operable with the keyboard (arrows/Tab to focus, Enter to activate, Esc to back out), with tests for both input paths; tasks with no visible UI mark this N/A
@@ -157,4 +157,12 @@ Remaining for AC#4 / DoD#1: the CI guard has not run on hosted Ubuntu/macOS runn
 Live spend this integration step: $0.0199.
 
 Parent DoD: #2 every new key (session_id, prewarm_connection, early_tool_start, cache_prewarm, stagger_subagents, prompt_cache_retention, thinking_display, cache_ttl(_auto_1h), reasoning_exclude, background_compaction(_at), service_tier) is in doc-2 harness.ini Reference; docs/performance.md, context.md, providers-*.md, ci.md updated. #3 loop guard respected (flake fixed on the first attempt). #4 UI: the only visible addition is the cache-prewarm map node from TASK-161.4, covered by its own DoD#4; no new interactive element. AC#4 and DoD#1 stay open until CI runs the bench guard and the new tests on hosted Ubuntu/macOS runners (needs a push by the orchestrator); then check them with TASK-161.6 AC#1/DoD#1 and move both to Done.
+
+All subtasks Done. Commit 63eb3bf; hosted CI green on Ubuntu and macOS: https://github.com/thowd22/harness/actions/runs/40045278391. Pre-push fixes: the bench guard no longer needs jq, timing tests take the best of 5, the openrouter/model_catalog dead-port tests use port 1 (they reused a freed ephemeral port; committed with TASK-163).
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Measured and removed avoidable latency without changing model precision. Changes: catalog cache at session start (cached sessions start in about 13 ms instead of 150-650 ms); one HTTP pool per base URL; OpenRouter session_id on by default; OpenAI prompt_cache_key; opt-in early tool start, background compaction, Anthropic cache/thinking options, cache pre-warm, staggered subagents and OpenRouter fast tier (2.2x faster turns at +73% cost). harness bench measures harness overhead at about 0.26 ms per gap, and a CI guard protects it. Verified by the subtask tests, the golden snapshots and defaults fingerprint, live Opus 5.5 A/B runs ($3.62 + $0.14), a stock Ubuntu 24.04 container run and hosted CI https://github.com/thowd22/harness/actions/runs/40045278391.
+<!-- SECTION:FINAL_SUMMARY:END -->

@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-23 19:43'
-updated_date: '2026-10-23 21:08'
+updated_date: '2026-10-24 00:41'
 labels:
   - tui
   - hygiene
@@ -73,6 +73,8 @@ Review follow-up: all 4 findings verified as real and fixed. (1/3) Snapshot read
 Integration fix for the remaining finding (dotfiles HOME with '*' hid tracked files and plain projects below it when the workspace is below the repo root): snapshot::ignored_by_parents decides whether the enclosing repository ignores the workspace directory (then parents(false)/require_git(false) as before TASK-157), and artifacts::tracked_but_ignored (one 'git ls-files -z --cached --ignored --exclude-standard' per snapshot, only inside a repository, GIT_* scrubbed) adds tracked files hidden by any ignore rule, also at the repo root. New tests: snapshot a_workspace_ignored_by_its_enclosing_repository_sees_its_files, tracked_files_are_listed_even_when_an_ignore_rule_matches_them (both failed before), e2e generated_changes bash_changes_in_a_directory_a_dotfiles_home_ignores_still_count (failed with the fix disabled: left [] vs main.py, tracked.txt). Docs hygiene.md and CHANGELOG Fixed entry updated.
 
 Integration validation (2026-10-23, tree including other engineers' in-progress TASK-160/161 work): cargo fmt --all --check, cargo clippy --workspace --all-targets --locked -D warnings, cargo nextest run --workspace --locked --profile ci x3 (1948/1948 passed each run, no flakes), cargo test --workspace --doc, cargo deny check, scripts/hermetic-guard.sh nextest run -p harness -p harness-eval (230 passed, nothing written to HOME/XDG), no .snap.new files, defaults_changelog passes (no defaults changed). CI part of DoD#1 pending until the orchestrator pushes.
+
+Committed in 63eb3bf; hosted CI green on Ubuntu and macOS: https://github.com/thowd22/harness/actions/runs/40045278391
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-23 19:49'
-updated_date: '2026-10-23 21:11'
+updated_date: '2026-10-24 00:41'
 labels:
   - tui
   - layout
@@ -119,6 +119,8 @@ Tests and validation:
 - cargo fmt --all --check: clean. cargo clippy -p harness-tui -p harness --all-targets --locked -- -D warnings: clean. cargo nextest run -p harness-tui -p harness --locked: 645/645 passed. Under heavy parallel load, timing tests (model picker <50ms open, palette/fuzzy 1000-entry frame budgets, tui::tests::model_without_argument_and_the_palette_entry_open_the_picker <50ms) failed once each and pass on rerun; unrelated to layout.
 - tmux (private server -L t160, temp HOME/XDG/HARNESS_CONFIG, --fake-script with long words/URL/CJK/tabs and a bash tool call needing approval): at 50x15 the empty hint wraps, status wraps to 2 rows with '+1 more', palette 'Show status' opens the Status panel (full path wrapped) and scrolls, approval card wraps with the scroll hint, bash/code cards wrap inside their borders, map node box + node detail fit, /help panel wraps and scrolls (1-11/64 … 54-64/64). At 160x45 everything fits on one row per item, card headers keep a gap before the rule.
 - Known limits: the activity line is capped at a quarter of the screen (its details are in the card and status line); on a tiny screen a panel can cut its top button rows (close stays, Esc closes); the history run column is fixed at 44 cells.
+
+Committed in 63eb3bf; hosted CI green on Ubuntu and macOS: https://github.com/thowd22/harness/actions/runs/40045278391
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

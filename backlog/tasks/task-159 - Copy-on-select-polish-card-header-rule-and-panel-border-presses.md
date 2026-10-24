@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-23 19:43'
-updated_date: '2026-10-23 21:08'
+updated_date: '2026-10-24 00:41'
 labels:
   - tui
   - clipboard
@@ -59,6 +59,8 @@ Note: two layout_matrix tests currently fail from another engineer's in-progress
 Integration validation (2026-10-23, tree including other engineers' in-progress TASK-160/161 work): cargo fmt --all --check, cargo clippy --workspace --all-targets --locked -D warnings, cargo nextest run --workspace --locked --profile ci x3 (1948/1948 passed each run, no flakes), cargo test --workspace --doc, cargo deny check, scripts/hermetic-guard.sh nextest run -p harness -p harness-eval (230 passed, nothing written to HOME/XDG), no .snap.new files, defaults_changelog passes (no defaults changed). CI part of DoD#1 pending until the orchestrator pushes.
 
 The layout_matrix failures noted above were from TASK-160's in-progress work and pass in the integration run.
+
+Committed in 63eb3bf; hosted CI green on Ubuntu and macOS: https://github.com/thowd22/harness/actions/runs/40045278391
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
