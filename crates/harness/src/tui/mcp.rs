@@ -467,6 +467,7 @@ fn entries(shared: &Mutex<Shared>) -> (Vec<PaletteEntry>, Vec<SlashCommand>) {
                 description: format!("{description} (MCP {server})"),
                 args: arg_hint(p),
                 scope: Some("mcp".into()),
+                choices: Vec::new(),
             });
             palette.push(
                 PaletteEntry::new(

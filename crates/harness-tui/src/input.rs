@@ -25,6 +25,11 @@
 //!   are highlighted. Up/Down select, Tab or Enter complete (Enter on an
 //!   exact match without arguments sends it), Esc closes, and rows are
 //!   clickable.
+//! - Argument choices: after `/name ` of a command whose first argument
+//!   has fixed choices ([`SlashCommand::choices`], e.g. `/effort low`), the
+//!   same popup offers the choices that start with what was typed. Up/Down
+//!   select, Tab or Enter complete (Enter with nothing typed yet or on a
+//!   fully typed choice sends), Esc closes, and rows are clickable.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
@@ -75,6 +80,9 @@ pub struct SlashCommand {
     pub args: Option<String>,
     /// Source scope, e.g. `builtin`, `global`, `project`.
     pub scope: Option<String>,
+    /// Fixed values of the first argument, offered by completion after
+    /// `/name ` (empty: free text).
+    pub choices: Vec<String>,
 }
 
 impl SlashCommand {
@@ -85,7 +93,14 @@ impl SlashCommand {
             description: description.into(),
             args: None,
             scope: None,
+            choices: Vec::new(),
         }
+    }
+
+    /// The same command with first-argument `choices`.
+    pub fn with_choices(mut self, choices: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.choices = choices.into_iter().map(Into::into).collect();
+        self
     }
 }
 
@@ -117,6 +132,18 @@ struct Completion {
     selected: usize,
     /// The token the matches were computed for.
     token: String,
+}
+
+/// Completion of a command's first argument from its choices.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ChoiceCompletion {
+    /// Index into [`Input::commands`].
+    command: usize,
+    /// Indices into that command's choices, in declaration order.
+    matches: Vec<usize>,
+    selected: usize,
+    /// What was typed of the argument.
+    partial: String,
 }
 
 /// One ranked completion row.
@@ -194,6 +221,11 @@ pub struct Input {
     order: Vec<usize>,
     completion: Option<Completion>,
     dismissed: bool,
+    /// Argument-choice completion (never open together with `completion`).
+    choice: Option<ChoiceCompletion>,
+    /// Esc closed the choice popup, or a choice was just accepted; it
+    /// stays closed until the text leaves the argument position.
+    choice_dismissed: bool,
     scroll: usize,
     fuzzy: Fuzzy,
     /// Width of the last render, for moving the cursor by display rows.
@@ -491,6 +523,8 @@ impl Input {
         self.stash.clear();
         self.completion = None;
         self.dismissed = false;
+        self.choice = None;
+        self.choice_dismissed = false;
         self.scroll = 0;
         Some(full)
     }
@@ -514,8 +548,11 @@ impl Input {
         let Some(tok) = self.slash_token().map(str::to_owned) else {
             self.completion = None;
             self.dismissed = false;
+            self.refresh_choice();
             return;
         };
+        self.choice = None;
+        self.choice_dismissed = false;
         if self.dismissed {
             return;
         }
@@ -600,6 +637,78 @@ impl Input {
         scored.into_iter().map(|(.., m)| m).collect()
     }
 
+    /// The command and partial argument being typed, when the text is
+    /// `/name partial` with the cursor at its end and `name` is a command
+    /// with argument choices.
+    fn choice_target(&self) -> Option<(usize, String)> {
+        let rest = self.text.strip_prefix('/')?;
+        let (name, arg) = rest.split_once(' ')?;
+        if arg.contains(char::is_whitespace) || self.cursor != self.text.len() {
+            return None;
+        }
+        let command = self
+            .commands
+            .iter()
+            .position(|c| c.name == name && !c.choices.is_empty())?;
+        Some((command, arg.to_owned()))
+    }
+
+    /// Recomputes the argument-choice completion.
+    fn refresh_choice(&mut self) {
+        let Some((command, partial)) = self.choice_target() else {
+            self.choice = None;
+            self.choice_dismissed = false;
+            return;
+        };
+        if self.choice_dismissed {
+            self.choice = None;
+            return;
+        }
+        let lower = partial.to_lowercase();
+        let matches: Vec<usize> = self.commands[command]
+            .choices
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.to_lowercase().starts_with(&lower))
+            .map(|(i, _)| i)
+            .collect();
+        let selected = match &self.choice {
+            Some(c) if c.command == command => c.selected.min(matches.len().saturating_sub(1)),
+            _ => 0,
+        };
+        self.choice = (!matches.is_empty()).then_some(ChoiceCompletion {
+            command,
+            matches,
+            selected,
+            partial,
+        });
+    }
+
+    /// Argument choices currently offered, with the selected index.
+    pub fn choice_completions(&self) -> Option<(Vec<&str>, usize)> {
+        let c = self.choice.as_ref()?;
+        let choices = &self.commands[c.command].choices;
+        Some((
+            c.matches.iter().map(|&i| choices[i].as_str()).collect(),
+            c.selected,
+        ))
+    }
+
+    /// Accepts argument-choice row `row`: `/name choice`.
+    fn accept_choice(&mut self, row: usize) {
+        let Some(c) = &self.choice else {
+            return;
+        };
+        let Some(&i) = c.matches.get(row) else {
+            return;
+        };
+        let cmd = &self.commands[c.command];
+        self.text = format!("/{} {}", cmd.name, cmd.choices[i]);
+        self.cursor = self.text.len();
+        self.choice = None;
+        self.choice_dismissed = true;
+    }
+
     /// Commands currently offered, with the selected index.
     pub fn completions(&self) -> Option<(Vec<&SlashCommand>, usize)> {
         let c = self.completion.as_ref()?;
@@ -640,6 +749,10 @@ impl Input {
                 self.expand_paste(*i);
                 InputOutcome::Changed
             }
+            InputAction::Complete(row) if self.choice.is_some() => {
+                self.accept_choice(*row);
+                InputOutcome::Changed
+            }
             InputAction::Complete(row) => {
                 self.accept(*row);
                 InputOutcome::Changed
@@ -659,6 +772,40 @@ impl Input {
             } else {
                 InputOutcome::Ignored
             };
+        }
+        if let Some(c) = &mut self.choice {
+            let n = c.matches.len();
+            match key.code {
+                KeyCode::Up => {
+                    c.selected = (c.selected + n - 1) % n;
+                    return InputOutcome::Changed;
+                }
+                KeyCode::Down => {
+                    c.selected = (c.selected + 1) % n;
+                    return InputOutcome::Changed;
+                }
+                KeyCode::Tab => {
+                    let row = c.selected;
+                    self.accept_choice(row);
+                    return InputOutcome::Changed;
+                }
+                KeyCode::Esc => {
+                    self.choice = None;
+                    self.choice_dismissed = true;
+                    return InputOutcome::Changed;
+                }
+                _ => {}
+            }
+            if action == Some(Action::Send) {
+                let row = c.selected;
+                let choice = &self.commands[c.command].choices[c.matches[row]];
+                // Nothing typed yet: Enter sends the bare command (which
+                // may open its own picker); a fully typed choice sends too.
+                if !c.partial.is_empty() && *choice != c.partial {
+                    self.accept_choice(row);
+                    return InputOutcome::Changed;
+                }
+            }
         }
         if let Some(c) = &mut self.completion {
             let n = c.matches.len();
@@ -935,6 +1082,9 @@ impl Input {
 
     /// Rows the completion popup needs (0 when closed).
     pub fn completion_height(&self) -> u16 {
+        if let Some(c) = &self.choice {
+            return c.matches.len().min(MAX_COMPLETIONS) as u16;
+        }
         self.completion
             .as_ref()
             .map_or(0, |c| c.matches.len().min(MAX_COMPLETIONS) as u16)
@@ -1029,8 +1179,8 @@ impl Input {
     /// command takes wrapped in full.
     pub fn completion_height_at(&self, width: u16) -> u16 {
         let n = self.completion_height();
-        if n == 0 {
-            return 0;
+        if n == 0 || self.choice.is_some() {
+            return n;
         }
         let sel = self.selected_full(width as usize).map_or(1, |l| l.len());
         n - 1 + sel as u16
@@ -1087,6 +1237,9 @@ impl Input {
         hits: &mut HitMap<A>,
         wrap: &dyn Fn(InputAction) -> A,
     ) {
+        if self.choice.is_some() {
+            return self.render_choices(frame, area, theme, hits, wrap);
+        }
         let w = area.width as usize;
         let name_w = self.completion_name_w(w);
         let full = self.selected_full(w);
@@ -1197,6 +1350,77 @@ impl Input {
             );
             lines.extend(rows);
             i += 1;
+        }
+        frame.render_widget(Paragraph::new(lines).style(theme.bg(Token::Surface)), area);
+    }
+}
+
+impl Input {
+    /// Draws the argument-choice popup: one row per choice, the typed part
+    /// highlighted, with the full command line it completes to.
+    fn render_choices<A: Clone>(
+        &self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        theme: &Theme,
+        hits: &mut HitMap<A>,
+        wrap: &dyn Fn(InputAction) -> A,
+    ) {
+        let Some(comp) = &self.choice else {
+            return;
+        };
+        frame.render_widget(Clear, area);
+        let (w, height, n) = (
+            area.width as usize,
+            area.height as usize,
+            comp.matches.len(),
+        );
+        if height == 0 || w == 0 || n == 0 {
+            return;
+        }
+        let cmd = &self.commands[comp.command];
+        let choice_w = cmd
+            .choices
+            .iter()
+            .map(|c| width(&sanitize(c)))
+            .max()
+            .unwrap_or(0)
+            .min(w / 2);
+        let typed = comp.partial.chars().count() as u32;
+        let first = comp.selected - comp.selected.min(height - 1);
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        for (row, &i) in comp.matches.iter().enumerate().skip(first).take(height) {
+            let id = ElementId(format!("completion.{row}"));
+            let base = if row == comp.selected || hits.is_focused(&id) {
+                theme.focused()
+            } else {
+                theme.bg(Token::Surface)
+            };
+            let hit = base
+                .patch(theme.fg(Token::Highlight))
+                .add_modifier(Modifier::BOLD);
+            let choice = format!(
+                "{:<choice_w$}",
+                truncate(&sanitize(&cmd.choices[i]), choice_w)
+            );
+            let mut spans = vec![Span::styled(" ", base)];
+            spans.extend(fuzzy::highlight(
+                &choice,
+                &(0..typed).collect::<Vec<_>>(),
+                base.patch(theme.fg(Token::Accent)),
+                hit,
+            ));
+            spans.push(Span::styled("  ", base));
+            spans.push(Span::styled(
+                format!("/{} {}", sanitize(&cmd.name), sanitize(&cmd.choices[i])),
+                base.patch(theme.fg(Token::Muted)),
+            ));
+            hits.register(
+                id,
+                Rect::new(area.x, area.y + lines.len() as u16, area.width, 1),
+                wrap(InputAction::Complete(row)),
+            );
+            lines.push(truncate_line(Line::from(spans), w).style(base));
         }
         frame.render_widget(Paragraph::new(lines).style(theme.bg(Token::Surface)), area);
     }
@@ -1385,6 +1609,7 @@ mod tests {
                 description: "Review the diff".into(),
                 args: Some("[branch]".into()),
                 scope: Some("project".into()),
+                choices: Vec::new(),
             },
             SlashCommand::new("help", "Show keys"),
             SlashCommand::new("compact", "Compact the context"),
@@ -1534,6 +1759,101 @@ mod tests {
         assert_eq!(input.placeholders(), 0);
     }
 
+    fn effort_commands() -> Vec<SlashCommand> {
+        vec![
+            SlashCommand::new("effort", "Set the reasoning effort")
+                .with_choices(["default", "low", "medium", "high"]),
+            SlashCommand::new("help", "Show keys"),
+        ]
+    }
+
+    #[test]
+    fn argument_choices_complete_with_the_keyboard() {
+        let mut i = Input::new();
+        i.set_commands(effort_commands());
+        // The command name completes first, without opening the choices.
+        typ(&mut i, "/eff");
+        press(&mut i, "tab");
+        assert_eq!(i.text(), "/effort ");
+        assert!(i.choice_completions().is_none());
+        // Typing the argument offers the matching choices.
+        typ(&mut i, "m");
+        assert_eq!(i.choice_completions(), Some((vec!["medium"], 0)));
+        assert_eq!(press(&mut i, "enter"), InputOutcome::Changed);
+        assert_eq!(i.text(), "/effort medium");
+        assert!(i.choice_completions().is_none(), "closed after accepting");
+        assert_eq!(
+            press(&mut i, "enter"),
+            InputOutcome::Submit("/effort medium".into())
+        );
+        // An empty argument lists every choice; Down/Up select, Tab accepts.
+        typ(&mut i, "/effort ");
+        assert_eq!(
+            i.choice_completions(),
+            Some((vec!["default", "low", "medium", "high"], 0))
+        );
+        press(&mut i, "down");
+        press(&mut i, "down");
+        press(&mut i, "up");
+        assert_eq!(i.choice_completions().unwrap().1, 1);
+        press(&mut i, "tab");
+        assert_eq!(i.text(), "/effort low");
+        // Enter with nothing typed sends the bare command (its picker).
+        i.set_text("");
+        typ(&mut i, "/effort ");
+        assert!(i.choice_completions().is_some());
+        assert_eq!(
+            press(&mut i, "enter"),
+            InputOutcome::Submit("/effort ".into())
+        );
+        // A fully typed choice sends at once; Esc closes the popup.
+        typ(&mut i, "/effort high");
+        assert_eq!(
+            press(&mut i, "enter"),
+            InputOutcome::Submit("/effort high".into())
+        );
+        typ(&mut i, "/effort h");
+        assert_eq!(press(&mut i, "esc"), InputOutcome::Changed);
+        assert!(i.choice_completions().is_none());
+        typ(&mut i, "i");
+        assert!(i.choice_completions().is_none(), "stays closed after Esc");
+        // No choices: commands without them, unknown values, later words.
+        i.set_text("");
+        typ(&mut i, "/help x");
+        assert!(i.choice_completions().is_none());
+        i.set_text("");
+        typ(&mut i, "/effort x");
+        assert!(i.choice_completions().is_none());
+        i.set_text("");
+        typ(&mut i, "/effort low more");
+        assert!(i.choice_completions().is_none());
+    }
+
+    #[test]
+    fn argument_choices_are_clickable() {
+        let mut input = Input::new();
+        input.set_commands(effort_commands());
+        typ(&mut input, "/effort ");
+        let mut it = Interaction::new();
+        let term = draw(&mut input, &mut it);
+        let text = buffer_text(term.backend().buffer());
+        assert!(text.contains("/effort medium"), "{text}");
+        let (x, y) = find_text(term.backend().buffer(), "high").unwrap();
+        let ev = crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        };
+        let Some(Dispatch::Activate(a)) = it.handle_mouse(&ev) else {
+            panic!("no hit")
+        };
+        assert_eq!(a, InputAction::Complete(3));
+        input.activate(&a);
+        assert_eq!(input.text(), "/effort high");
+        assert!(input.choice_completions().is_none());
+    }
+
     #[test]
     fn long_lines_wrap_and_cursor_follows() {
         let mut i = Input::new();
@@ -1557,18 +1877,21 @@ mod tests {
                 description: "Deploy the app".into(),
                 args: None,
                 scope: Some("project".into()),
+                choices: Vec::new(),
             },
             SlashCommand {
                 name: "global:review".into(),
                 description: "Run the reviewer".into(),
                 args: None,
                 scope: Some("global".into()),
+                choices: Vec::new(),
             },
             SlashCommand {
                 name: "audit".into(),
                 description: "Workflow: security review of the diff".into(),
                 args: None,
                 scope: Some("project".into()),
+                choices: Vec::new(),
             },
         ]
     }
@@ -1750,6 +2073,7 @@ mod tests {
                 description: format!("Description of command {n} for testing completion"),
                 args: Some("[arg]".into()),
                 scope: Some("global".into()),
+                choices: Vec::new(),
             })
             .collect();
         let theme = Theme::default();

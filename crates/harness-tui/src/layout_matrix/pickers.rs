@@ -184,6 +184,7 @@ fn commands(fx: &mut Fx) -> Vec<SlashCommand> {
             ),
             args: Some(format!("<{}>", fx.word(&format!("ca{i}")))),
             scope: Some(fx.path(&format!("cs{i}"))),
+            choices: Vec::new(),
         })
         .collect()
 }
@@ -399,6 +400,7 @@ fn completion_wraps_the_selected_command_and_its_rows_stay_clickable() {
             description: "a description that does not fit in one row ".repeat(3) + "tail_end",
             args: None,
             scope: Some("project".into()),
+            choices: Vec::new(),
         },
     ]);
     input.insert_char('/');

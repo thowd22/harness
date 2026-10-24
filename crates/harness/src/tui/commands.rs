@@ -125,6 +125,11 @@ pub fn slash_commands(registry: &CommandRegistry) -> Vec<SlashCommand> {
             description: spec.description.clone(),
             args: spec.arg_hint(),
             scope: Some(spec.scope_label().to_owned()),
+            choices: spec
+                .args
+                .first()
+                .map(|a| a.choices.clone())
+                .unwrap_or_default(),
         })
         .collect()
 }
