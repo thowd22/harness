@@ -60,8 +60,12 @@ service_tier }`.
   tool-use blocks. Tool results go back as `tool` messages. Images in tool
   results follow in a user message, because the `tool` role carries only
   text.
-- **Reasoning.** The agent's effort is sent as `reasoning.effort`, a token
-  budget as `reasoning.max_tokens`.
+- **Reasoning.** The agent's effort (its YAML `effort`, or the session's
+  [`/effort`](commands.md#effort) choice) is sent as `reasoning.effort`, a
+  token budget as `reasoning.max_tokens`. A model whose catalog entry
+  lacks the `reasoning` parameter gets no `reasoning` object, so the
+  request cannot fail on it; a model missing from the catalog still gets
+  it.
   - `delta.reasoning` text streams live as reasoning deltas. If a model only
     sends `reasoning_details`, its text and summary parts are streamed
     instead.

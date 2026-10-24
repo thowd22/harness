@@ -203,6 +203,12 @@ shows the spinner and phase, e.g. `⠹ thinking · 12.3s — harness`
   sensitive. Up/Down select, Tab or Enter complete, Esc closes, and rows
   are clickable. Enter on a complete command that takes no arguments sends
   it.
+- After a command whose first argument has fixed choices (`/effort `,
+  `/mode `, `/cost `, `/config `, ...), the same popup lists the choices
+  that start with what you typed, each with the command line it completes
+  to. Up/Down select, Tab or Enter complete, Esc closes, and rows are
+  clickable. Enter with nothing typed yet sends the bare command (for
+  `/effort`, its picker), and Enter on a fully typed choice sends it.
 
 ## Command palette
 
@@ -272,7 +278,9 @@ the full history (newest first, with timestamps); Up/Down move, Esc or
 ## Status line
 
 The footer always shows, in theme colours: working directory and git
-branch, model and autonomy mode, a context usage bar (green, orange above
+branch, model, the reasoning effort when one is set (`effort low`, or
+`no reasoning` on a model that does not reason; see
+[`/effort`](commands.md#effort)) and autonomy mode, a context usage bar (green, orange above
 60 %, red above 85 %), session tokens with the cache hit rate, session cost
 (`$?` until known), the verify state (spinner, `✔` or `✗`), the number of
 running agents and the remote hosts in use. When an MCP server has

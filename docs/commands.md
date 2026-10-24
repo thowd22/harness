@@ -13,6 +13,7 @@ command palette both read from it.
 | `/resume` | `[session...]` (a name, `last`, an id prefix or a `#tag`) | Resume a saved session; with no argument, pick one in a searchable dialog ([sessions](sessions.md)) |
 | `/rename` | `[name...]` | Rename this session (without a name: show it) |
 | `/model` | `[model]` (alias or provider/model) | Switch the model directly, or open the model picker without an argument |
+| `/effort` | `[default\|low\|medium\|high]` | Set the reasoning effort of the session's agent; without an argument, open a picker showing the active effort ([below](#effort)) |
 | `/mode` | `[ask\|auto-edit\|auto]` | Show or switch the approval mode |
 | `/agents` | | List agents and switch to one |
 | `/workflows` | | List workflows and their arguments |
@@ -71,6 +72,41 @@ Errors point at the problem and show the usage:
 unknown command `/cots`. Did you mean `/cost`? Type /help to list commands.
 unterminated " quote starting at column 5: close it with "
 ```
+
+## Effort
+
+`/effort low|medium|high` sets the reasoning effort of the session's
+main agent for the rest of the session; subagents keep the `effort` of
+their own YAML. The next request carries it, the status line shows it
+after the model (`<model> · effort low · <mode>`), and the session file
+keeps it, so `/resume` restores it. `/new` and switching agents start
+without one. `/effort default` drops the override: the agent YAML's
+`effort` applies again, or, without one, no reasoning fields are sent and
+the model uses its own default. Typed while the agent works, the change
+is queued and applies after the turn.
+
+A bare `/effort` opens a panel with the agent, the model, the active
+effort and where it comes from (this session, the agent YAML or the model
+default) and how the model's provider receives it, with `default`, `low`,
+`medium` and `high` buttons (click them, or Tab/arrows and Enter; Esc
+closes). The panel updates when you pick one.
+
+How each provider receives it:
+
+| Provider | Sent |
+|---|---|
+| Anthropic, adaptive models (current Claude) | `thinking: {type: adaptive}` plus `output_config.effort` ([details](providers-anthropic.md#effort-and-thinking-budget)) |
+| Anthropic, budget models (Claude Haiku 4.5) | `thinking.budget_tokens`: low 2,048, medium 8,192, high 24,576 |
+| OpenRouter | `reasoning.effort` ([details](providers-openrouter.md)) |
+| OpenAI | `reasoning.effort` on reasoning models ([details](providers-openai.md)) |
+
+On a model that does not reason (for example `openai/gpt-4o`, an Anthropic
+model outside the table, or an OpenRouter model whose catalog entry lacks
+`reasoning`), `/effort` warns that nothing is sent and the status line
+shows `no reasoning`. The choice is kept and applies after `/model`
+switches to a model that reasons. The TASK-161.7 measurements of what
+effort costs and saves are in
+[performance.md](performance.md#fast-mode-nitro-reasoning-and-effort-task-1617).
 
 ## Hot reload
 

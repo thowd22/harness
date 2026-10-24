@@ -105,6 +105,10 @@ Tool results recorded after the last model call are restored too, and a tool
 call that never got a result (the harness was killed mid-call) gets an error
 result so the conversation is valid again.
 
+The session file also keeps the reasoning effort chosen with
+[`/effort`](commands.md#effort) (`"effort": "low"`; absent when none was
+chosen), so a resumed session sends the same effort.
+
 A resumed session continues in a new run of the same session, so a log that
 was cut off by a crash is never appended to. If the last event was torn, a
 warning says so.

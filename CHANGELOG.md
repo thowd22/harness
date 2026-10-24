@@ -13,6 +13,18 @@ to built-in prompts, agents, workflows and `harness.ini` defaults.
 
 ### Added
 
+- `/effort [default|low|medium|high]` sets the reasoning effort of the
+  session's agent without copying its YAML: the next request carries it
+  (Anthropic adaptive `output_config.effort`, a thinking budget on Claude
+  Haiku 4.5, `reasoning.effort` on OpenRouter and OpenAI), the status line
+  shows it after the model, and the session file keeps it for resume.
+  `default` restores the agent YAML's effort or the model default; a bare
+  `/effort` opens a picker with the active effort and where it comes from.
+  On a model that does not reason it says so and nothing is sent. See
+  [docs/commands.md](docs/commands.md#effort). No default changed.
+- Slash completion offers a command's argument choices after `/name `
+  (`/effort l` → `low`, `/mode a` → `ask`, `auto-edit`, `auto`), by
+  keyboard and mouse.
 - `[context] background_compaction` (off by default, with
   `background_compact_at = 0.7`): the handoff summary starts in the
   background at 0.7 of the window and is swapped in at `compact_at`, so the
@@ -192,6 +204,11 @@ to built-in prompts, agents, workflows and `harness.ini` defaults.
 
 ### Fixed
 
+- OpenRouter: a model whose catalog entry lacks the `reasoning` parameter
+  no longer gets a `reasoning` object when an effort is set.
+- TUI: `/model NAME` typed while the agent works ran as a prompt after the
+  turn (the command text went to the model); queued slash commands now
+  run as commands.
 - Running a test suite or a build no longer ends a turn with
   "unverified: N file changes" when the only changes are generated
   artifacts. Bash changes to well-known build and test output

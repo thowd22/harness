@@ -119,8 +119,10 @@ Some blocks cannot be checked by the API, so the builder leaves them out:
 
 ## Effort and thinking budget
 
-The agent's `ThinkingConfig` is mapped to each model's thinking style, which
-comes from the model table:
+The agent's `ThinkingConfig` (its YAML `effort`, or the session's
+[`/effort`](commands.md#effort) choice) is mapped to each model's thinking
+style, which comes from the model table. Models outside the table, and
+any model whose style is none, get no thinking fields at any effort:
 
 | Model style | Sent |
 |---|---|

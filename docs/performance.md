@@ -499,7 +499,8 @@ Findings:
   arm passes), so they cannot show a quality loss from low effort on harder
   work: the coder's default stays unchanged (no `effort`), and a lower
   effort is a per-agent choice (`effort:` in the agent YAML; the built-in
-  `researcher` already uses `low`). Proposal: add a harder, discriminating
+  `researcher` already uses `low`) or a per-session one
+  ([`/effort low`](commands.md#effort)). Proposal: add a harder, discriminating
   eval task before changing the coder's effort.
 
 No default changed. Live spend for TASK-161.7: $3.62 (bench $1.65 in 14

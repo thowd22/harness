@@ -39,11 +39,13 @@ gpt = openai/gpt-5
     The UI should then show "reasoning not exposed" instead of nothing.
     Read it with `openai::notice::reasoning_hidden(&response)` or
     `Notice::from_event` while streaming.
-- **Effort.** The agent's `effort` (`ThinkingConfig::effort`) maps to
+- **Effort.** The agent's `effort` (`ThinkingConfig::effort`, or the
+  session's [`/effort`](commands.md#effort) choice) maps to
   `reasoning.effort` (`low`, `medium`, `high`). If only a token budget is
   set, it is bucketed: up to 4096 tokens is `low`, up to 16384 is `medium`,
   and anything larger is `high`. With no setting, the model's default
-  effort applies.
+  effort applies. Models that do not reason (`gpt-4o`, `gpt-4.1`,
+  `*-chat`) get no `reasoning` object at any effort.
 - **Prompt cache hints.** Every request carries a `prompt_cache_key`, so
   OpenAI routes requests that share a prefix to the same prompt cache. The
   key is `harness-` plus a truncated SHA-256 of the instructions and the
