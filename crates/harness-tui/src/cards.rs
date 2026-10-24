@@ -39,7 +39,8 @@ use time::OffsetDateTime;
 
 use crate::chat::highlight::{self, State};
 use crate::chat::text::{
-    fmt_bytes, fmt_ms, line_width, right_align, sanitize, truncate, truncate_line,
+    fmt_bytes, fmt_ms, line_width, right_align, sanitize, take_wrap_marker, width as width_of,
+    wrap_line, wrap_right,
 };
 use crate::chat::timefmt::TimeFormat;
 use crate::clipboard::{COPY_DIFF_LABEL, COPY_OUTPUT_LABEL};
@@ -606,26 +607,32 @@ impl ToolCard {
 
     /// Lays the card out and returns where its copy buttons are (none for
     /// compact cards or without [`CardCtx::copy_buttons`]).
+    ///
+    /// Nothing is cut: a header too long for the top border keeps the
+    /// status icon and tool name there and wraps the rest (summary,
+    /// badges) onto rows inside the box; body lines wrap inside the box
+    /// (continuation rows keep the line-number gutter blank); copy buttons
+    /// that do not fit in the bottom border go on a row above it.
     pub fn render_with_buttons(&self, ctx: &CardCtx<'_>) -> (Vec<Line<'static>>, Vec<CardButton>) {
         if self.is_compact() {
             return (self.render_compact(ctx), Vec::new());
         }
         let theme = ctx.theme;
-        let width = ctx.width.max(12);
+        // Narrower than this a box cannot hold any text.
+        let width = ctx.width.max(5);
         let tint = theme.bg(self.status.tint());
         let border = if ctx.focused {
             theme.fg(Token::BorderFocus)
         } else {
             theme.fg(Token::Border)
         };
-        let mut left = vec![
-            Span::styled("╭ ", border),
-            Span::styled(
-                format!("{} ", self.status.icon(&ctx.spinner)),
-                theme.fg(self.status.token()),
-            ),
-        ];
-        left.extend(self.name_spans(theme));
+        let inner = width.saturating_sub(4).max(1);
+        let mut head = vec![Span::styled(
+            format!("{} ", self.status.icon(&ctx.spinner)),
+            theme.fg(self.status.token()),
+        )];
+        head.extend(self.name_spans(theme));
+        let mut tail = Vec::new();
         let summary = self.summary();
         if !summary.is_empty() {
             let token = if self.tool == "bash" {
@@ -633,36 +640,30 @@ impl ToolCard {
             } else {
                 Token::Path
             };
-            left.push(Span::styled(
+            tail.push(Span::styled(
                 format!("  {}", sanitize(&summary)),
                 theme.fg(token),
             ));
         }
-        left.extend(self.badges(theme));
-        left.push(Span::styled(" ", border));
+        tail.extend(self.badges(theme));
         let mut right = self.right_badges(theme);
         if let Some(ms) = self.duration_ms {
             right.push(Span::styled(fmt_ms(ms), theme.fg(Token::Number)));
         }
         if let Some(ts) = ctx.time.format(self.ts, ctx.now) {
-            if self.duration_ms.is_some() || !self.right_badges(theme).is_empty() {
+            // The badges end with their own separator.
+            if self.duration_ms.is_some() {
                 right.push(Span::styled(" · ", theme.fg(Token::Muted)));
             }
             right.push(Span::styled(ts, theme.fg(Token::Muted)));
         }
-        if !right.is_empty() {
-            right.insert(0, Span::styled(" ", border));
-        }
-        right.push(Span::styled(" ╮", border));
-        let mut lines = vec![right_align(
-            Line::from(left),
-            right,
-            width,
-            Span::styled("─", border),
-        )];
+        let mut lines = card_top(head, tail, right, width, border);
+        let boxed_wrapped =
+            |line: Line<'static>, indent: &[Span<'static>], lines: &mut Vec<Line<'static>>| {
+                lines.extend(card_row(line, indent, width, border));
+            };
 
         let body = self.body(theme);
-        let inner = width.saturating_sub(4);
         let total = body.len();
         let collapsible = self.status != CardStatus::Error && total > ctx.preview_lines;
         let shown = if collapsible && !self.expanded {
@@ -670,8 +671,19 @@ impl ToolCard {
         } else {
             total
         };
+        let gutter = matches!(self.tool.as_str(), "read" | "edit")
+            .then(|| Span::styled("     │ ", theme.fg(Token::Muted)));
         for l in body.into_iter().take(shown) {
-            lines.push(boxed(truncate_line(l, inner), inner, border));
+            let has_gutter = gutter.is_some()
+                && l.spans
+                    .first()
+                    .is_some_and(|s| s.content.ends_with('│') || s.content.ends_with("│ "));
+            let indent: Vec<Span<'static>> = if has_gutter {
+                gutter.iter().cloned().collect()
+            } else {
+                Vec::new()
+            };
+            boxed_wrapped(l, &indent, &mut lines);
         }
         if collapsible {
             let hint = if self.expanded {
@@ -679,55 +691,79 @@ impl ToolCard {
             } else {
                 format!("… {} more lines · Enter to expand", total - shown)
             };
-            lines.push(boxed(
+            boxed_wrapped(
                 Line::from(Span::styled(hint, theme.fg(Token::Muted))),
-                inner,
-                border,
-            ));
+                &[],
+                &mut lines,
+            );
         }
         if let Some(p) = (self.tool == "bash" || self.mcp.is_some())
             .then(|| spill_pointer(&self.output))
             .flatten()
         {
-            lines.push(boxed(
-                Line::from(Span::styled(truncate(&p, inner), theme.fg(Token::Warn))),
-                inner,
-                border,
-            ));
+            boxed_wrapped(
+                Line::from(Span::styled(p, theme.fg(Token::Warn))),
+                &[],
+                &mut lines,
+            );
         }
         let kinds = if ctx.copy_buttons {
             self.copy_kinds()
         } else {
             Vec::new()
         };
-        let (bottom, mut buttons) = self.bottom_border(width, border, &kinds, ctx);
+        let (bottom, mut buttons, left_over) = self.bottom_border(width, border, &kinds, ctx);
+        // Buttons that did not fit in the bottom border: one per row
+        // inside the box, above it.
+        let mut extra = Vec::new();
+        for kind in left_over {
+            let label = kind.label();
+            let id = copy_button_id(&self.call_id, kind);
+            let mut st = ctx.theme.fg(Token::Accent);
+            if ctx.focus == Some(id.as_str()) {
+                st = st.patch(ctx.theme.focused());
+            }
+            extra.push(CardButton {
+                kind,
+                line: lines.len(),
+                col: 2,
+                width: width_of(label).min(inner),
+            });
+            for l in wrap_line(Line::from(Span::styled(label, st)), inner, &[]) {
+                lines.push(boxed(l, inner, border));
+            }
+        }
         for b in &mut buttons {
             b.line = lines.len();
         }
+        extra.extend(buttons);
         lines.push(bottom);
         (
             lines.into_iter().map(|l| l.patch_style(tint)).collect(),
-            buttons,
+            extra,
         )
     }
 
     /// `╰─ ⧉ copy output ─ ⧉ copy diff ───╯`: buttons that fit, then fill.
+    /// Returns the kinds that did not fit too.
     fn bottom_border(
         &self,
         width: usize,
         border: Style,
         kinds: &[CardCopy],
         ctx: &CardCtx<'_>,
-    ) -> (Line<'static>, Vec<CardButton>) {
+    ) -> (Line<'static>, Vec<CardButton>, Vec<CardCopy>) {
         let mut spans = vec![Span::styled("╰", border)];
         let mut col = 1;
         let mut buttons = Vec::new();
+        let mut left_over = Vec::new();
         for &kind in kinds {
             let label = kind.label();
             let w = crate::chat::text::width(label);
             // "─ " + label + " " and room for "─╯".
-            if col + 2 + w + 1 + 2 > width {
-                break;
+            if !left_over.is_empty() || col + 2 + w + 1 + 2 > width {
+                left_over.push(kind);
+                continue;
             }
             spans.push(Span::styled("─ ", border));
             let id = copy_button_id(&self.call_id, kind);
@@ -750,7 +786,7 @@ impl ToolCard {
             border,
         ));
         spans.push(Span::styled("╯", border));
-        (Line::from(spans), buttons)
+        (Line::from(spans), buttons, left_over)
     }
 
     fn render_compact(&self, ctx: &CardCtx<'_>) -> Vec<Line<'static>> {
@@ -784,20 +820,22 @@ impl ToolCard {
         if let Some(ts) = ctx.time.format(self.ts, ctx.now) {
             right.push(Span::styled(format!(" · {ts}"), theme.fg(Token::Muted)));
         }
-        let mut lines = vec![right_align(
+        let mut lines = wrap_right(
             Line::from(left),
             right,
             ctx.width,
             Span::raw(" "),
-        )];
+            &[Span::raw("  ")],
+        );
         if self.expanded {
             for item in compact_detail(&self.tool, &self.args, &self.output) {
-                lines.push(truncate_line(
+                lines.extend(wrap_line(
                     Line::from(Span::styled(
                         format!("    {}", sanitize(&item)),
                         theme.fg(Token::Muted),
                     )),
                     ctx.width,
+                    &[Span::raw("      ")],
                 ));
             }
         }
@@ -805,9 +843,94 @@ impl ToolCard {
     }
 }
 
-fn boxed(line: Line<'static>, inner: usize, border: Style) -> Line<'static> {
+/// The top border of a box card, `╭ <head><tail> ─── <right> ╮`, at
+/// `width` (at least 5). Nothing is cut: when `head` and `tail` do not fit
+/// beside `right`, the top row keeps `head` (or only the border when even
+/// that does not fit) and the rest wraps onto rows inside the box; `right`
+/// moves inside too when it does not fit beside the corners.
+pub(crate) fn card_top(
+    head: Vec<Span<'static>>,
+    tail: Vec<Span<'static>>,
+    mut right: Vec<Span<'static>>,
+    width: usize,
+    border: Style,
+) -> Vec<Line<'static>> {
+    let width = width.max(5);
+    let span_w = |v: &[Span<'static>]| v.iter().map(|s| width_of(&s.content)).sum::<usize>();
+    // "╭ " + content + " " + at least one fill cell + " " + right + " ╮"
+    // (right_align keeps a cell between the two parts).
+    let mut right_w = span_w(&right);
+    let mut moved_right = Vec::new();
+    if !right.is_empty() && right_w + 6 > width {
+        moved_right = std::mem::take(&mut right);
+        right_w = 0;
+    }
+    let room = width.saturating_sub(4 + if right_w > 0 { right_w + 3 } else { 2 });
+    let (top, rest): (Vec<Span<'static>>, Vec<Span<'static>>) =
+        if span_w(&head) + span_w(&tail) <= room {
+            (head.into_iter().chain(tail).collect(), Vec::new())
+        } else if span_w(&head) <= room {
+            (head, tail)
+        } else {
+            (Vec::new(), head.into_iter().chain(tail).collect())
+        };
+    let mut left = vec![Span::styled("╭ ", border)];
+    left.extend(top);
+    left.push(Span::styled(" ", border));
+    if !right.is_empty() {
+        right.insert(0, Span::styled(" ", border));
+    }
+    right.push(Span::styled(" ╮", border));
+    let mut lines = vec![right_align(
+        Line::from(left),
+        right,
+        width,
+        Span::styled("─", border),
+    )];
+    if !rest.is_empty() {
+        let mut rest = rest;
+        if let Some(first) = rest.first_mut() {
+            first.content = first.content.trim_start().to_owned().into();
+        }
+        lines.extend(card_row(Line::from(rest), &[], width, border));
+    }
+    if !moved_right.is_empty() {
+        lines.extend(card_row(Line::from(moved_right), &[], width, border));
+    }
+    lines
+}
+
+/// A body line of a box card at `width`: wrapped inside `│ … │`,
+/// continuation rows starting with `indent`.
+pub(crate) fn card_row(
+    line: Line<'static>,
+    indent: &[Span<'static>],
+    width: usize,
+    border: Style,
+) -> Vec<Line<'static>> {
+    let inner = width.max(5) - 4;
+    wrap_line(line, inner, indent)
+        .into_iter()
+        .map(|l| boxed(l, inner, border))
+        .collect()
+}
+
+/// The bottom border of a box card without buttons.
+pub(crate) fn card_bottom(width: usize, border: Style) -> Line<'static> {
+    let width = width.max(5);
+    Line::from(vec![
+        Span::styled("╰", border),
+        Span::styled("─".repeat(width - 2), border),
+        Span::styled("╯", border),
+    ])
+}
+
+/// `│ line │`, padded to `inner`. A soft-wrap marker stays the first span.
+fn boxed(mut line: Line<'static>, inner: usize, border: Style) -> Line<'static> {
+    let marker = take_wrap_marker(&mut line);
     let w = line_width(&line);
-    let mut spans = vec![Span::styled("│ ", border)];
+    let mut spans: Vec<Span<'static>> = marker.into_iter().collect();
+    spans.push(Span::styled("│ ", border));
     spans.extend(line.spans);
     spans.push(Span::raw(" ".repeat(inner.saturating_sub(w))));
     spans.push(Span::styled(" │", border));
@@ -899,11 +1022,12 @@ impl CardGroup {
                 .format(self.cards[0].ts, ctx.now)
                 .map(|t| vec![Span::styled(t, theme.fg(Token::Muted))])
                 .unwrap_or_default();
-            lines.push(right_align(
+            lines.extend(wrap_right(
                 Line::from(left),
                 right,
                 ctx.width,
                 Span::raw(" "),
+                &[Span::raw("  ")],
             ));
         }
         for card in &self.cards {
@@ -1207,15 +1331,15 @@ pub fn arg_summary(tool: &str, args: &Value) -> String {
                     .take(3)
                     .map(|(k, v)| {
                         let v = match v {
-                            Value::String(s) => truncate(s.lines().next().unwrap_or(""), 30),
-                            other => truncate(&other.to_string(), 30),
+                            Value::String(s) => s.lines().next().unwrap_or("").to_owned(),
+                            other => other.to_string(),
                         };
                         format!("{k}={v}")
                     })
                     .collect::<Vec<_>>()
                     .join(" "),
                 Value::Null => String::new(),
-                other => truncate(&other.to_string(), 40),
+                other => other.to_string(),
             },
         },
     }
@@ -1245,7 +1369,7 @@ pub fn compact_summary(tool: &str, args: &Value, output: &str) -> String {
             // The task-board tool: one operation per call.
             let action = str_arg(args, &["action"]).unwrap_or_default();
             let id = str_arg(args, &["id"]).unwrap_or_default();
-            let title = str_arg(args, &["title"]).map(|t| truncate(&t, 50));
+            let title = str_arg(args, &["title"]);
             let status = str_arg(args, &["status"]);
             let mut out = format!("{action} {id}").trim().to_owned();
             if let Some(t) = title {
@@ -1275,17 +1399,14 @@ pub fn compact_summary(tool: &str, args: &Value, output: &str) -> String {
         "memory" => {
             let action = str_arg(args, &["action", "op"]).unwrap_or_else(|| "note".into());
             let what = str_arg(args, &["summary", "title", "key", "query", "content"])
-                .map(|s| truncate(s.lines().next().unwrap_or(""), 60))
-                .unwrap_or_else(|| truncate(output.lines().next().unwrap_or(""), 60));
+                .map(|s| s.lines().next().unwrap_or("").to_owned())
+                .unwrap_or_else(|| output.lines().next().unwrap_or("").to_owned());
             format!("{action}: {what}")
         }
         "spawn_agent" => {
             let agent = str_arg(args, &["agent", "name"]).unwrap_or_else(|| "agent".into());
             let task = str_arg(args, &["brief", "task", "prompt", "goal"]).unwrap_or_default();
-            format!(
-                "{agent}: {}",
-                truncate(task.lines().next().unwrap_or(""), 60)
-            )
+            format!("{agent}: {}", task.lines().next().unwrap_or(""))
         }
         _ => arg_summary(tool, args),
     }
@@ -1366,7 +1487,14 @@ mod tests {
         assert_eq!(l[0].style.bg, theme.bg(Token::CardApproval).bg);
         assert!(text(&l[0]).contains("⏸ read"));
         assert!(text(&l[0]).contains("outward action"));
-        assert!(text(&l[1]).contains("rule: outward.ask = git push*"));
+        // The summary no longer fits beside the reason: it wraps into the
+        // box instead of being cut.
+        assert!(
+            text(&l[1]).contains("src/lib.rs  L1-2 · 2 lines"),
+            "{:?}",
+            l
+        );
+        assert!(text(&l[2]).contains("rule: outward.ask = git push*"));
     }
 
     #[test]
@@ -1705,5 +1833,152 @@ mod tests {
             payload_json(&Payload::Text("{\"a\":1}".into())),
             Some(json!({"a": 1}))
         );
+    }
+
+    /// Every row of a card is exactly `width` cells with intact side
+    /// borders, and nothing is cut.
+    fn assert_boxed(rows: &[String], width: usize) {
+        for r in rows {
+            assert_eq!(
+                crate::chat::text::width(r),
+                width,
+                "{r}\n{}",
+                rows.join("\n")
+            );
+            assert!(!r.contains('…'), "cut: {r}");
+        }
+        assert!(
+            rows[0].starts_with('╭') && rows[0].ends_with('╮'),
+            "{}",
+            rows[0]
+        );
+        assert!(rows.last().unwrap().starts_with('╰'), "{}", rows.join("\n"));
+        for r in &rows[1..rows.len() - 1] {
+            assert!(r.starts_with('│') && r.ends_with('│'), "{r}");
+        }
+    }
+
+    #[test]
+    fn long_headers_and_bodies_wrap_inside_the_box() {
+        let theme = Theme::default();
+        let path =
+            "/private/var/folders/n6/hn37q6pj7sj_9dm0000gn/T/.tmpXyZ/project/src/deep/file_end.rs";
+        let mut card = ToolCard::new("t1", "read", json!({"path": path}), TS);
+        let long_line = format!("1\tlet s = \"{}\";", "x".repeat(90));
+        card.finish(
+            true,
+            format!("{long_line}\n2\t日本語のテキストと絵文字🎉🚀を含む長い行です中文字符測試結尾"),
+            3,
+        );
+        card.toggle();
+        let c = CardCtx {
+            width: 40,
+            copy_buttons: true,
+            ..ctx(&theme)
+        };
+        let (l, buttons) = card.render_with_buttons(&c);
+        let rows: Vec<String> = l.iter().map(text).collect();
+        assert_boxed(&rows, 40);
+        // The tool name stays in the top border; the path wraps below it.
+        assert!(rows[0].contains("✔ read"), "{}", rows[0]);
+        let squashed: String = rows
+            .concat()
+            .chars()
+            .filter(|c| !c.is_whitespace() && *c != '│')
+            .collect();
+        assert!(
+            squashed.contains(&path.replace(' ', "")),
+            "{}",
+            rows.join("\n")
+        );
+        assert!(squashed.contains(&"x".repeat(90)), "{}", rows.join("\n"));
+        // Continuation rows of a numbered line keep the gutter blank.
+        assert!(
+            rows.iter().any(|r| r.starts_with("│      │ x")),
+            "{}",
+            rows.join("\n")
+        );
+        // Soft-wrapped body rows start with the zero-width marker, before
+        // the border.
+        assert!(
+            l.iter()
+                .any(|l| crate::chat::text::soft_join(l) != crate::selection::Join::Hard)
+        );
+        // The copy button still shows (on its own row when narrow).
+        assert_eq!(buttons.len(), 1);
+        let b = &buttons[0];
+        let label: String = rows[b.line].chars().skip(b.col).take(b.width).collect();
+        assert_eq!(label, CardCopy::Output.label(), "{}", rows.join("\n"));
+    }
+
+    #[test]
+    fn narrow_cards_never_exceed_their_width() {
+        let theme = Theme::default();
+        let mut card = ToolCard::new(
+            "t1",
+            "bash",
+            json!({"command": "cargo test --workspace"}),
+            TS,
+        );
+        card.finish(false, "error: boom\n[exit code 101]".into(), 8_100);
+        for w in [5, 8, 12, 20, 33] {
+            let c = CardCtx {
+                width: w,
+                copy_buttons: true,
+                ..ctx(&theme)
+            };
+            let rows: Vec<String> = card.render(&c).iter().map(text).collect();
+            assert_boxed(&rows, w);
+            let all: String = rows
+                .concat()
+                .chars()
+                .filter(|c| !c.is_whitespace() && *c != '│' && *c != '─')
+                .collect();
+            for want in ["cargotest--workspace", "exit101", "error:boom"] {
+                assert!(all.contains(want), "{want} at {w}:\n{}", rows.join("\n"));
+            }
+        }
+    }
+
+    #[test]
+    fn compact_cards_wrap_their_summary_and_details() {
+        let theme = Theme::default();
+        let long = "a todo title that is much longer than the forty columns we have here_end";
+        let mut card = ToolCard::new(
+            "t1",
+            "todo",
+            json!({"todos": [{"content": long, "status": "pending"}]}),
+            TS,
+        );
+        card.finish(true, "ok".into(), 1);
+        card.toggle();
+        let c = CardCtx {
+            width: 30,
+            ..ctx(&theme)
+        };
+        let rows: Vec<String> = card.render(&c).iter().map(text).collect();
+        for r in &rows {
+            assert!(crate::chat::text::width(r) <= 30, "{r}");
+            assert!(!r.contains('…'), "{r}");
+        }
+        let all: String = rows.concat().split_whitespace().collect();
+        assert!(all.contains(&long.replace(' ', "")), "{}", rows.join("\n"));
+    }
+
+    #[test]
+    fn a_header_that_just_fits_keeps_its_gap_before_the_rule() {
+        let theme = Theme::default();
+        for n in 20..60 {
+            let mut card = ToolCard::new("t1", "bash", json!({"command": "x".repeat(n)}), TS);
+            card.finish(true, "ok".into(), 8);
+            let rows: Vec<String> = card.render(&ctx(&theme)).iter().map(text).collect();
+            assert!(!rows[0].contains('…'), "{}", rows[0]);
+            assert!(
+                !rows[0].contains("x─"),
+                "no gap before the rule: {}",
+                rows[0]
+            );
+            assert_eq!(crate::chat::text::width(&rows[0]), 70);
+        }
     }
 }

@@ -8,6 +8,13 @@
 //! [`MAX_TOASTS`] are shown. Every notification is kept in a history (up to
 //! [`HISTORY_LIMIT`]) that the palette entry `Notifications` opens as an
 //! overlay; Up/Down move, Esc or the close button closes it.
+//!
+//! Titles and bodies wrap inside the toast (at most [`TOAST_LINES`] rows);
+//! a toast that cannot show everything ends with a hint that the full text
+//! is in the history ([`TOAST_MORE`]). History rows wrap too; Up/Down,
+//! Home/End and clicks select (the selected item scrolls into view),
+//! PageUp/PageDown and the wheel scroll by rows, and the bottom border
+//! shows the position.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -21,7 +28,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use time::OffsetDateTime;
 
-use crate::chat::text::{sanitize, truncate, width};
+use crate::chat::text::{sanitize, width, wrap_line_with, wrap_right, wrap_text};
 use crate::interaction::{ElementId, HitMap};
 use crate::theme::{Theme, Token};
 
@@ -35,6 +42,12 @@ pub const HISTORY_LIMIT: usize = 500;
 pub const TOAST_WIDTH: u16 = 44;
 /// Element id of the history close button.
 pub const HISTORY_CLOSE_ID: &str = "notify.history.close";
+/// Scroll pane id of the history list (the wheel scrolls it).
+pub const HISTORY_PANE: &str = "notify.history";
+/// Most text rows a toast shows.
+pub const TOAST_LINES: usize = 6;
+/// The last row of a toast that is cut: where the rest is.
+pub const TOAST_MORE: &str = "… more in Notifications (palette)";
 
 /// Severity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +107,12 @@ pub struct Notifications {
     next_id: u64,
     history_open: bool,
     selected: usize,
+    /// First history row shown.
+    top: usize,
+    /// Scroll the selected item into view on the next frame.
+    follow: bool,
+    /// History rows that fit the last frame (for PageUp/PageDown).
+    page: usize,
 }
 
 impl Notifications {
@@ -169,6 +188,8 @@ impl Notifications {
     pub fn open_history(&mut self) {
         self.history_open = true;
         self.selected = 0;
+        self.top = 0;
+        self.follow = true;
     }
 
     /// Closes the history overlay.
@@ -185,7 +206,10 @@ impl Notifications {
     pub fn activate(&mut self, action: NotifyAction) -> bool {
         match action {
             NotifyAction::Dismiss(id) => self.dismiss(id),
-            NotifyAction::Select(i) => self.selected = i,
+            NotifyAction::Select(i) => {
+                self.selected = i;
+                self.follow = true;
+            }
             NotifyAction::CloseHistory => self.close_history(),
         }
         true
@@ -197,15 +221,30 @@ impl Notifications {
             return false;
         }
         let n = self.history.len();
+        self.follow = true;
         match key.code {
             KeyCode::Esc => self.close_history(),
             KeyCode::Up => self.selected = self.selected.saturating_sub(1),
             KeyCode::Down if n > 0 => self.selected = (self.selected + 1).min(n - 1),
             KeyCode::Home => self.selected = 0,
             KeyCode::End => self.selected = n.saturating_sub(1),
+            KeyCode::PageUp => self.scroll(-(self.page.max(1) as i32)),
+            KeyCode::PageDown => self.scroll(self.page.max(1) as i32),
             _ => return false,
         }
         true
+    }
+
+    /// First history row shown (after the last frame).
+    pub fn history_top(&self) -> usize {
+        self.top
+    }
+
+    /// Scrolls the history by `lines` rows (the wheel and
+    /// PageUp/PageDown); the selection stays.
+    pub fn scroll(&mut self, lines: i32) {
+        self.follow = false;
+        self.top = (self.top as i64 + i64::from(lines)).max(0) as usize;
     }
 
     /// Draws toasts in the top-right corner of `area`. They are clickable
@@ -224,13 +263,42 @@ impl Notifications {
         }
         let x = area.right() - w;
         let mut y = area.y;
+        let iw = (w - 2) as usize;
         for n in self.toasts() {
-            let h = if n.body.is_some() { 4 } else { 3 };
-            if y + h > area.bottom() {
+            let (icon, token) = n.level.style();
+            // Title rows leave room for the `×` at the right of the first.
+            let title = Line::from(vec![
+                Span::styled(format!("{icon} "), theme.fg(token)),
+                Span::styled(
+                    sanitize(&n.title),
+                    theme.fg(Token::Fg).add_modifier(Modifier::BOLD),
+                ),
+            ]);
+            let mut lines = wrap_line_with(title, iw.saturating_sub(3), iw, &[Span::raw("  ")]);
+            if let Some(b) = &n.body {
+                lines.extend(
+                    wrap_text(b, iw)
+                        .into_iter()
+                        .map(|t| Line::from(Span::styled(t, theme.fg(Token::Muted)))),
+                );
+            }
+            let room = (area.bottom().saturating_sub(y) as usize)
+                .saturating_sub(2)
+                .min(TOAST_LINES);
+            if room == 0 {
                 break;
             }
+            if lines.len() > room {
+                let more: Vec<Line<'static>> = wrap_text(TOAST_MORE, iw)
+                    .into_iter()
+                    .map(|t| Line::from(Span::styled(t, theme.fg(Token::Accent))))
+                    .collect();
+                lines.truncate(room.saturating_sub(more.len()).max(1));
+                lines.extend(more);
+                lines.truncate(room);
+            }
+            let h = lines.len() as u16 + 2;
             let rect = Rect::new(x, y, w, h);
-            let (icon, token) = n.level.style();
             // A selection cannot start on a toast, but the text under it
             // is still copied: toasts come and go (every copy shows one).
             crate::selection::overlay(rect, frame.buffer_mut());
@@ -242,20 +310,6 @@ impl Notifications {
                 .style(theme.bg(Token::Surface));
             let inner = block.inner(rect);
             frame.render_widget(block, rect);
-            let iw = inner.width as usize;
-            let mut lines = vec![Line::from(vec![
-                Span::styled(format!("{icon} "), theme.fg(token)),
-                Span::styled(
-                    truncate(&sanitize(&n.title), iw.saturating_sub(4)),
-                    theme.fg(Token::Fg).add_modifier(Modifier::BOLD),
-                ),
-            ])];
-            if let Some(b) = &n.body {
-                lines.push(Line::from(Span::styled(
-                    truncate(&sanitize(b), iw),
-                    theme.fg(Token::Muted),
-                )));
-            }
             frame.render_widget(Paragraph::new(lines), inner);
             frame.render_widget(
                 Paragraph::new(Span::styled("×", theme.fg(Token::Muted))),
@@ -285,7 +339,45 @@ impl Notifications {
             return;
         }
         let w = area.width.saturating_sub(4).clamp(20.min(area.width), 90);
-        let h = area.height.saturating_sub(2).clamp(3.min(area.height), 20);
+        let iw = w.saturating_sub(2) as usize;
+        let items: Vec<&Notification> = self.history.iter().rev().collect();
+        // Each item wraps; the time sits at the right of its first row.
+        let item_lines = |n: &Notification, sel: bool| -> Vec<Line<'static>> {
+            let base = if sel {
+                theme.focused()
+            } else {
+                theme.bg(Token::Surface)
+            };
+            let (icon, token) = n.level.style();
+            let ts = stamp(n.ts).unwrap_or_default();
+            let mut text = sanitize(&n.title);
+            if let Some(b) = &n.body {
+                text.push_str(" — ");
+                text.push_str(&sanitize(b).replace('\n', " "));
+            }
+            let left = Line::from(vec![
+                Span::styled(format!("{icon} "), base.patch(theme.fg(token))),
+                Span::styled(text, base.patch(theme.fg(Token::Fg))),
+            ]);
+            let right = vec![Span::styled(
+                format!(" {ts}"),
+                base.patch(theme.fg(Token::Muted)),
+            )];
+            wrap_right(
+                left,
+                right,
+                iw.max(1),
+                Span::styled(" ", base),
+                &[Span::raw("  ")],
+            )
+            .into_iter()
+            .map(|l| l.style(base))
+            .collect()
+        };
+        let heights: Vec<usize> = items.iter().map(|n| item_lines(n, false).len()).collect();
+        let content = heights.iter().sum::<usize>().max(1) as u16;
+        let max_h = area.height.saturating_sub(2).clamp(3.min(area.height), 20);
+        let h = (content + 2).clamp(3.min(area.height), max_h);
         let rect = Rect::new(
             area.x + (area.width - w) / 2,
             area.y + (area.height - h) / 4,
@@ -303,7 +395,7 @@ impl Notifications {
         let inner = block.inner(rect);
         frame.render_widget(block, rect);
         // Close button in the top border.
-        let close = Rect::new(rect.right().saturating_sub(10), rect.y, 9, 1);
+        let close = Rect::new(rect.right().saturating_sub(10), rect.y, 9.min(w), 1);
         let close_style = if hits.is_focused(&ElementId::from(HISTORY_CLOSE_ID)) {
             theme.focused()
         } else {
@@ -315,7 +407,6 @@ impl Notifications {
         );
         hits.register(HISTORY_CLOSE_ID, close, wrap(NotifyAction::CloseHistory));
         let rows = inner.height as usize;
-        let items: Vec<&Notification> = self.history.iter().rev().collect();
         if items.is_empty() {
             frame.render_widget(
                 Paragraph::new(Span::styled(
@@ -326,41 +417,71 @@ impl Notifications {
             );
             return;
         }
+        hits.register_pane(HISTORY_PANE, inner);
         self.selected = self.selected.min(items.len() - 1);
-        let first = self.selected.saturating_sub(rows.saturating_sub(1));
-        let iw = inner.width as usize;
-        let mut lines = Vec::new();
-        for (row, n) in items.iter().enumerate().skip(first).take(rows) {
-            let id = ElementId(format!("notify.history.{row}"));
-            let sel = row == self.selected || hits.is_focused(&id);
-            let base = if sel {
-                theme.focused()
-            } else {
-                theme.bg(Token::Surface)
-            };
-            let (icon, token) = n.level.style();
-            let ts = stamp(n.ts).unwrap_or_default();
-            let mut text = sanitize(&n.title);
-            if let Some(b) = &n.body {
-                text.push_str(" — ");
-                text.push_str(&sanitize(b));
+        // Scroll by row; after a selection change, bring the selected item
+        // into view (its start when it is taller than the list).
+        let sel = self.selected;
+        let starts: Vec<usize> = heights
+            .iter()
+            .scan(0, |acc, h| {
+                let s = *acc;
+                *acc += h;
+                Some(s)
+            })
+            .collect();
+        let total: usize = heights.iter().sum();
+        let max = total.saturating_sub(rows);
+        if self.follow {
+            let (start, end) = (starts[sel], starts[sel] + heights[sel]);
+            if start < self.top {
+                self.top = start;
+            } else if end > self.top + rows {
+                self.top = start.min(end.saturating_sub(rows));
             }
-            let tw = iw.saturating_sub(3 + width(&ts));
-            lines.push(Line::from(vec![
-                Span::styled(format!("{icon} "), base.patch(theme.fg(token))),
-                Span::styled(
-                    format!("{:<tw$}", truncate(&text, tw)),
-                    base.patch(theme.fg(Token::Fg)),
-                ),
-                Span::styled(format!(" {ts}"), base.patch(theme.fg(Token::Muted))),
-            ]));
-            hits.register(
-                id,
-                Rect::new(inner.x, inner.y + (row - first) as u16, inner.width, 1),
-                wrap(NotifyAction::Select(row)),
-            );
+            self.follow = false;
         }
+        self.top = self.top.min(max);
+        let first = self.top;
+        let mut all = Vec::new();
+        for (row, n) in items.iter().enumerate() {
+            let id = ElementId(format!("notify.history.{row}"));
+            let selected = row == sel || hits.is_focused(&id);
+            let (s0, h0) = (starts[row], heights[row]);
+            let top = s0.max(first);
+            let bottom = (s0 + h0).min(first + rows);
+            if bottom > top {
+                hits.register(
+                    id,
+                    Rect::new(
+                        inner.x,
+                        inner.y + (top - first) as u16,
+                        inner.width,
+                        (bottom - top) as u16,
+                    ),
+                    wrap(NotifyAction::Select(row)),
+                );
+                all.extend(
+                    item_lines(n, selected)
+                        .into_iter()
+                        .skip(top - s0)
+                        .take(bottom - top),
+                );
+            }
+        }
+        let lines = all;
+        self.page = rows.saturating_sub(1).max(1);
         frame.render_widget(Paragraph::new(lines), inner);
+        if max > 0 {
+            let pos = format!(" {}-{}/{} ", first + 1, (first + rows).min(total), total);
+            let pw = width(&pos) as u16;
+            if rect.width > pw + 2 {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(pos, theme.fg(Token::Muted))),
+                    Rect::new(rect.right() - pw - 1, rect.bottom() - 1, pw, 1),
+                );
+            }
+        }
     }
 }
 

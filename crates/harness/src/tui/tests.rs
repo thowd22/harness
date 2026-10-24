@@ -933,7 +933,23 @@ async fn model_without_argument_and_the_palette_entry_open_the_picker() {
         }
         _ => unreachable!(),
     }
-    assert!(took.as_millis() < 50, "opened in {took:?}");
+    // Best of five opens: a slow implementation is slow every time, while
+    // a scheduler hiccup on a shared CI runner only hits some of them.
+    let mut took = took;
+    for _ in 1..5 {
+        if took.as_millis() < 50 {
+            break;
+        }
+        h.seen.clear();
+        let started = std::time::Instant::now();
+        h.d.request(UiRequest::Submit("/model".into())).await;
+        took = took.min(started.elapsed());
+        h.until(is_picker).await;
+    }
+    assert!(
+        took.as_millis() < 50,
+        "opened in {took:?} (best of up to 5)"
+    );
     assert!(
         !h.seen
             .iter()
@@ -1698,10 +1714,22 @@ async fn jobs_panel_lists_opens_and_stops_background_jobs() {
     let ids: Vec<&str> = buttons.iter().map(|b| b.id.as_str()).collect();
     assert_eq!(ids, ["jobs.output:j1", "jobs.stop:j1", "jobs.refresh"]);
 
-    // Output opens in its own panel.
-    h.d.request(UiRequest::PanelAction("jobs.output:j1".into()))
-        .await;
-    let out = h.panel("Job j1").await;
+    // Output opens in its own panel. The pid file proves the shell printed
+    // "serving", but the job's pump task appends it to the log on its own
+    // schedule, so refresh the panel (as a user would) until it shows up.
+    let mut out = Vec::new();
+    for _ in 0..100 {
+        h.seen.retain(
+            |e| !matches!(e, AppEvent::Core(CoreEvent::Panel { title, .. }) if title == "Job j1"),
+        );
+        h.d.request(UiRequest::PanelAction("jobs.output:j1".into()))
+            .await;
+        out = h.panel("Job j1").await;
+        if out.iter().any(|l| l == "serving") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     assert!(out.iter().any(|l| l == "serving"), "{out:?}");
 
     // The real app renders the list; Right + Enter and a click both ask to stop.

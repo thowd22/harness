@@ -34,17 +34,47 @@ pub const MAX_OVERVIEW_BULLETS: usize = 10;
 
 /// True when `path` is a project's overview note (`projects/<key>/overview.md`).
 pub fn is_overview(path: &NotePath) -> bool {
-    path.project()
-        .is_some_and(|key| path.as_str() == format!("projects/{key}/{OVERVIEW_TOPIC}.md"))
+    is_overview_path(path.as_str())
 }
 
-/// The per-bullet character limit for a note at `path`.
-pub fn limit_for(path: &NotePath) -> usize {
-    if is_overview(path) {
+/// True when the path string `path` names a project's overview note, in
+/// either the model-facing alias form (`project/overview`) or the stored
+/// form (`projects/<key>/overview`), with or without `.md` or `[[ ]]`.
+fn is_overview_path(path: &str) -> bool {
+    let p = path
+        .trim()
+        .trim_start_matches("[[")
+        .trim_end_matches("]]")
+        .trim();
+    let p = p.strip_suffix(".md").unwrap_or(p);
+    let parts: Vec<&str> = p.split('/').collect();
+    match parts.as_slice() {
+        [alias, topic] => {
+            format!("{alias}/") == crate::tool::PROJECT_ALIAS && *topic == OVERVIEW_TOPIC
+        }
+        ["projects", key, topic] => !key.is_empty() && *topic == OVERVIEW_TOPIC,
+        _ => false,
+    }
+}
+
+/// The per-bullet character limit for a note at `path`: the one place the
+/// limits are defined. [`MAX_OVERVIEW_BULLET_CHARS`] for a project's
+/// overview note (`project/overview` as the model and the extractor name
+/// it, or `projects/<key>/overview.md` as stored), [`MAX_BULLET_CHARS`]
+/// everywhere else. The memory tool, the end-of-session extractor and the
+/// dream pass all read their limit from here.
+pub fn limit_for_path(path: &str) -> usize {
+    if is_overview_path(path) {
         MAX_OVERVIEW_BULLET_CHARS
     } else {
         MAX_BULLET_CHARS
     }
+}
+
+/// The per-bullet character limit for a note at `path` (see
+/// [`limit_for_path`]).
+pub fn limit_for(path: &NotePath) -> usize {
+    limit_for_path(path.as_str())
 }
 
 /// Why a write was rejected.
@@ -235,6 +265,14 @@ pub fn validate_for(path: &NotePath, text: &str, redactor: &Redactor) -> Result<
     validate_with(text, redactor, limit_for(path))
 }
 
+/// Runs every check on a candidate memory for the note named by the path
+/// string `path` (alias or stored form; its limit comes from
+/// [`limit_for_path`]). Used where the path is not yet resolved to a
+/// [`NotePath`], such as extractor proposals.
+pub fn validate_for_path(path: &str, text: &str, redactor: &Redactor) -> Result<String, Rejection> {
+    validate_with(text, redactor, limit_for_path(path))
+}
+
 fn validate_with(text: &str, redactor: &Redactor, max_chars: usize) -> Result<String, Rejection> {
     let t = text.trim();
     let t = t
@@ -311,6 +349,39 @@ mod tests {
                 .contains("401 characters; the limit is 400 per bullet")
         );
         assert!(e.message.contains("`bullets: [...]`"));
+    }
+
+    #[test]
+    fn limit_for_path_covers_alias_and_stored_forms_at_and_over_the_limits() {
+        for p in [
+            "project/overview",
+            "project/overview.md",
+            " [[project/overview]] ",
+            "projects/app-1a2b3c4d/overview",
+            "projects/app-1a2b3c4d/overview.md",
+        ] {
+            assert_eq!(limit_for_path(p), MAX_OVERVIEW_BULLET_CHARS, "{p}");
+        }
+        for p in [
+            "project/testing",
+            "project/sub/overview",
+            "projects/app-1a2b3c4d/sub/overview",
+            "projects//overview",
+            "tools/overview",
+            "overview",
+            "MEMORY.md",
+        ] {
+            assert_eq!(limit_for_path(p), MAX_BULLET_CHARS, "{p}");
+        }
+        let r = Redactor::new(Vec::<String>::new());
+        let at = |n| "a".repeat(n);
+        assert!(validate_for_path("project/overview", &at(MAX_OVERVIEW_BULLET_CHARS), &r).is_ok());
+        let e = validate_for_path("project/overview", &at(MAX_OVERVIEW_BULLET_CHARS + 1), &r)
+            .unwrap_err();
+        assert!(e.message.contains("the limit is 1000 per bullet"), "{e}");
+        assert!(validate_for_path("project/testing", &at(MAX_BULLET_CHARS), &r).is_ok());
+        let e = validate_for_path("project/testing", &at(MAX_BULLET_CHARS + 1), &r).unwrap_err();
+        assert!(e.message.contains("the limit is 400 per bullet"), "{e}");
     }
 
     #[test]

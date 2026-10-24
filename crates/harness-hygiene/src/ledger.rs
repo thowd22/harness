@@ -9,6 +9,10 @@
 //! - **Bash changes.** Call [`Ledger::begin_command`] before a bash command
 //!   and [`Ledger::end_command`] after it. The worktree is snapshotted on
 //!   both sides and every created, modified or deleted file is recorded.
+//!   Well-known build and test output (`__pycache__/`, `target/`, ...)
+//!   that the user's git does not track is recorded as *generated* ([`LedgerEntry::generated`], see
+//!   [`crate::artifacts`]); the entries [`Ledger::end_command`] returns say
+//!   which.
 //!
 //! Every entry is also emitted as an [`EventKind::FileChanged`] event on its
 //! node, so the ledger is part of the run's event log. A ledger can be
@@ -25,6 +29,7 @@ use harness_events::schema::{EventKind, FileChangeKind, NodeId, Payload, RunEven
 use harness_tools::tool::{ChangeKind, FileChange};
 use serde::Serialize;
 
+use crate::artifacts::Artifacts;
 use crate::events::{EventSink, NoEvents, draft};
 use crate::snapshot::{Snapshot, SnapshotOptions, relative};
 
@@ -76,6 +81,9 @@ pub struct LedgerEntry {
     pub after_hash: Option<String>,
     /// Unified diff, when known.
     pub diff: Option<String>,
+    /// A generated build or test artifact written by a bash command
+    /// ([`crate::artifacts`]): listed, but not a change to verify.
+    pub generated: bool,
 }
 
 /// The overall effect on one path over several entries.
@@ -95,6 +103,8 @@ pub struct NetChange {
     pub after_hash: Option<String>,
     /// The entries' diffs, joined in order.
     pub diffs: Vec<String>,
+    /// Every entry for the path is a generated artifact.
+    pub generated: bool,
 }
 
 /// A worktree snapshot taken by [`Ledger::begin_command`].
@@ -113,6 +123,7 @@ struct Inner {
 pub struct Ledger {
     root: PathBuf,
     opts: SnapshotOptions,
+    artifacts: Artifacts,
     sink: Arc<dyn EventSink>,
     inner: Mutex<Inner>,
 }
@@ -132,6 +143,7 @@ impl Ledger {
         Self {
             root: harness_tools::workspace::normalize(&root.into()),
             opts: SnapshotOptions::default(),
+            artifacts: Artifacts::builtin(),
             sink: Arc::new(NoEvents),
             inner: Mutex::new(Inner::default()),
         }
@@ -177,6 +189,30 @@ impl Ledger {
         after_hash: Option<String>,
         diff: Option<String>,
     ) -> LedgerEntry {
+        self.record_entry(
+            node,
+            path,
+            kind,
+            source,
+            before_hash,
+            after_hash,
+            diff,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_entry(
+        &self,
+        node: Option<&NodeId>,
+        path: &Path,
+        kind: FileChangeKind,
+        source: ChangeSource,
+        before_hash: Option<String>,
+        after_hash: Option<String>,
+        diff: Option<String>,
+        generated: bool,
+    ) -> LedgerEntry {
         let path = self.relative(path);
         let entry = {
             let mut inner = self.lock();
@@ -189,6 +225,7 @@ impl Ledger {
                 before_hash,
                 after_hash,
                 diff,
+                generated,
             };
             inner.entries.push(entry.clone());
             entry
@@ -199,6 +236,7 @@ impl Ledger {
                 path: entry.path.clone(),
                 change: entry.kind,
                 diff: entry.diff.clone().map(Payload::Text),
+                generated: entry.generated,
             },
         ));
         entry
@@ -231,7 +269,9 @@ impl Ledger {
     }
 
     /// Snapshot the worktree after a bash command and record every file
-    /// it created, modified or deleted.
+    /// it created, modified or deleted. Changes to well-known artifacts
+    /// ([`crate::artifacts`]) that the user's git does not track are
+    /// recorded with `generated` set.
     pub fn end_command(
         &self,
         watch: CommandWatch,
@@ -241,11 +281,28 @@ impl Ledger {
         let after = Snapshot::take_with_cache(&self.root, &self.opts, Some(&watch.before))?;
         let changes = watch.before.diff(&after);
         self.lock().last_snapshot = Some(after);
+        // A path matching the built-in list is generated only if the
+        // user's git does not track it (a source directory named
+        // `target/`, a committed `coverage.xml`); one git call per command,
+        // and only when there are candidates.
+        let candidates: Vec<&str> = changes
+            .iter()
+            .filter(|c| self.artifacts.is_generated(&c.path))
+            .map(|c| c.path.as_str())
+            .collect();
+        let tracked = crate::artifacts::tracked_among(&self.root, &candidates);
+        let generated: Vec<bool> = changes
+            .iter()
+            .map(|c| self.artifacts.is_generated(&c.path) && !tracked.contains(&c.path))
+            .collect();
         Ok(changes
             .into_iter()
-            .map(|c| {
-                let diff = c.diff();
-                self.record(
+            .zip(generated)
+            .map(|(c, generated)| {
+                // Artifacts are rarely text worth reading; keep the event
+                // small.
+                let diff = if generated { None } else { c.diff() };
+                self.record_entry(
                     node,
                     Path::new(&c.path),
                     c.kind,
@@ -255,6 +312,7 @@ impl Ledger {
                     c.before.map(|f| f.hash),
                     c.after.map(|f| f.hash),
                     diff,
+                    generated,
                 )
             })
             .collect())
@@ -297,7 +355,13 @@ impl Ledger {
         {
             let mut inner = ledger.lock();
             for ev in events {
-                if let EventKind::FileChanged { path, change, diff } = &ev.kind {
+                if let EventKind::FileChanged {
+                    path,
+                    change,
+                    diff,
+                    generated,
+                } = &ev.kind
+                {
                     let seq = inner.entries.len() as u64;
                     inner.entries.push(LedgerEntry {
                         seq,
@@ -312,6 +376,7 @@ impl Ledger {
                             Payload::Json(v) => Some(v.to_string()),
                             Payload::Blob(_) => None,
                         }),
+                        generated: *generated,
                     });
                 }
             }
@@ -335,9 +400,11 @@ pub fn net_changes(entries: &[LedgerEntry]) -> Vec<NetChange> {
                     before_hash: e.before_hash.clone(),
                     after_hash: None,
                     diffs: Vec::new(),
+                    generated: true,
                 },
             )
         });
+        n.generated &= e.generated;
         let exists = e.kind != FileChangeKind::Deleted;
         n.kind = match (*existed, exists) {
             (false, _) => FileChangeKind::Created,
@@ -365,7 +432,8 @@ pub fn net_changes(entries: &[LedgerEntry]) -> Vec<NetChange> {
 }
 
 /// One line per net change for node detail: `+ path (write)`,
-/// `~ path (edit, bash)`, `- path (bash)`.
+/// `~ path (edit, bash)`, `- path (bash)`, `+ a/__pycache__/m.pyc (bash,
+/// generated)`.
 pub fn summary_lines(changes: &[NetChange]) -> Vec<String> {
     changes
         .iter()
@@ -376,7 +444,8 @@ pub fn summary_lines(changes: &[NetChange]) -> Vec<String> {
                 FileChangeKind::Deleted => '-',
             };
             let sources: Vec<&str> = c.sources.iter().map(ChangeSource::label).collect();
-            format!("{sign} {} ({})", c.path, sources.join(", "))
+            let generated = if c.generated { ", generated" } else { "" };
+            format!("{sign} {} ({}{generated})", c.path, sources.join(", "))
         })
         .collect()
 }

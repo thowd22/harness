@@ -116,6 +116,9 @@ pub struct Model {
     pub context_window: u32,
 }
 
+/// Longest a turn waits for a cache pre-warm still in flight.
+pub const PREWARM_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// One running session.
 pub struct Core {
     /// harness.ini.
@@ -164,6 +167,13 @@ pub struct Core {
     redactor: Arc<Redactor>,
     /// MCP servers and the tools agents select from them.
     mcp: crate::mcp::McpWiring,
+    /// The cache pre-warm in flight (`[experimental] cache_prewarm`).
+    prewarm_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Cancels pre-warms when the session ends.
+    prewarm_cancel: CancellationToken,
+    /// The node the next [`Core::turn`] runs on, allocated ahead so a
+    /// pre-warm before the first turn hangs under it.
+    next_turn_node: NodeId,
 }
 
 /// The background summary of the last turn ([`Core::spawn_summary`]).
@@ -211,8 +221,10 @@ pub async fn resolve_model(
             (provider, model, resolved.warnings.clone())
         }
     };
-    let scheduled: Arc<dyn Provider> =
-        Arc::new(ScheduledProvider::new(provider, scheduler.clone()));
+    // `harness bench` times calls here; a no-op otherwise.
+    let scheduled: Arc<dyn Provider> = harness_providers::timing::wrap(Arc::new(
+        ScheduledProvider::new(provider, scheduler.clone()),
+    ));
     Ok((
         Model {
             provider: scheduled,
@@ -244,8 +256,9 @@ pub(crate) fn resolver(
                 )
             }
         };
-        let scheduled: Arc<dyn Provider> =
-            Arc::new(ScheduledProvider::new(provider, scheduler.clone()));
+        let scheduled: Arc<dyn Provider> = harness_providers::timing::wrap(Arc::new(
+            ScheduledProvider::new(provider, scheduler.clone()),
+        ));
         Ok((scheduled, id))
     })
 }
@@ -324,6 +337,11 @@ impl Core {
         )
         .await?;
         warnings.extend(model_warnings);
+        if cfg.experimental.prewarm_connection {
+            // Overlaps the TLS handshake with the rest of the startup.
+            let provider = model.provider.clone();
+            tokio::spawn(async move { provider.prewarm().await });
+        }
 
         // Run log.
         let config_hash = harness_config::effective::config_hash(&cfg, Some(&catalog));
@@ -452,7 +470,7 @@ impl Core {
         .with_root(&cwd)
         .with_cost(cost_resolver(&cfg, fake.is_some()))
         .with_gates(agent_gates(gate.clone()));
-        let runtime = SubagentRuntime::new(
+        let mut runtime = SubagentRuntime::new(
             recorder.clone(),
             Arc::new(builder),
             SubagentLimits::from_config(&cfg),
@@ -461,6 +479,13 @@ impl Core {
         .with_board(board.clone())
         .with_extra_tools(Arc::new(mcp.toolbox.clone()))
         .with_labeler(labeler.clone());
+        let fan_out = cfg
+            .experimental
+            .stagger_subagents
+            .then(|| harness_agent::stagger::FanOut::new(cfg.experimental.cache_prewarm));
+        if let Some(gate) = &fan_out {
+            runtime = runtime.with_fan_out(gate.clone());
+        }
         // The agent's MCP tools are read now and fixed for the session.
         harness_agent::subagents::ExtraTools::prepare(&mcp.toolbox, &agent, &[]).await;
         warnings.extend(mcp.toolbox.take_warnings());
@@ -517,6 +542,7 @@ impl Core {
             max_usd: opts.budget_usd.or(agent.budget.usd).or(cfg.budget.run_usd),
         };
         config.max_fix_attempts = cfg.verify.max_fix_attempts;
+        config.early_tool_start = cfg.experimental.early_tool_start;
         let (context, mut hooks, meter) = hooks(
             &cfg,
             &data,
@@ -525,6 +551,10 @@ impl Core {
             &recorder,
             opts.budget_approver.clone(),
         );
+        // Fan-out pre-warms count against the session's budgets too.
+        if let Some(gate) = &fan_out {
+            gate.charge_to(meter.clone());
+        }
         hooks.push(Arc::new(harness_agent::todo::TodoNudge::new(
             board.clone(),
             cfg.general.todo_nudge_after,
@@ -534,6 +564,11 @@ impl Core {
         if let Some(n) = harness_agent::job_notices::JobNotices::session(&base_tools) {
             hooks.push(Arc::new(n));
         }
+        // Running jobs and long tool rounds ask for one-hour cache entries
+        // (`[provider.anthropic] cache_ttl_auto_1h`); requests are unchanged.
+        hooks.push(Arc::new(harness_agent::long_wait::LongWaitHook::new(
+            base_tools.jobs(),
+        )));
         let checkpoints = if opts.checkpoints {
             open_checkpoints(&data, &cwd, &mut warnings).await
         } else {
@@ -599,7 +634,79 @@ impl Core {
             meter,
             redactor: redactor.clone(),
             mcp,
+            prewarm_task: Mutex::new(None),
+            prewarm_cancel: CancellationToken::new(),
+            next_turn_node: NodeId::random(),
         })
+    }
+
+    /// Pre-warms the prompt cache for the next request in the background
+    /// (`[experimental] cache_prewarm`; nothing happens when it is off or
+    /// the provider has no pre-warm): the tools, system prompt and
+    /// conversation so far, recorded as a
+    /// [`harness_agent::prewarm::PREWARM_NODE`] node and charged to the
+    /// budgets. Interactive sessions call it at start and resume (while
+    /// the user types); [`Core::compact`] calls it after compacting. The
+    /// next turn waits briefly for a pre-warm still in flight, so it reads
+    /// the entry instead of writing it a second time.
+    pub fn spawn_prewarm(&self, reason: &'static str) {
+        if !self.cfg.experimental.cache_prewarm || self.meter.check().exceeded.is_some() {
+            return;
+        }
+        let request = harness_agent::prewarm::prewarm_request(
+            &self.config,
+            &self.conversation,
+            self.tool_specs(),
+        );
+        if !self.model.provider.can_prewarm_cache(&request) {
+            return;
+        }
+        let provider = self.model.provider.clone();
+        let recorder = self.recorder.clone();
+        let cost = self.model.cost.clone();
+        let meter = self.meter.clone();
+        let cancel = self.prewarm_cancel.child_token();
+        let parent = self.prewarm_parent();
+        let handle = tokio::spawn(async move {
+            let done = harness_agent::prewarm::prewarm(
+                provider.as_ref(),
+                request,
+                &recorder,
+                &parent,
+                reason,
+                cost.as_ref(),
+                &cancel,
+            )
+            .await;
+            if let Some(Ok(report)) = done
+                && let Some(usd) = report.cost_usd
+            {
+                meter.charge(usd);
+            }
+        });
+        *self.prewarm_task.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
+    }
+
+    /// The parent of a pre-warm node: the latest turn's node, or before
+    /// the first turn the node that turn will run on.
+    fn prewarm_parent(&self) -> NodeId {
+        self.memory_node
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .unwrap_or_else(|| self.next_turn_node.clone())
+    }
+
+    /// Waits up to [`PREWARM_WAIT`] for a pre-warm in flight.
+    async fn settle_prewarm(&self) {
+        let task = self
+            .prewarm_task
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(t) = task {
+            let _ = tokio::time::timeout(PREWARM_WAIT, t).await;
+        }
     }
 
     /// The session's MCP servers (the TUI's `/mcp` panel, prompts and
@@ -738,9 +845,10 @@ impl Core {
     /// Runs one user turn on a new node and saves the session.
     pub async fn turn(&mut self, prompt: String, cancel: &CancellationToken) -> LoopOutcome {
         self.settle_summary(None).await;
+        self.settle_prewarm().await;
         // Pick up MCP tool-list changes announced since the last turn.
         self.mcp.toolbox.refresh().await;
-        let node = NodeId::random();
+        let node = std::mem::replace(&mut self.next_turn_node, NodeId::random());
         self.checkpoint(&node).await;
         *self.memory_node.lock().unwrap_or_else(|e| e.into_inner()) = Some(node.clone());
         let place = AgentPlace {
@@ -774,7 +882,7 @@ impl Core {
             agent_loop = agent_loop.with_verifier(v.clone());
         }
         for h in &self.hooks {
-            agent_loop = agent_loop.with_hook(h.clone());
+            agent_loop = agent_loop.with_hook(harness_agent::timing::wrap_hook(h.clone()));
         }
         self.conversation.push_user(prompt);
         let outcome = agent_loop.run(&mut self.conversation, cancel).await;
@@ -855,7 +963,8 @@ impl Core {
         focus: Option<&str>,
     ) -> Result<harness_agent::compaction::CompactionReport, String> {
         let node = NodeId::random();
-        self.context
+        let report = self
+            .context
             .compact_now(
                 &mut self.conversation,
                 &self.recorder,
@@ -864,7 +973,10 @@ impl Core {
                 &CancellationToken::new(),
             )
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        // The user types the next prompt now: write the compacted prefix.
+        self.spawn_prewarm("compaction");
+        Ok(report)
     }
 
     /// Switches the model for the next turns.
@@ -890,6 +1002,11 @@ impl Core {
     /// Records `run_finished` (status from the last turn) and closes the log.
     pub async fn finish(mut self) -> Result<(), String> {
         self.settle_summary(None).await;
+        // A background compaction summary still pending ends (recorded)
+        // before the run log closes.
+        self.context.stop_background().await;
+        self.prewarm_cancel.cancel();
+        self.settle_prewarm().await;
         self.mcp.shutdown().await;
         // Background jobs belong to the session: stop them (whole process
         // groups) before the run log closes, so their end is recorded.

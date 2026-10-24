@@ -649,3 +649,123 @@ async fn mcp_calls_are_decided_as_server_and_tool() {
         ]
     );
 }
+
+/// Denies everything and counts the prompts it was shown.
+#[derive(Default)]
+struct CountingDenyUi(AtomicUsize);
+
+#[async_trait]
+impl harness_policy::approvals::ApprovalUi for CountingDenyUi {
+    async fn ask(
+        &self,
+        prompt: harness_policy::approvals::ApprovalPrompt,
+    ) -> Vec<(String, harness_policy::approvals::ApprovalAnswer)> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        DenyUi.ask(prompt).await
+    }
+}
+
+/// Runs read / protected read / bash through a policy gate in `Ask` mode,
+/// starting what may start early when `early`. Returns the outcomes, the
+/// prompts shown, the `policy_decision` events and the ids started early.
+async fn policy_batch(early: bool) -> (Vec<(bool, String)>, usize, Vec<Value>, Vec<String>) {
+    use harness_events::redact::Redactor;
+    use harness_events::store::{RecorderOptions, read_run};
+    use harness_policy::rules::PolicyConfig;
+
+    let dir = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    std::fs::create_dir_all(root.join("secrets")).unwrap();
+    std::fs::write(root.join("notes.md"), "hello notes\n").unwrap();
+    std::fs::write(root.join("secrets/key.rs"), "k = 1\n").unwrap();
+    let rec = RunRecorder::create(
+        data.path(),
+        harness_events::schema::RunId::new(),
+        Arc::new(Redactor::default()),
+        RecorderOptions::default(),
+    )
+    .await
+    .unwrap();
+    let tools = ToolSet::standard(StandardTools {
+        workspace: Arc::new(harness_tools::local::LocalWorkspace::new(&root)),
+        exec: Arc::new(harness_tools::local::LocalExec::new()),
+        cwd: root.clone(),
+        config: ToolsConfig::default(),
+        scrubber: EnvScrubber::new(Vec::new(), Vec::new()),
+        spill: Arc::new(harness_tools::spill::MemoryBlobSink::new()),
+    });
+    let config = PolicyConfig {
+        paths_protected: vec!["secrets/**".into()],
+        ..Default::default()
+    };
+    let engine = PolicyEngine::new(&config, &root).unwrap();
+    let ui = Arc::new(CountingDenyUi::default());
+    let broker = ApprovalBroker::new(engine.grants().clone(), ui.clone(), &root);
+    let gate =
+        Arc::new(PolicyGate::new(engine, Arc::new(broker), Mode::Ask).with_recorder(rec.clone()));
+    let node = NodeId::from("agent");
+    let d = Dispatcher::new(tools.clone(), gate.clone());
+    let blocks = vec![
+        use_block("r1", "read", json!({"path": "notes.md"})),
+        use_block("r2", "read", json!({"path": "secrets/key.rs"})),
+        use_block("b1", "bash", json!({"command": "echo hi"})),
+    ];
+    // The pre-check neither records nor prompts.
+    let gc = |tool: &str, args: Value| GateCall {
+        call_id: "x".into(),
+        tool: tool.into(),
+        args,
+    };
+    assert!(gate.auto_allows(Some(&node), &gc("read", json!({"path": "notes.md"}))));
+    assert!(!gate.auto_allows(Some(&node), &gc("read", json!({"path": "secrets/key.rs"}))));
+    assert!(!gate.auto_allows(Some(&node), &gc("bash", json!({"command": "echo hi"}))));
+    assert!(
+        !CappedGate::new(gate.clone(), Mode::Ask)
+            .auto_allows(Some(&node), &gc("bash", json!({"command": "echo hi"})))
+    );
+    assert_eq!(ui.0.load(Ordering::SeqCst), 0);
+
+    let cancel = CancellationToken::new();
+    let mut started = EarlyCalls::default();
+    if early {
+        for b in &blocks {
+            if !d.start_early(Some(&node), b, &mut started, &cancel) {
+                break;
+            }
+        }
+    }
+    let ids = started.ids().iter().map(|s| s.to_string()).collect();
+    let mut msg = message(blocks);
+    let calls = prepare_calls(&mut msg, &tools);
+    let out = d
+        .run_with_early(Some(&node), &calls, &cancel, &nop, started)
+        .await;
+    rec.finish().await.unwrap();
+    let decisions = read_run(rec.dir())
+        .unwrap()
+        .events
+        .into_iter()
+        .map(|e| serde_json::to_value(&e.kind).unwrap())
+        .filter(|v| v["type"] == "policy_decision")
+        .collect();
+    let out = out.iter().map(|o| (o.is_error, o.text())).collect();
+    (out, ui.0.load(Ordering::SeqCst), decisions, ids)
+}
+
+#[tokio::test]
+async fn early_start_keeps_policy_prompts_and_decisions() {
+    let (off, off_prompts, off_decisions, off_ids) = policy_batch(false).await;
+    let (on, on_prompts, on_decisions, on_ids) = policy_batch(true).await;
+    assert!(off_ids.is_empty());
+    // Only the allowed read starts early; the protected read and bash wait
+    // for the review (and its prompt).
+    assert_eq!(on_ids, ["r1"]);
+    assert_eq!(on, off);
+    assert!(!on[0].0 && on[0].1.contains("hello notes"), "{on:?}");
+    assert!(on[1].0 && on[2].0, "denied by the user: {on:?}");
+    assert_eq!(on_prompts, off_prompts);
+    assert_eq!(on_prompts, 1, "one prompt for the batch");
+    assert_eq!(on_decisions, off_decisions);
+    assert_eq!(on_decisions.len(), 3);
+}

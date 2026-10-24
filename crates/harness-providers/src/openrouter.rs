@@ -24,7 +24,10 @@
 //! - App attribution: `app_name` is sent as `X-Title` (and as
 //!   `HTTP-Referer` when it is an `http(s)://` URL).
 //! - [`OpenRouterProvider::check_agent_model`] consults the model catalog
-//!   and rejects models without tool support at agent load.
+//!   and rejects models without tool support at agent load. With
+//!   [`OpenRouterProvider::with_model_cache`] it reads the on-disk model
+//!   list first, so a session start with a fresh cached list makes no
+//!   catalog request (see the method for the rules).
 
 pub mod models;
 pub mod request;
@@ -32,12 +35,15 @@ mod stream;
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, REFERER};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
+use crate::catalog::live::ListKind;
+use crate::catalog::{LiveList, ModelListCache};
 use crate::http::{HttpClient, HttpConfig, error_message};
 use crate::model::{Capabilities, ChatRequest};
 use crate::openai::transport;
@@ -75,6 +81,56 @@ pub struct OpenRouterOptions {
     /// `cache_ttl`: lifetime of the prompt-cache entries written for
     /// Anthropic models. `None` means the 5-minute default.
     pub cache_ttl: Option<CacheTtl>,
+    /// `session_id` sent with every request (`[experimental]
+    /// openrouter_session_id`): OpenRouter routes requests with the same
+    /// id to the same upstream (sticky routing) from the first request on.
+    /// `None` (the default) sends none.
+    pub session_id: Option<String>,
+    /// `reasoning_exclude`: ask OpenRouter to leave reasoning out of the
+    /// response (`reasoning.exclude: true`). The model still reasons (and
+    /// is billed for it); only the reasoning text and details are not
+    /// returned. Default false.
+    pub reasoning_exclude: bool,
+    /// `service_tier`: sent as the top-level `service_tier` field.
+    /// `None` (the default) sends none, so OpenRouter routes to standard
+    /// endpoints (or, for a `:nitro` model, to the fastest endpoint,
+    /// priority tiers included).
+    pub service_tier: Option<ServiceTier>,
+}
+
+/// OpenRouter service tier (`service_tier` in the request body).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceTier {
+    /// `"default"`: standard endpoints only.
+    Default,
+    /// `"fast"`: the priority tier (Anthropic fast mode on Claude Opus) at
+    /// its higher price where the model has one; standard endpoints at the
+    /// standard price otherwise.
+    Fast,
+}
+
+impl ServiceTier {
+    /// The request-body value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ServiceTier::Default => "default",
+            ServiceTier::Fast => "fast",
+        }
+    }
+}
+
+/// Model-id suffixes that only change how OpenRouter routes the request,
+/// not the model: `:nitro` sorts the endpoints by throughput (admitting
+/// priority tiers), `:floor` by price (admitting flex tiers).
+pub const ROUTING_VARIANTS: [&str; 2] = [":nitro", ":floor"];
+
+/// The base model id of a routing variant (`anthropic/claude-opus-5.5`
+/// for `anthropic/claude-opus-5.5:nitro`), or `None` for any other id.
+pub fn routing_base(model: &str) -> Option<&str> {
+    ROUTING_VARIANTS
+        .iter()
+        .find_map(|v| model.strip_suffix(v))
+        .filter(|base| !base.is_empty())
 }
 
 /// Prompt-cache lifetime requested on `cache_control` breakpoints.
@@ -118,13 +174,42 @@ pub const UNKNOWN_MODEL_CAPABILITIES: Capabilities = Capabilities {
     max_output_tokens: 0,
 };
 
+/// Where the loaded model catalog came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Source {
+    /// `GET /models` in this process (or [`OpenRouterProvider::set_models`]).
+    Live,
+    /// The on-disk model list; `fresh` while younger than the TTL.
+    Cached { fresh: bool },
+}
+
+/// The loaded model catalog.
+#[derive(Debug)]
+struct Loaded {
+    models: HashMap<String, ModelInfo>,
+    source: Source,
+}
+
+/// The on-disk model-list cache and its TTL.
+#[derive(Debug, Clone)]
+struct DiskCache {
+    cache: ModelListCache,
+    ttl: Duration,
+}
+
 /// The OpenRouter provider.
 #[derive(Debug, Clone)]
 pub struct OpenRouterProvider {
     client: HttpClient,
-    catalog_client: reqwest::Client,
     options: OpenRouterOptions,
-    catalog: Arc<RwLock<Option<HashMap<String, ModelInfo>>>>,
+    catalog: Arc<RwLock<Option<Loaded>>>,
+    disk: Option<DiskCache>,
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 impl OpenRouterProvider {
@@ -141,19 +226,21 @@ impl OpenRouterProvider {
             .extend(transport::bearer_headers(api_key)?);
         http.default_headers
             .extend(attribution_headers(options.app_name.as_deref()));
-        let catalog_client = reqwest::Client::builder()
-            .connect_timeout(http.connect_timeout)
-            .timeout(http.request_timeout)
-            .default_headers(http.default_headers.clone())
-            .user_agent(concat!("harness/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|e| ProviderError::Other(format!("building HTTP client: {e}")))?;
         Ok(Self {
             client: HttpClient::new(http)?,
-            catalog_client,
             options,
             catalog: Arc::default(),
+            disk: None,
         })
+    }
+
+    /// Uses `cache` (usually `<data_dir>/model-lists`, shared with the
+    /// `/model` catalog) for [`OpenRouterProvider::check_agent_model`]: a
+    /// cached list is used while younger than `ttl` (`[general]
+    /// model_list_ttl`), and every catalog download is written back to it.
+    pub fn with_model_cache(mut self, cache: ModelListCache, ttl: Duration) -> Self {
+        self.disk = Some(DiskCache { cache, ttl });
+        self
     }
 
     /// A provider with default transport settings. `base_url` defaults to
@@ -182,34 +269,94 @@ impl OpenRouterProvider {
 
     /// Replaces the cached model catalog (for tests or offline use).
     pub fn set_models(&self, models: impl IntoIterator<Item = ModelInfo>) {
-        let map = models.into_iter().map(|m| (m.id.clone(), m)).collect();
-        *self.catalog.write().unwrap_or_else(|e| e.into_inner()) = Some(map);
+        self.install(models, Source::Live);
     }
 
-    /// Catalog entry for `model`, if the catalog is loaded and lists it.
-    pub fn model_info(&self, model: &str) -> Option<ModelInfo> {
+    fn install(&self, models: impl IntoIterator<Item = ModelInfo>, source: Source) {
+        let models = models.into_iter().map(|m| (m.id.clone(), m)).collect();
+        *self.catalog.write().unwrap_or_else(|e| e.into_inner()) = Some(Loaded { models, source });
+    }
+
+    fn source(&self) -> Option<Source> {
         self.catalog
             .read()
             .unwrap_or_else(|e| e.into_inner())
-            .as_ref()?
+            .as_ref()
+            .map(|l| l.source)
+    }
+
+    /// Catalog entry for `model`, if the catalog is loaded and lists it.
+    /// A routing variant the catalog does not list itself (`:nitro`,
+    /// `:floor`, see [`routing_base`]) resolves to its base model's entry.
+    pub fn model_info(&self, model: &str) -> Option<ModelInfo> {
+        let guard = self.catalog.read().unwrap_or_else(|e| e.into_inner());
+        let models = &guard.as_ref()?.models;
+        models
             .get(model)
+            .or_else(|| routing_base(model).and_then(|base| models.get(base)))
             .cloned()
     }
 
-    /// Fetches `GET /models` and caches it. Returns the number of models.
+    /// Loads the on-disk list into the catalog when one exists for this
+    /// base URL. Returns whether it did.
+    fn load_from_disk(&self) -> bool {
+        let Some(disk) = &self.disk else {
+            return false;
+        };
+        let base = self.client.config().base_url.trim_end_matches('/');
+        let Some(list) = disk
+            .cache
+            .load(PROVIDER_NAME)
+            .filter(|l| l.base_url.trim_end_matches('/') == base)
+        else {
+            return false;
+        };
+        let fresh = list.is_fresh(now_secs(), disk.ttl, &list.base_url);
+        self.install(
+            list.models.iter().map(ModelInfo::from_live),
+            Source::Cached { fresh },
+        );
+        true
+    }
+
+    /// Writes a downloaded catalog body to the on-disk cache, if any.
+    fn store_to_disk(&self, body: &Value) {
+        let Some(disk) = &self.disk else {
+            return;
+        };
+        let models = match crate::catalog::live::parse(ListKind::OpenRouter, body) {
+            Ok(page) => page.models,
+            Err(e) => {
+                tracing::debug!(error = %e, "openrouter model list not cached");
+                return;
+            }
+        };
+        let base = self.client.config().base_url.clone();
+        let list = LiveList::new(PROVIDER_NAME, base, now_secs(), models);
+        if let Err(e) = disk.cache.store(&list) {
+            tracing::debug!(error = %e, "writing the openrouter model list cache failed");
+        }
+    }
+
+    /// Refreshes the catalog in the background (when a tokio runtime is
+    /// running); the provider and its clones see the new list when it lands.
+    fn spawn_refresh(&self) {
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let me = self.clone();
+        rt.spawn(async move {
+            if let Err(e) = me.refresh_models().await {
+                tracing::debug!(error = %e, "background openrouter catalog refresh failed");
+            }
+        });
+    }
+
+    /// Fetches `GET /models` and caches it (in memory, and on disk with
+    /// [`OpenRouterProvider::with_model_cache`]). Returns the number of
+    /// models.
     pub async fn refresh_models(&self) -> Result<usize, ProviderError> {
-        let url = self.client.url(MODELS_PATH);
-        let response = self
-            .catalog_client
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| ProviderError::Connection(e.to_string()))?;
-        let status = response.status().as_u16();
-        let text = response
-            .text()
-            .await
-            .map_err(|e| ProviderError::Connection(e.to_string()))?;
+        let (status, text) = self.client.get_text(MODELS_PATH).await?;
         if !(200..300).contains(&status) {
             return Err(ProviderError::from_status(
                 status,
@@ -222,24 +369,44 @@ impl OpenRouterProvider {
         let models = models::parse_catalog(&body)?;
         let n = models.len();
         self.set_models(models);
+        self.store_to_disk(&body);
         Ok(n)
     }
 
-    /// Validates `model` when an agent is loaded: fetches the catalog if it
-    /// is not cached yet, fails for unknown models, and fails with a clear
-    /// message when `needs_tools` is set but the model cannot call tools.
+    /// Validates `model` when an agent is loaded: fails for unknown models,
+    /// and fails with a clear message when `needs_tools` is set but the
+    /// model cannot call tools.
+    ///
+    /// The catalog is loaded once per provider. With
+    /// [`OpenRouterProvider::with_model_cache`], the on-disk list is tried
+    /// first: when it lists `model` as usable, the check passes without a
+    /// request (a stale list is then refreshed in the background). When
+    /// the list lacks the model or says it cannot call tools, the live
+    /// catalog decides; if that download fails, the cached answer stands.
+    /// Without a usable cached list the catalog is downloaded first.
     pub async fn check_agent_model(
         &self,
         model: &str,
         needs_tools: bool,
     ) -> Result<Capabilities, ProviderError> {
-        let loaded = self
-            .catalog
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_some();
-        if !loaded {
+        if self.source().is_none() && !self.load_from_disk() {
             self.refresh_models().await?;
+        }
+        if let Some(Source::Cached { fresh }) = self.source() {
+            let usable = self
+                .model_info(model)
+                .filter(|info| models::check_tools(info, needs_tools).is_ok());
+            if let Some(info) = usable {
+                if !fresh {
+                    self.spawn_refresh();
+                }
+                return Ok(info.capabilities());
+            }
+            if let Err(e) = self.refresh_models().await
+                && self.model_info(model).is_none()
+            {
+                return Err(e);
+            }
         }
         let info = self.model_info(model).ok_or_else(|| {
             ProviderError::InvalidRequest(format!(
@@ -259,6 +426,13 @@ impl Provider for OpenRouterProvider {
 
     fn request_body(&self, request: &ChatRequest) -> Option<Value> {
         Some(OpenRouterProvider::request_body(self, request))
+    }
+
+    async fn prewarm(&self) {
+        // `GET /key` is authenticated, small and free.
+        if let Err(e) = self.client.warm("key").await {
+            tracing::debug!(error = %e, "openrouter connection pre-warm failed");
+        }
     }
 
     fn capabilities(&self, model: &str) -> Capabilities {
@@ -307,6 +481,9 @@ mod tests {
             provider_order: vec!["anthropic".into(), "openai".into()],
             allow_fallbacks: Some(true),
             cache_ttl: None,
+            session_id: None,
+            reasoning_exclude: false,
+            service_tier: None,
         }
     }
 
@@ -633,6 +810,158 @@ mod tests {
         assert!(err.to_string().contains("does not support tool calling"));
         assert!(!p.capabilities("b/no-tools").tools);
         assert_eq!(p.capabilities("zzz"), UNKNOWN_MODEL_CAPABILITIES);
+    }
+
+    #[tokio::test]
+    async fn routing_variants_resolve_to_their_base_model() {
+        let catalog = json!({"data": [
+            {"id": "a/tools", "context_length": 100000, "supported_parameters": ["tools"]},
+            {"id": "a/tools:batch", "context_length": 5000, "supported_parameters": ["tools"]},
+            {"id": "b/no-tools", "context_length": 8000, "supported_parameters": ["temperature"]}
+        ]});
+        let server = MockServer::start(vec![Canned::json(200, catalog.to_string())]).await;
+        let p = provider(&server.base_url);
+        for id in ["a/tools:nitro", "a/tools:floor"] {
+            let caps = p.check_agent_model(id, true).await.unwrap();
+            assert_eq!(caps.context_window, 100_000, "{id}");
+        }
+        // The base model's limits still apply to the variant.
+        let err = p
+            .check_agent_model("b/no-tools:nitro", true)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("does not support tool calling"));
+        // A variant the catalog lists itself keeps its own entry; other
+        // suffixes are not stripped.
+        assert_eq!(p.capabilities("a/tools:batch").context_window, 5000);
+        assert!(p.check_agent_model("a/tools:online", true).await.is_err());
+        assert!(p.check_agent_model(":nitro", true).await.is_err());
+        assert_eq!(routing_base("x/y:nitro"), Some("x/y"));
+        assert_eq!(routing_base("x/y"), None);
+    }
+
+    fn catalog_body() -> serde_json::Value {
+        json!({"data": [
+            {"id": "a/tools", "context_length": 100000, "supported_parameters": ["tools"]},
+            {"id": "b/no-tools", "context_length": 8000, "supported_parameters": ["temperature"]}
+        ]})
+    }
+
+    /// A cache in `dir` holding `catalog_body()` as fetched `age` seconds
+    /// ago from `base`.
+    fn seeded_cache(dir: &std::path::Path, base: &str, age: u64) -> ModelListCache {
+        let cache = ModelListCache::new(dir);
+        let page = crate::catalog::live::parse(ListKind::OpenRouter, &catalog_body()).unwrap();
+        let list = LiveList::new(PROVIDER_NAME, base, now_secs() - age, page.models);
+        cache.store(&list).unwrap();
+        cache
+    }
+
+    const TTL: Duration = Duration::from_secs(3600);
+
+    #[test]
+    fn cached_entries_match_the_live_catalog() {
+        let page = crate::catalog::live::parse(ListKind::OpenRouter, &catalog_body()).unwrap();
+        let live = models::parse_catalog(&catalog_body()).unwrap();
+        let cached: Vec<ModelInfo> = page.models.iter().map(ModelInfo::from_live).collect();
+        assert_eq!(cached, live);
+    }
+
+    #[tokio::test]
+    async fn fresh_cached_catalog_skips_the_download_and_still_rejects_tool_less_models() {
+        // The server is never reached for a usable model.
+        let server = MockServer::start(vec![Canned::json(200, catalog_body().to_string())]).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = seeded_cache(tmp.path(), &server.base_url, 10);
+        let p = provider(&server.base_url).with_model_cache(cache.clone(), TTL);
+        let caps = p.check_agent_model("a/tools", true).await.unwrap();
+        assert!(caps.tools);
+        assert_eq!(caps.context_window, 100_000);
+        assert!(p.check_agent_model("b/no-tools", false).await.is_ok());
+        assert!(server.requests().is_empty(), "no catalog request");
+        // A cached "no tools" is confirmed by the live catalog: rejected.
+        let err = p.check_agent_model("b/no-tools", true).await.unwrap_err();
+        assert!(err.to_string().contains("does not support tool calling"));
+        assert_eq!(server.requests().len(), 1);
+        // stream() refuses tools for it too, from the loaded catalog.
+        let mut r = request();
+        r.model = "b/no-tools".into();
+        let err = p.stream(r, CancellationToken::new()).await.err().unwrap();
+        assert!(err.to_string().contains("does not support tool calling"));
+    }
+
+    #[tokio::test]
+    async fn cached_rejection_stands_offline_and_unknown_models_are_fetched() {
+        // Nothing listens here: every download fails.
+        let dead = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            format!("http://{}/v1", l.local_addr().unwrap())
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = seeded_cache(tmp.path(), &dead, 10);
+        let p = provider(&dead).with_model_cache(cache, TTL);
+        let err = p.check_agent_model("b/no-tools", true).await.unwrap_err();
+        assert!(
+            err.to_string().contains("does not support tool calling"),
+            "{err}"
+        );
+        let err = p.check_agent_model("c/unknown", false).await.unwrap_err();
+        assert!(matches!(err, ProviderError::Connection(_)), "{err:?}");
+
+        // A model the cached list lacks is looked up live.
+        let mut newer = catalog_body();
+        newer["data"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id": "c/new", "supported_parameters": ["tools"]}));
+        let server = MockServer::start(vec![Canned::json(200, newer.to_string())]).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = seeded_cache(tmp.path(), &server.base_url, 10);
+        let p = provider(&server.base_url).with_model_cache(cache, TTL);
+        assert!(p.check_agent_model("c/new", true).await.unwrap().tools);
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn stale_or_foreign_cache_is_refreshed_and_downloads_are_cached() {
+        let server = MockServer::start(vec![
+            Canned::json(200, catalog_body().to_string()),
+            Canned::json(200, catalog_body().to_string()),
+        ])
+        .await;
+        let tmp = tempfile::tempdir().unwrap();
+        // Stale: used at once, refreshed in the background.
+        let cache = seeded_cache(tmp.path(), &server.base_url, 7200);
+        let before = cache.load(PROVIDER_NAME).unwrap().fetched_at;
+        let p = provider(&server.base_url).with_model_cache(cache.clone(), TTL);
+        assert!(p.check_agent_model("a/tools", true).await.is_ok());
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while cache.load(PROVIDER_NAME).unwrap().fetched_at == before {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no background refresh"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(server.requests().len(), 1);
+        assert!(
+            cache
+                .load(PROVIDER_NAME)
+                .unwrap()
+                .is_fresh(now_secs(), TTL, &server.base_url)
+        );
+
+        // A list from another base URL is ignored: downloaded and replaced.
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = seeded_cache(tmp.path(), "http://elsewhere/v1", 10);
+        let p = provider(&server.base_url).with_model_cache(cache.clone(), TTL);
+        assert!(p.check_agent_model("a/tools", true).await.is_ok());
+        assert_eq!(server.requests().len(), 2);
+        assert_eq!(cache.load(PROVIDER_NAME).unwrap().base_url, server.base_url);
+        // The next provider (the next session) needs no download.
+        let p = provider(&server.base_url).with_model_cache(cache, TTL);
+        assert!(p.check_agent_model("a/tools", true).await.is_ok());
+        assert_eq!(server.requests().len(), 2);
     }
 
     #[tokio::test]

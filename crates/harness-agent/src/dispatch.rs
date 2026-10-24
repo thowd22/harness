@@ -15,6 +15,15 @@
 //!
 //! Every call is raced against the cancellation token. Dropping a tool's
 //! future cancels it (the bash tool kills its process group on drop).
+//!
+//! With `[experimental] early_tool_start`, the agent loop starts read-only
+//! calls the gate allows without asking ([`ToolGate::auto_allows`]) while
+//! the model is still streaming ([`Dispatcher::start_early`]); the run then
+//! awaits those tasks in place of running the calls
+//! ([`Dispatcher::run_with_early`]). Tool events of an early call are held
+//! back until then, so results and the event log are the same as without
+//! it; a call whose final arguments, plan or position differ, or that the
+//! gate does not allow, is discarded and handled as usual.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -46,7 +55,7 @@ use harness_tools::spill::{BlobSink, Spiller};
 use harness_tools::tool::{
     ChangeKind, ReadFilter, ToolContext, ToolError, ToolEvent, ToolEventSink, ToolOutput,
 };
-use harness_tools::tracker::ReadTracker;
+use harness_tools::tracker::{ReadTracker, StagedReads};
 use harness_tools::workspace::Workspace;
 use harness_tools::write::{self, WriteTool};
 use serde_json::Value;
@@ -563,6 +572,15 @@ pub trait ToolGate: Send + Sync {
     fn read_filter(&self) -> Option<ReadFilter> {
         None
     }
+
+    /// True when [`ToolGate::review`] would allow `call` right now without
+    /// asking anyone. Must not record or prompt: it decides whether a
+    /// read-only call may start before the message ends
+    /// ([`Dispatcher::start_early`]). The default `false` never starts
+    /// calls early.
+    fn auto_allows(&self, _node: Option<&NodeId>, _call: &GateCall) -> bool {
+        false
+    }
 }
 
 /// A gate that allows everything (tests, trusted automation).
@@ -573,6 +591,10 @@ pub struct AllowAll;
 impl ToolGate for AllowAll {
     async fn review(&self, _node: Option<&NodeId>, calls: &[GateCall]) -> Vec<GateDecision> {
         vec![GateDecision::Allow; calls.len()]
+    }
+
+    fn auto_allows(&self, _node: Option<&NodeId>, _call: &GateCall) -> bool {
+        true
     }
 }
 
@@ -691,6 +713,11 @@ impl ToolGate for PolicyGate {
         let cwd = (self.cwd)();
         Some(Arc::new(move |p: &Path| !engine.read_protected(p, &cwd)))
     }
+
+    fn auto_allows(&self, _node: Option<&NodeId>, call: &GateCall) -> bool {
+        let mode = *self.mode.lock().unwrap_or_else(|e| e.into_inner());
+        self.allows_in(call, mode)
+    }
 }
 
 /// A [`PolicyGate`] whose mode never gets looser than `cap` (an agent's
@@ -720,9 +747,24 @@ impl ToolGate for CappedGate {
     fn read_filter(&self) -> Option<ReadFilter> {
         self.gate.read_filter()
     }
+
+    fn auto_allows(&self, _node: Option<&NodeId>, call: &GateCall) -> bool {
+        let session = *self.gate.mode.lock().unwrap_or_else(|e| e.into_inner());
+        self.gate.allows_in(call, session.min(self.cap))
+    }
 }
 
 impl PolicyGate {
+    /// True when `call` gets an `allow` verdict in `mode` (no prompt, no
+    /// `policy_decision` event, nothing passed to the decision sink).
+    pub fn allows_in(&self, call: &GateCall, mode: Mode) -> bool {
+        let action = Action::from_tool_call(&call.tool, &call.args);
+        let verdict = self
+            .staging
+            .decide(&self.engine, &action, mode, &(self.cwd)(), &NoDecisions);
+        verdict.decision == Decision::Allow
+    }
+
     /// Reviews `calls` as [`ToolGate::review`] does, in `mode`.
     pub async fn review_in(
         &self,
@@ -793,6 +835,10 @@ pub struct CallOutcome {
     pub duration_ms: u64,
     /// True when the call was cancelled before it finished.
     pub cancelled: bool,
+    /// Whether the call changed files that count, when the tool reported it
+    /// with [`ToolEvent::WorktreeChanges`] (`None`: not reported; a
+    /// successful mutating call is then assumed to have changed something).
+    pub changed: Option<bool>,
 }
 
 impl CallOutcome {
@@ -807,6 +853,7 @@ impl CallOutcome {
             is_error: true,
             duration_ms: 0,
             cancelled: false,
+            changed: None,
         }
     }
 
@@ -838,11 +885,15 @@ pub const CANCELLED_RESULT: &str =
     "Cancelled by the user before the tool finished. Do not assume it took effect.";
 
 /// Runs prepared calls through the gate and the tools.
+#[derive(Clone)]
 pub struct Dispatcher {
     tools: ToolSet,
     gate: Arc<dyn ToolGate>,
     events: Arc<dyn ToolEventSink>,
     supports_images: bool,
+    /// Set only on the runner of an early call: read records are held
+    /// here until the early outcome is used.
+    staged_reads: Option<Arc<StagedReads>>,
 }
 
 impl Dispatcher {
@@ -853,6 +904,7 @@ impl Dispatcher {
             gate,
             events: Arc::new(harness_tools::tool::NoEvents),
             supports_images: false,
+            staged_reads: None,
         }
     }
 
@@ -873,6 +925,71 @@ impl Dispatcher {
         &self.tools
     }
 
+    /// Starts the complete `tool_use` block `block` now, before the
+    /// message ends, when it is a read-only built-in call (not MCP) with
+    /// valid arguments that the gate allows without asking
+    /// ([`ToolGate::auto_allows`]) and its id is new in `early`. The call
+    /// runs on its own task with its tool events held back; returns whether
+    /// it started. Only the leading read-only calls of a message may be
+    /// started (the caller stops at the first block that does not start),
+    /// because [`Dispatcher::run`] runs nothing before an earlier mutating
+    /// call.
+    pub fn start_early(
+        &self,
+        node: Option<&NodeId>,
+        block: &ContentBlock,
+        early: &mut EarlyCalls,
+        cancel: &CancellationToken,
+    ) -> bool {
+        let ContentBlock::ToolUse { id, name, .. } = block else {
+            return false;
+        };
+        if early.calls.iter().any(|e| e.call.id == *id) {
+            return false;
+        }
+        let Some(tool) = self.tools.get(name) else {
+            return false;
+        };
+        let mut single = Message {
+            role: harness_providers::model::Role::Assistant,
+            content: vec![block.clone()],
+        };
+        let Some(call) = prepare_calls(&mut single, &self.tools).pop() else {
+            return false;
+        };
+        if call.plan != (CallPlan::Run { read_only: true }) || tool.mcp_target(&call.args).is_some()
+        {
+            return false;
+        }
+        let gate_call = GateCall {
+            call_id: call.id.clone(),
+            tool: call.tool.clone(),
+            args: call.args.clone(),
+        };
+        if !self.gate.auto_allows(node, &gate_call) {
+            return false;
+        }
+        let held = Arc::new(HeldEvents::default());
+        let reads = Arc::new(StagedReads::new());
+        let mut runner = self.clone();
+        runner.events = held.clone();
+        runner.staged_reads = Some(reads.clone());
+        let token = cancel.child_token();
+        let task = {
+            let call = call.clone();
+            let token = token.clone();
+            tokio::spawn(async move { runner.run_one(&call, &token).await })
+        };
+        early.calls.push(EarlyCall {
+            call,
+            task: Some(task),
+            held,
+            reads,
+            cancel: token,
+        });
+        true
+    }
+
     /// Runs `calls` and returns one outcome per call, in order.
     ///
     /// Consecutive read-only calls run concurrently; every mutating call
@@ -885,6 +1002,24 @@ impl Dispatcher {
         calls: &[PreparedCall],
         cancel: &CancellationToken,
         on_done: &(dyn Fn(&PreparedCall, &CallOutcome) + Send + Sync),
+    ) -> Vec<CallOutcome> {
+        self.run_with_early(node, calls, cancel, on_done, EarlyCalls::default())
+            .await
+    }
+
+    /// [`Dispatcher::run`], awaiting the calls in `early` (started by
+    /// [`Dispatcher::start_early`]) in place of running them again. An early
+    /// call is used only when a call of the first batch (nothing mutating
+    /// allowed before it) has the same id, tool and arguments, is read-only
+    /// and allowed by the gate's review; its held-back tool events are sent
+    /// when it is awaited. Every other early call is cancelled.
+    pub async fn run_with_early(
+        &self,
+        node: Option<&NodeId>,
+        calls: &[PreparedCall],
+        cancel: &CancellationToken,
+        on_done: &(dyn Fn(&PreparedCall, &CallOutcome) + Send + Sync),
+        early: EarlyCalls,
     ) -> Vec<CallOutcome> {
         let runnable: Vec<usize> = calls
             .iter()
@@ -946,6 +1081,26 @@ impl Dispatcher {
                 on_done(c, o);
             }
         }
+        // Match the early calls to the first batch; the rest are dropped,
+        // which cancels them.
+        let mut early_for: Vec<Option<EarlyCall>> = (0..calls.len()).map(|_| None).collect();
+        if !early.calls.is_empty() {
+            let mut pool = early.calls;
+            for (i, c) in calls.iter().enumerate() {
+                if allowed[i] && !matches!(c.plan, CallPlan::Run { read_only: true }) {
+                    break;
+                }
+                if !allowed[i] {
+                    continue;
+                }
+                if let Some(pos) = pool.iter().position(|e| {
+                    e.call.id == c.id && e.call.tool == c.tool && e.call.args == c.args
+                }) {
+                    early_for[i] = Some(pool.swap_remove(pos));
+                }
+            }
+        }
+        let early_for = Mutex::new(early_for);
 
         let mut i = 0;
         while i < calls.len() {
@@ -967,8 +1122,16 @@ impl Dispatcher {
                 }
             }
             let last = *group.last().unwrap_or(&i);
+            let early_for = &early_for;
             let futures = group.iter().map(|&k| async move {
-                let o = self.run_one(&calls[k], cancel).await;
+                let started = early_for.lock().unwrap_or_else(|e| e.into_inner())[k].take();
+                let o = match started {
+                    Some(e) => match e.join(&self.events, cancel).await {
+                        Some(o) => o,
+                        None => self.run_one(&calls[k], cancel).await,
+                    },
+                    None => self.run_one(&calls[k], cancel).await,
+                };
                 on_done(&calls[k], &o);
                 (k, o)
             });
@@ -997,9 +1160,14 @@ impl Dispatcher {
                 ToolErrorMessage::unknown_tool(&call.tool, &self.tools.names()).to_string(),
             );
         };
+        let changes = Arc::new(CallChanges {
+            inner: self.events.clone(),
+            changed: Mutex::new(None),
+        });
         let mut ctx = ToolContext::new(call.id.clone())
             .with_images(self.supports_images)
-            .with_events(self.events.clone());
+            .with_events(changes.clone())
+            .with_staged_reads(self.staged_reads.clone());
         if matches!(call.tool.as_str(), grep::NAME | glob::NAME) {
             ctx = ctx.with_read_filter(self.gate.read_filter());
         }
@@ -1008,6 +1176,7 @@ impl Dispatcher {
             _ = cancel.cancelled() => None,
         };
         outcome.duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+        outcome.changed = *changes.changed.lock().unwrap_or_else(|e| e.into_inner());
         match result {
             None => outcome,
             Some(Ok(out)) => {
@@ -1027,6 +1196,136 @@ impl Dispatcher {
                 outcome
             }
         }
+    }
+}
+
+/// Read-only calls started before their message ended
+/// ([`Dispatcher::start_early`]). Dropping it cancels every call still in
+/// it (a stream error, retry or cancellation discards them).
+#[derive(Default)]
+pub struct EarlyCalls {
+    calls: Vec<EarlyCall>,
+}
+
+impl std::fmt::Debug for EarlyCalls {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list()
+            .entries(self.calls.iter().map(|e| &e.call.id))
+            .finish()
+    }
+}
+
+impl EarlyCalls {
+    /// Number of calls started.
+    pub fn len(&self) -> usize {
+        self.calls.len()
+    }
+
+    /// True when no call was started.
+    pub fn is_empty(&self) -> bool {
+        self.calls.is_empty()
+    }
+
+    /// Ids of the started calls, in start order.
+    pub fn ids(&self) -> Vec<&str> {
+        self.calls.iter().map(|e| e.call.id.as_str()).collect()
+    }
+
+    /// Cancels and forgets every started call.
+    pub fn clear(&mut self) {
+        self.calls.clear();
+    }
+}
+
+/// One call started early: its task, its held-back tool events and its
+/// held-back read records (applied to the session's read tracker only when
+/// the outcome is used, so a discarded early `read` never counts as seen by
+/// write and edit).
+struct EarlyCall {
+    call: PreparedCall,
+    task: Option<tokio::task::JoinHandle<CallOutcome>>,
+    held: Arc<HeldEvents>,
+    reads: Arc<StagedReads>,
+    cancel: CancellationToken,
+}
+
+impl EarlyCall {
+    /// Waits for the call, then applies its held-back read records and sends
+    /// its held-back events to `events`.
+    /// `None` when the task failed (panicked): the caller runs the call
+    /// again. On cancellation, a cancelled outcome.
+    async fn join(
+        mut self,
+        events: &Arc<dyn ToolEventSink>,
+        cancel: &CancellationToken,
+    ) -> Option<CallOutcome> {
+        let task = self.task.as_mut()?;
+        let result = tokio::select! {
+            r = task => Some(r),
+            _ = cancel.cancelled() => None,
+        };
+        self.task = None;
+        match result {
+            None => {
+                let mut o = CallOutcome::error(&self.call, CANCELLED_RESULT);
+                o.cancelled = true;
+                Some(o)
+            }
+            Some(Err(e)) => {
+                tracing::warn!(target: "harness::tools", call = %self.call.id, error = %e, "early tool call failed; running it again");
+                None
+            }
+            Some(Ok(outcome)) => {
+                self.reads.commit();
+                let held = std::mem::take(
+                    &mut *self.held.events.lock().unwrap_or_else(|e| e.into_inner()),
+                );
+                for (call_id, event) in held {
+                    events.emit(&call_id, event);
+                }
+                Some(outcome)
+            }
+        }
+    }
+}
+
+impl Drop for EarlyCall {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+/// Collects an early call's tool events until the call is awaited.
+#[derive(Default)]
+struct HeldEvents {
+    events: Mutex<Vec<(String, ToolEvent)>>,
+}
+
+impl ToolEventSink for HeldEvents {
+    fn emit(&self, call_id: &str, event: ToolEvent) {
+        self.events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((call_id.to_owned(), event));
+    }
+}
+
+/// Forwards a call's tool events and keeps what
+/// [`ToolEvent::WorktreeChanges`] reported for [`CallOutcome::changed`].
+struct CallChanges {
+    inner: Arc<dyn ToolEventSink>,
+    changed: Mutex<Option<bool>>,
+}
+
+impl ToolEventSink for CallChanges {
+    fn emit(&self, call_id: &str, event: ToolEvent) {
+        if let ToolEvent::WorktreeChanges { files, .. } = event {
+            *self.changed.lock().unwrap_or_else(|e| e.into_inner()) = Some(files > 0);
+        }
+        self.inner.emit(call_id, event);
     }
 }
 
@@ -1130,6 +1429,7 @@ impl ToolEventSink for RecorderToolEvents {
                         ChangeKind::Modified => FileChangeKind::Modified,
                     },
                     diff: Some(Payload::Text(change.diff)),
+                    generated: false,
                 };
                 if let Err(e) = self
                     .recorder
@@ -1173,6 +1473,8 @@ impl ToolEventSink for RecorderToolEvents {
                     tracing::warn!(target: "harness::tools", error = %e, "could not record a background job");
                 }
             }
+            // The ledger records the changes themselves as `file_changed`.
+            ToolEvent::WorktreeChanges { .. } => {}
             ToolEvent::OutputSpilled(rec) => {
                 tracing::debug!(target: "harness::tools", call_id, blob = %rec.blob_id, saved = rec.tokens_saved(), "tool output spilled");
             }

@@ -335,6 +335,8 @@ impl Driver {
         }
         self.forward = Some(self.forward_events(&core));
         core.begin();
+        // The user types the first prompt now (`[experimental] cache_prewarm`).
+        core.spawn_prewarm("session_start");
         self.registry = harness_agent::commands::CommandRegistry::from_catalog(&core.catalog);
         self.send(CoreEvent::Session {
             model: core.model.reference.clone(),

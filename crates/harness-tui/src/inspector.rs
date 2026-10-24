@@ -41,12 +41,12 @@ use harness_providers::model::{ChatRequest, Message, ToolSpec};
 use harness_providers::registry::{ModelRef, Registry, ThinkingStyle};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::Modifier;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use serde_json::{Value, json};
 
-use crate::chat::text::{fmt_bytes, fmt_tokens, sanitize, truncate};
+use crate::chat::text::{fmt_bytes, fmt_tokens, sanitize, wrap_line, wrap_lines};
 use crate::interaction::{Dispatch, ElementId, HitMap, Interaction};
 use crate::theme::{Theme, Token};
 
@@ -693,7 +693,7 @@ impl InspectorView {
         out.push(Line::default());
     }
 
-    fn body(&self, width: usize) -> Vec<Line<'static>> {
+    fn body(&self) -> Vec<Line<'static>> {
         let t = &self.theme;
         let d = &self.data;
         let mut out = Vec::new();
@@ -788,10 +788,7 @@ impl InspectorView {
                 for l in &d.layers {
                     let mut spans = vec![
                         Span::styled(format!("{:>8} ", fmt_tokens(l.tokens)), t.fg(Token::Number)),
-                        Span::styled(
-                            truncate(&sanitize(&l.label), width.saturating_sub(24)),
-                            t.fg(Token::Fg),
-                        ),
+                        Span::styled(sanitize(&l.label), t.fg(Token::Fg)),
                     ];
                     if l.new {
                         spans.push(Span::styled("  new", t.fg(Token::Running)));
@@ -806,30 +803,23 @@ impl InspectorView {
         out
     }
 
-    /// Renders the inspector into `area`.
+    /// Renders the inspector into `area`. The title and the buttons flow
+    /// onto as many rows as they need; the body wraps and scrolls.
     pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect) {
         let t = self.theme.clone();
         let mut hits: HitMap<InspectorAction> = self.interaction.begin_frame();
-        let [bar, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
-        let mut x = bar.x;
-        let title = format!(
+        let aw = usize::from(area.width).max(1);
+        let title = sanitize(&format!(
             " {} · {} · {} ",
             self.data.call_id, self.data.provider, self.data.model
-        );
-        let tw = title.chars().count() as u16;
-        frame.render_widget(
-            Paragraph::new(Span::styled(title, t.fg(Token::Agent))),
-            Rect::new(x, bar.y, tw.min(bar.width), 1),
-        );
-        x += tw;
+        ));
+        // Lay out the bar: the title (wrapped), then the buttons, each on
+        // the current row when it fits, else on the next.
+        let mut rows: Vec<Line<'static>> =
+            wrap_line(Line::from(Span::styled(title, t.fg(Token::Agent))), aw, &[]);
+        let mut buttons: Vec<(String, String, InspectorAction, Style)> = Vec::new();
         for tab in Tab::ALL {
-            let label = format!("[{}]", tab.label());
-            let w = label.chars().count() as u16;
-            if x + w > bar.x + bar.width {
-                break;
-            }
             let id = tab_id(tab);
-            let rect = Rect::new(x, bar.y, w, 1);
             let style = if hits.is_focused(&ElementId::from(id.as_str())) {
                 t.focused()
             } else if tab == self.tab {
@@ -837,27 +827,81 @@ impl InspectorView {
             } else {
                 t.fg(Token::Muted)
             };
-            frame.render_widget(Paragraph::new(Span::styled(label, style)), rect);
-            hits.register_button(id, rect, InspectorAction::Show(tab));
-            x += w + 1;
+            buttons.push((
+                id,
+                format!("[{}]", tab.label()),
+                InspectorAction::Show(tab),
+                style,
+            ));
         }
-        let label = "[export]";
-        if x + 8 <= bar.x + bar.width {
-            let rect = Rect::new(x, bar.y, 8, 1);
-            let style = if hits.is_focused(&ElementId::from(EXPORT_ID)) {
-                t.focused()
-            } else {
-                t.fg(Token::Warn)
-            };
-            frame.render_widget(Paragraph::new(Span::styled(label, style)), rect);
-            hits.register_button(EXPORT_ID, rect, InspectorAction::Export);
+        let style = if hits.is_focused(&ElementId::from(EXPORT_ID)) {
+            t.focused()
+        } else {
+            t.fg(Token::Warn)
+        };
+        buttons.push((
+            EXPORT_ID.into(),
+            "[export]".into(),
+            InspectorAction::Export,
+            style,
+        ));
+        let mut placed: Vec<(String, Rect, InspectorAction)> = Vec::new();
+        for (id, label, action, style) in buttons {
+            let w = crate::chat::text::width(&label);
+            let row = rows.last_mut().expect("a row");
+            let mut used = crate::chat::text::line_width(row);
+            let spaced = row.spans.last().is_none_or(|s| s.content.ends_with(' '));
+            let mut sep = usize::from(used > 0 && !spaced);
+            if used > 0 && used + sep + w > aw {
+                rows.push(Line::default());
+                used = 0;
+                sep = 0;
+            }
+            let row = rows.last_mut().expect("a row");
+            if sep > 0 {
+                row.spans.push(Span::raw(" "));
+                used += 1;
+            }
+            let y = (rows.len() - 1) as u16;
+            placed.push((
+                id,
+                Rect::new(
+                    area.x + used as u16,
+                    area.y + y,
+                    (w as u16).min(area.width.saturating_sub(used as u16)),
+                    1,
+                ),
+                action,
+            ));
+            rows.last_mut()
+                .expect("a row")
+                .spans
+                .push(Span::styled(label, style));
+        }
+        let bar_h = (rows.len() as u16).min((area.height / 2).max(1));
+        let [bar, body] =
+            Layout::vertical([Constraint::Length(bar_h), Constraint::Min(1)]).areas(area);
+        frame.render_widget(Paragraph::new(rows), bar);
+        for (id, rect, action) in placed {
+            if rect.y < bar.bottom() && rect.width > 0 {
+                hits.register_button(id, rect, action);
+            }
         }
         hits.register_pane("inspector", body);
         self.height = usize::from(body.height);
-        let lines = self.body(usize::from(body.width));
+        let lines = wrap_lines(self.body(), usize::from(body.width).max(1), &[]);
         self.scroll = self.scroll.min(lines.len().saturating_sub(self.height));
         let first = self.scroll;
-        crate::selection::update("inspector", |r| r.set_scroll(first));
+        crate::selection::update("inspector", |r| {
+            r.set_scroll(first);
+            r.set_joins(
+                lines
+                    .iter()
+                    .skip(first)
+                    .take(usize::from(body.height))
+                    .map(crate::chat::text::soft_join),
+            );
+        });
         let shown: Vec<Line<'static>> = lines
             .into_iter()
             .skip(self.scroll)

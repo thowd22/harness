@@ -380,24 +380,38 @@ impl Gallery {
     pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect) {
         let t = self.theme.clone();
         frame.render_widget(ratatui::widgets::Block::new().style(t.base()), area);
+        // The tab row wraps onto more rows when the tabs do not fit.
+        let place = |width: u16| {
+            let mut out = Vec::new();
+            let (mut x, mut y) = (9u16.min(width), 0u16);
+            for p in Page::ALL {
+                let w = (p.label().chars().count() as u16 + 2).min(width.max(1));
+                if x > 0 && x + w > width {
+                    x = 0;
+                    y += 1;
+                }
+                out.push((p, x, y, w));
+                x += w + 1;
+            }
+            (out, y + 1)
+        };
+        let (slots, rows) = place(area.width);
+        let rows = rows.min((area.height / 2).max(1));
         let [tabs, body] =
-            Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
+            Layout::vertical([Constraint::Length(rows), Constraint::Min(1)]).areas(area);
         let mut hits: HitMap<Page> = self.interaction.begin_frame();
-        let mut x = tabs.x;
         frame.render_widget(
             Paragraph::new(Span::styled(
                 " ui-demo ",
                 t.fg(Token::Accent).add_modifier(Modifier::BOLD),
             )),
-            Rect::new(x, tabs.y, 9.min(tabs.width), 1),
+            Rect::new(tabs.x, tabs.y, 9.min(tabs.width), 1),
         );
-        x += 9;
-        for p in Page::ALL {
-            let label = format!(" {} ", p.label());
-            let w = label.chars().count() as u16;
-            if x + w > tabs.x + tabs.width {
+        for (p, x, y, w) in slots {
+            if y >= tabs.height {
                 break;
             }
+            let label = format!(" {} ", p.label());
             let id = tab_id(p);
             let style = if hits.is_focused(&ElementId::from(id.as_str())) {
                 t.focused()
@@ -406,10 +420,9 @@ impl Gallery {
             } else {
                 t.fg(Token::Muted)
             };
-            let r = Rect::new(x, tabs.y, w, 1);
+            let r = Rect::new(tabs.x + x, tabs.y + y, w, 1);
             frame.render_widget(Paragraph::new(Span::styled(label, style)), r);
             hits.register(id, r, p);
-            x += w + 1;
         }
         self.interaction.end_frame(hits);
         let wall = T0 + time::Duration::seconds(30);
@@ -648,6 +661,29 @@ mod tests {
         assert_eq!(g.page(), Page::Chat);
         g.handle(&key("left"));
         assert_eq!(g.page(), Page::History);
+    }
+
+    /// At 40 columns the tab row wraps instead of dropping tabs; a tab on
+    /// the second row works by click and by keyboard.
+    #[test]
+    fn narrow_tab_rows_wrap_and_every_tab_works_by_click_and_keyboard() {
+        let mut g = Gallery::new(Theme::default());
+        let mut term = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        term.draw(|f| g.render(f, f.area())).unwrap();
+        let text = buffer_text(term.backend().buffer());
+        for p in Page::ALL {
+            assert!(text.contains(p.label()), "{}: {text}", p.label());
+        }
+        let (x, y) = find_text(term.backend().buffer(), " history ").unwrap();
+        assert!(y > 0, "on a wrapped row: {text}");
+        g.handle(&click(x + 1, y));
+        assert_eq!(g.page(), Page::History);
+        g.handle(&key("left"));
+        assert_eq!(g.page(), Page::Inspector);
+        term.draw(|f| g.render(f, f.area())).unwrap();
+        g.handle(&key("tab"));
+        g.handle(&key("enter"));
+        assert_ne!(g.page(), Page::Inspector);
     }
 
     #[test]

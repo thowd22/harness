@@ -11,16 +11,22 @@
 //! reachable with Tab/Shift+Tab and activated with Enter. Left/Right switch
 //! tabs, Up/Down move the selection, typing edits the search query (Search
 //! tab) and Esc closes the browser.
+//!
+//! Nothing is cut: tabs, rows, the search box and the buttons wrap onto
+//! more rows when narrow, the drive path moves out of the title when the
+//! border cannot hold it, and the detail pane wraps and scrolls
+//! (PageUp/PageDown, Home/End or the wheel), showing its position in the bottom
+//! border.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::Modifier;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use time::OffsetDateTime;
 
-use crate::chat::text::{sanitize, truncate, width};
+use crate::chat::text::{sanitize, width, wrap_text};
 use crate::interaction::{ElementId, HitMap};
 use crate::theme::{Theme, Token};
 
@@ -159,40 +165,8 @@ pub enum BrowserOutcome {
 /// Element id of the search box.
 pub const SEARCH_BOX_ID: &str = "memory.search";
 
-/// A left-to-right row of buttons.
-struct ButtonRow {
-    x: u16,
-    y: u16,
-    max_x: u16,
-}
-
-impl ButtonRow {
-    fn add<A: Clone>(
-        &mut self,
-        frame: &mut Frame<'_>,
-        theme: &Theme,
-        hits: &mut HitMap<A>,
-        id: &str,
-        label: &str,
-        action: A,
-    ) {
-        let text = format!("[ {label} ]");
-        let w = width(&text) as u16;
-        if self.x + w > self.max_x {
-            return;
-        }
-        let id = ElementId::from(id);
-        let style = if hits.is_focused(&id) {
-            theme.focused()
-        } else {
-            theme.fg(Token::Link)
-        };
-        let rect = Rect::new(self.x, self.y, w, 1);
-        frame.render_widget(Paragraph::new(Span::styled(text, style)), rect);
-        hits.register_button(id, rect, action);
-        self.x += w + 1;
-    }
-}
+/// Scroll pane id of the detail pane (the wheel scrolls it).
+pub const DETAIL_PANE: &str = "memory.detail";
 
 /// The `/memory` browser state.
 #[derive(Debug, Clone, Default)]
@@ -204,6 +178,13 @@ pub struct MemoryBrowser {
     query: String,
     results: Vec<SearchRow>,
     detail: Option<(String, String)>,
+    /// First detail row shown.
+    detail_scroll: std::cell::Cell<usize>,
+    /// Largest first detail row in the last frame.
+    detail_max: std::cell::Cell<usize>,
+    /// Bring the selected row into view on the next frame (small screens,
+    /// where the whole browser scrolls).
+    follow: std::cell::Cell<bool>,
 }
 
 fn link(path: &str) -> &str {
@@ -243,6 +224,19 @@ impl MemoryBrowser {
     /// Sets the detail pane (`key` is the note path or commit id it shows).
     pub fn set_detail(&mut self, key: impl Into<String>, text: impl Into<String>) {
         self.detail = Some((key.into(), text.into()));
+        self.detail_scroll.set(0);
+    }
+
+    /// Scrolls the detail pane by `lines` rows (the wheel, PageUp/PageDown).
+    pub fn scroll_detail(&mut self, lines: i32) {
+        let max = self.detail_max.get() as i64;
+        let next = (self.detail_scroll.get() as i64 + i64::from(lines)).clamp(0, max);
+        self.detail_scroll.set(next as usize);
+    }
+
+    /// First detail row shown.
+    pub fn detail_scroll(&self) -> usize {
+        self.detail_scroll.get()
     }
 
     /// Opens the browser on the Files tab.
@@ -304,6 +298,7 @@ impl MemoryBrowser {
     }
 
     fn request_detail(&self) -> BrowserOutcome {
+        self.follow.set(true);
         if let Some(p) = self.selected_path() {
             BrowserOutcome::Preview(p.to_owned())
         } else if let Some(c) = self.selected_commit() {
@@ -380,6 +375,22 @@ impl MemoryBrowser {
                 self.set_tab(t)
             }
             KeyCode::Right => self.set_tab(Tab::ALL[(i + 1) % Tab::ALL.len()]),
+            KeyCode::PageUp => {
+                self.scroll_detail(-5);
+                BrowserOutcome::Changed
+            }
+            KeyCode::PageDown => {
+                self.scroll_detail(5);
+                BrowserOutcome::Changed
+            }
+            KeyCode::Home => {
+                self.scroll_detail(-i32::MAX);
+                BrowserOutcome::Changed
+            }
+            KeyCode::End => {
+                self.scroll_detail(i32::MAX);
+                BrowserOutcome::Changed
+            }
             KeyCode::Up => {
                 self.selected[i] = self.selected[i].saturating_sub(1);
                 self.request_detail()
@@ -429,6 +440,11 @@ impl MemoryBrowser {
     }
 
     /// Draws the browser as a modal over `area`.
+    ///
+    /// Top to bottom: the drive (when the title cannot hold it), the tabs,
+    /// the search box, the rows, the detail and the buttons, all wrapping.
+    /// When that cannot fit (a small screen) the whole body scrolls
+    /// instead, keeping the selected row in view.
     pub fn render<A: Clone>(
         &self,
         frame: &mut Frame<'_>,
@@ -451,165 +467,97 @@ impl MemoryBrowser {
         hits.push_modal(rect);
         frame.render_widget(Clear, rect);
         let state = if self.data.enabled { "on" } else { "off" };
+        let drive = sanitize(&self.data.drive);
+        let head = format!(" Memory ({state}) ");
+        // The drive shows in the title when the border holds it.
+        let drive_in_title = width(&head) + width(&drive) + 1 + 2 <= w as usize;
+        let title = if drive_in_title {
+            format!("{head}{drive} ")
+        } else {
+            head
+        };
         let block = Block::new()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(theme.border(true))
-            .title(Span::styled(
-                format!(" Memory ({state}) {} ", sanitize(&self.data.drive)),
-                theme.fg(Token::Accent),
-            ))
+            .title(Span::styled(title, theme.fg(Token::Accent)))
             .style(theme.bg(Token::Surface).patch(theme.fg(Token::Fg)));
         let inner = block.inner(rect);
         frame.render_widget(block, rect);
-        if inner.height < 4 {
+        if inner.height == 0 || inner.width == 0 {
             return;
         }
-        let right = inner.right();
-        // Tabs.
-        let mut x = inner.x;
-        for t in Tab::ALL {
-            let label = format!(" {} ", t.label());
-            let w = width(&label) as u16;
-            if x + w > right {
-                break;
-            }
-            let id = ElementId(format!("memory.tab.{}", t.index()));
-            let style = if hits.is_focused(&id) {
-                theme.focused()
-            } else if t == self.tab() {
-                theme
-                    .fg(Token::Accent)
-                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
-            } else {
-                theme.fg(Token::Muted)
-            };
-            let r = Rect::new(x, inner.y, w, 1);
-            frame.render_widget(Paragraph::new(Span::styled(label, style)), r);
-            hits.register_button(id, r, wrap(BrowserAction::Tab(t)));
-            x += w + 1;
-        }
-        let mut y = inner.y + 1;
-        // Search box.
-        if self.tab() == Tab::Search {
-            let id = ElementId::from(SEARCH_BOX_ID);
-            let style = if hits.is_focused(&id) {
-                theme.focused()
-            } else {
-                theme.fg(Token::Fg)
-            };
-            let text = format!("search: {}▏", self.query);
-            let r = Rect::new(inner.x, y, inner.width, 1);
-            frame.render_widget(
-                Paragraph::new(Span::styled(truncate(&text, inner.width as usize), style)),
-                r,
-            );
-            hits.register(id, r, wrap(BrowserAction::SearchBox));
-            y += 1;
-        }
-        // List (up to half the remaining height), then detail, then buttons.
-        let bottom = inner.bottom().saturating_sub(1);
-        let avail = bottom.saturating_sub(y);
-        let list_h = (avail / 2).max(1);
-        let rows = self.row_texts();
         let iw = inner.width as usize;
-        if rows.is_empty() {
-            let msg = match self.tab() {
-                Tab::Files => "No notes yet.",
-                Tab::Search => "Type a query and press Enter.",
-                Tab::Recent => "No memory writes yet.",
-                Tab::Dreams => "No dream passes yet.",
-            };
-            frame.render_widget(
-                Paragraph::new(Span::styled(msg, theme.fg(Token::Muted))),
-                Rect::new(inner.x, y, inner.width, 1),
-            );
-        }
-        let sel = self.sel();
-        let first = sel.saturating_sub(list_h as usize - 1);
-        for (row, text) in rows.iter().enumerate().skip(first).take(list_h as usize) {
-            let id = ElementId(format!("memory.row.{}.{row}", self.tab().index()));
-            let style = if row == sel || hits.is_focused(&id) {
+        let plain = theme.bg(Token::Surface).patch(theme.fg(Token::Fg));
+        let focus_style = |id: &str, on: Style, off: Style| {
+            if hits.is_focused(&ElementId::from(id)) {
                 theme.focused()
+            } else if on != off {
+                on
             } else {
-                theme.bg(Token::Surface).patch(theme.fg(Token::Fg))
-            };
-            let r = Rect::new(inner.x, y + (row - first) as u16, inner.width, 1);
-            frame.render_widget(
-                Paragraph::new(Span::styled(format!("{:<iw$}", truncate(text, iw)), style)),
-                r,
-            );
-            hits.register(id, r, wrap(BrowserAction::Select(row)));
-        }
-        // Detail.
-        let detail_y = y + list_h;
-        let detail_h = bottom.saturating_sub(detail_y);
-        if detail_h > 0
-            && let Some((key, text)) = &self.detail
-            && (self.selected_path() == Some(key.as_str())
-                || self.selected_commit() == Some(key.as_str()))
-        {
-            let lines: Vec<Line<'static>> = text
-                .lines()
-                .take(detail_h as usize)
-                .map(|l| {
-                    let token = if l.starts_with('+') && !l.starts_with("+++") {
-                        Token::DiffAdded
-                    } else if l.starts_with('-') && !l.starts_with("---") {
-                        Token::DiffRemoved
-                    } else {
-                        Token::Muted
-                    };
-                    Line::from(Span::styled(truncate(&sanitize(l), iw), theme.fg(token)))
-                })
-                .collect();
-            frame.render_widget(
-                Paragraph::new(lines),
-                Rect::new(inner.x, detail_y, inner.width, detail_h),
-            );
-        }
-        // Buttons.
-        let mut row = ButtonRow {
-            x: inner.x,
-            y: inner.bottom() - 1,
-            max_x: right,
+                off
+            }
         };
+        // Sections.
+        let mut top = Section::default();
+        if !drive_in_title {
+            for t in wrap_text(&drive, iw) {
+                top.lines
+                    .push(Line::from(Span::styled(t, theme.fg(Token::Path))));
+            }
+        }
+        let tabs: Vec<(String, String, Style, BrowserAction)> = Tab::ALL
+            .iter()
+            .map(|&t| {
+                let id = format!("memory.tab.{}", t.index());
+                let on = if t == self.tab() {
+                    theme
+                        .fg(Token::Accent)
+                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+                } else {
+                    theme.fg(Token::Muted)
+                };
+                let st = focus_style(&id, on, on);
+                (id, format!(" {} ", t.label()), st, BrowserAction::Tab(t))
+            })
+            .collect();
+        top.flow(tabs, iw);
+        if self.tab() == Tab::Search {
+            let st = focus_style(SEARCH_BOX_ID, theme.fg(Token::Fg), theme.fg(Token::Fg));
+            let rows = wrap_text(&format!("search: {}▏", self.query), iw);
+            top.hits.push(SectionHit {
+                row: top.lines.len(),
+                x: 0,
+                w: iw,
+                h: rows.len(),
+                id: SEARCH_BOX_ID.to_owned(),
+                action: BrowserAction::SearchBox,
+                button: false,
+            });
+            top.lines
+                .extend(rows.into_iter().map(|t| Line::from(Span::styled(t, st))));
+        }
+        let mut buttons: Vec<(&str, &str, BrowserAction)> = Vec::new();
         match self.tab() {
             Tab::Files | Tab::Search if self.selected_path().is_some() => {
-                row.add(
-                    frame,
-                    theme,
-                    hits,
+                buttons.push((
                     "memory.btn.edit",
                     "open in editor",
-                    wrap(BrowserAction::OpenEditor),
-                );
-                row.add(
-                    frame,
-                    theme,
-                    hits,
+                    BrowserAction::OpenEditor,
+                ));
+                buttons.push((
                     "memory.btn.change",
                     "ask to change",
-                    wrap(BrowserAction::AskChange),
-                );
-                row.add(
-                    frame,
-                    theme,
-                    hits,
+                    BrowserAction::AskChange,
+                ));
+                buttons.push((
                     "memory.btn.forget",
                     "ask to forget",
-                    wrap(BrowserAction::AskForget),
-                );
+                    BrowserAction::AskForget,
+                ));
             }
             Tab::Recent | Tab::Dreams if self.selected_commit().is_some() => {
-                row.add(
-                    frame,
-                    theme,
-                    hits,
-                    "memory.btn.undo",
-                    "undo",
-                    wrap(BrowserAction::Undo),
-                );
+                buttons.push(("memory.btn.undo", "undo", BrowserAction::Undo));
             }
             _ => {}
         }
@@ -618,30 +566,163 @@ impl MemoryBrowser {
         } else {
             "memory on"
         };
-        row.add(
-            frame,
-            theme,
-            hits,
-            "memory.btn.toggle",
-            toggle,
-            wrap(BrowserAction::ToggleEnabled),
+        buttons.push(("memory.btn.toggle", toggle, BrowserAction::ToggleEnabled));
+        buttons.push(("memory.btn.dream", "dream now", BrowserAction::Dream));
+        buttons.push(("memory.btn.close", "close", BrowserAction::Close));
+        let mut bottom = Section::default();
+        let link = theme.fg(Token::Link);
+        bottom.flow(
+            buttons
+                .into_iter()
+                .map(|(id, label, a)| {
+                    (
+                        id.to_owned(),
+                        format!("[ {label} ]"),
+                        focus_style(id, link, link),
+                        a,
+                    )
+                })
+                .collect(),
+            iw,
         );
-        row.add(
-            frame,
-            theme,
-            hits,
-            "memory.btn.dream",
-            "dream now",
-            wrap(BrowserAction::Dream),
-        );
-        row.add(
-            frame,
-            theme,
-            hits,
-            "memory.btn.close",
-            "close",
-            wrap(BrowserAction::Close),
-        );
+        // Rows: each wraps; the selected one is highlighted.
+        let mut list = Section::default();
+        let rows = self.row_texts();
+        let sel = self.sel().min(rows.len().saturating_sub(1));
+        let mut sel_rows = (0, 1);
+        if rows.is_empty() {
+            let msg = match self.tab() {
+                Tab::Files => "No notes yet.",
+                Tab::Search => "Type a query and press Enter.",
+                Tab::Recent => "No memory writes yet.",
+                Tab::Dreams => "No dream passes yet.",
+            };
+            list.lines
+                .push(Line::from(Span::styled(msg, theme.fg(Token::Muted))));
+        }
+        let mut starts = Vec::new();
+        for (row, text) in rows.iter().enumerate() {
+            let id = format!("memory.row.{}.{row}", self.tab().index());
+            let st = if row == sel {
+                theme.focused()
+            } else {
+                focus_style(&id, plain, plain)
+            };
+            let parts = wrap_text(text, iw);
+            starts.push((list.lines.len(), parts.len()));
+            if row == sel {
+                sel_rows = (list.lines.len(), parts.len());
+            }
+            list.hits.push(SectionHit {
+                row: list.lines.len(),
+                x: 0,
+                w: iw,
+                h: parts.len(),
+                id,
+                action: BrowserAction::Select(row),
+                button: false,
+            });
+            list.lines.extend(
+                parts
+                    .into_iter()
+                    .map(|t| Line::from(Span::styled(format!("{t:<iw$}"), st))),
+            );
+        }
+        let mut detail = Section::default();
+        if let Some((key, text)) = &self.detail
+            && (self.selected_path() == Some(key.as_str())
+                || self.selected_commit() == Some(key.as_str()))
+        {
+            for l in text.lines() {
+                let token = if l.starts_with('+') && !l.starts_with("+++") {
+                    Token::DiffAdded
+                } else if l.starts_with('-') && !l.starts_with("---") {
+                    Token::DiffRemoved
+                } else {
+                    Token::Muted
+                };
+                detail.lines.extend(
+                    wrap_text(l, iw)
+                        .into_iter()
+                        .map(|t| Line::from(Span::styled(t, theme.fg(token)))),
+                );
+            }
+        }
+        let ih = inner.height as usize;
+        let fixed = top.lines.len() + bottom.lines.len();
+        let avail = ih.saturating_sub(fixed);
+        let mut pos = None;
+        if avail > sel_rows.1 {
+            // The usual layout: rows above the detail, both scrolling.
+            let list_h = (avail / 2).max(sel_rows.1).min(avail - 1);
+            let mut y = inner.y;
+            y = top.blit(frame, hits, wrap, inner, y, 0, top.lines.len());
+            // The list scrolls by item to keep the selection whole.
+            let mut first = sel_rows.0;
+            let mut k = starts.iter().position(|&(s, _)| s == first).unwrap_or(0);
+            while k > 0 && sel_rows.0 + sel_rows.1 - starts[k - 1].0 <= list_h {
+                k -= 1;
+                first = starts[k].0;
+            }
+            list.blit(frame, hits, wrap, inner, y, first, list_h);
+            y += list_h as u16;
+            let detail_h = avail - list_h;
+            let max = detail.lines.len().saturating_sub(detail_h);
+            self.detail_max.set(max);
+            let dfirst = self.detail_scroll.get().min(max);
+            hits.register_pane(
+                DETAIL_PANE,
+                Rect::new(inner.x, y, inner.width, detail_h as u16),
+            );
+            detail.blit(frame, hits, wrap, inner, y, dfirst, detail_h);
+            y += detail_h as u16;
+            bottom.blit(frame, hits, wrap, inner, y, 0, bottom.lines.len());
+            if max > 0 {
+                pos = Some(format!(
+                    " detail {}-{}/{} · pgup/pgdn ",
+                    dfirst + 1,
+                    dfirst + detail_h,
+                    detail.lines.len()
+                ));
+            }
+        } else {
+            // Too small: everything in one column that scrolls.
+            let mut all = Section::default();
+            let list_at = top.lines.len();
+            for s in [top, list, detail, bottom] {
+                all.append(s);
+            }
+            let max = all.lines.len().saturating_sub(ih);
+            self.detail_max.set(max);
+            let mut first = self.detail_scroll.get().min(max);
+            if self.follow.get() {
+                let (s0, n) = (list_at + sel_rows.0, sel_rows.1);
+                if s0 < first || s0 + n > first + ih {
+                    first = s0.min(max);
+                }
+            }
+            self.detail_scroll.set(first);
+            hits.register_pane(DETAIL_PANE, inner);
+            all.blit(frame, hits, wrap, inner, inner.y, first, ih);
+            if max > 0 {
+                pos = Some(format!(
+                    " {}-{}/{} · pgup/pgdn ",
+                    first + 1,
+                    first + ih,
+                    all.lines.len()
+                ));
+            }
+        }
+        self.follow.set(false);
+        if let Some(pos) = pos {
+            let pw = width(&pos) as u16;
+            if rect.width > pw + 2 {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(pos, theme.fg(Token::Muted))),
+                    Rect::new(rect.right() - pw - 1, rect.bottom() - 1, pw, 1),
+                );
+            }
+        }
     }
 
     fn row_texts(&self) -> Vec<String> {
@@ -699,6 +780,128 @@ impl MemoryBrowser {
                 })
                 .collect(),
         }
+    }
+}
+
+/// A clickable part of a [`Section`].
+#[derive(Debug, Clone)]
+struct SectionHit {
+    row: usize,
+    x: usize,
+    w: usize,
+    h: usize,
+    id: String,
+    action: BrowserAction,
+    /// A button (its label is masked from text selection), not a row.
+    button: bool,
+}
+
+/// Rows of the browser with their clickable parts, drawn through a window.
+#[derive(Debug, Default)]
+struct Section {
+    lines: Vec<Line<'static>>,
+    hits: Vec<SectionHit>,
+}
+
+impl Section {
+    /// Adds labelled buttons left to right, one cell apart, wrapping onto
+    /// more rows (a label wider than the row wraps on rows of its own).
+    fn flow(&mut self, items: Vec<(String, String, Style, BrowserAction)>, width: usize) {
+        let width = width.max(1);
+        let mut row: Vec<Span<'static>> = Vec::new();
+        let mut used = 0usize;
+        for (id, label, style, action) in items {
+            let lw = crate::chat::text::width(&label);
+            if used > 0 && used + 1 + lw > width {
+                self.lines.push(Line::from(std::mem::take(&mut row)));
+                used = 0;
+            }
+            if lw > width {
+                let parts = wrap_text(&label, width);
+                self.hits.push(SectionHit {
+                    row: self.lines.len(),
+                    x: 0,
+                    w: width,
+                    h: parts.len(),
+                    id,
+                    action,
+                    button: true,
+                });
+                self.lines.extend(
+                    parts
+                        .into_iter()
+                        .map(|p| Line::from(Span::styled(p, style))),
+                );
+                continue;
+            }
+            if used > 0 {
+                row.push(Span::raw(" "));
+                used += 1;
+            }
+            self.hits.push(SectionHit {
+                row: self.lines.len(),
+                x: used,
+                w: lw,
+                h: 1,
+                id,
+                action,
+                button: true,
+            });
+            row.push(Span::styled(label, style));
+            used += lw;
+        }
+        if !row.is_empty() {
+            self.lines.push(Line::from(row));
+        }
+    }
+
+    fn append(&mut self, other: Section) {
+        let base = self.lines.len();
+        self.lines.extend(other.lines);
+        self.hits.extend(other.hits.into_iter().map(|mut h| {
+            h.row += base;
+            h
+        }));
+    }
+
+    /// Draws rows `first..first + n` at row `y` of `inner` and registers the parts
+    /// shown. Returns the row below.
+    #[allow(clippy::too_many_arguments)]
+    fn blit<A: Clone>(
+        &self,
+        frame: &mut Frame<'_>,
+        hits: &mut HitMap<A>,
+        wrap: &dyn Fn(BrowserAction) -> A,
+        inner: Rect,
+        y: u16,
+        first: usize,
+        n: usize,
+    ) -> u16 {
+        let (x, width) = (inner.x, inner.width);
+        for (i, l) in self.lines.iter().skip(first).take(n).enumerate() {
+            frame.render_widget(
+                Paragraph::new(l.clone()),
+                Rect::new(x, y + i as u16, width, 1).intersection(frame.area()),
+            );
+        }
+        for h in &self.hits {
+            let top = h.row.max(first);
+            let bottom = (h.row + h.h).min(first + n);
+            if bottom > top {
+                let r = Rect::new(
+                    x + h.x as u16,
+                    y + (top - first) as u16,
+                    h.w as u16,
+                    (bottom - top) as u16,
+                );
+                if h.button {
+                    hits.register_button(ElementId(h.id.clone()), r, wrap(h.action.clone()));
+                } else {
+                    hits.register(ElementId(h.id.clone()), r, wrap(h.action.clone()));
+                }
+            }
+        }
+        y + n.min(self.lines.len().saturating_sub(first)) as u16
     }
 }
 

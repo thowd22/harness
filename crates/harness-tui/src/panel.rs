@@ -1,7 +1,9 @@
 //! A full-screen text panel with buttons, for command output such as
 //! `/cost`, `/config`, `/remote` and `/help`.
 //!
-//! The text scrolls with the wheel, PageUp/PageDown, Home/End and Up/Down;
+//! Long lines wrap at the panel width (a title too long for the border
+//! shows in full above the text), and the text scrolls by wrapped rows
+//! with the wheel, PageUp/PageDown, Home/End and Up/Down;
 //! buttons (`[ test gpu ]`, `[ close ]`) are focusable with Tab / Shift+Tab
 //! or Left/Right, activate with Enter or a click, and Esc closes the panel.
 
@@ -11,7 +13,7 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
-use crate::chat::text::{sanitize, width};
+use crate::chat::text::{sanitize, soft_join, width, wrap_lines, wrap_text};
 use crate::interaction::{Dispatch, ElementId, Interaction};
 use crate::theme::{Theme, Token};
 
@@ -66,6 +68,8 @@ pub struct Panel {
     buttons: Vec<PanelButton>,
     scroll: usize,
     view_height: usize,
+    /// Wrapped rows at the last drawn width.
+    rows: usize,
     theme: Theme,
     interaction: Interaction<PanelAction>,
 }
@@ -101,6 +105,7 @@ impl Panel {
             buttons: Vec::new(),
             scroll: 0,
             view_height: 1,
+            rows: 0,
             theme,
             interaction: Interaction::new(),
         }
@@ -147,7 +152,7 @@ impl Panel {
     }
 
     fn max_scroll(&self) -> usize {
-        self.lines.len().saturating_sub(self.view_height)
+        self.rows.saturating_sub(self.view_height)
     }
 
     fn scroll_by(&mut self, lines: i32) {
@@ -168,8 +173,8 @@ impl Panel {
                 match k.code {
                     KeyCode::PageUp => return self.scrolled(-page),
                     KeyCode::PageDown => return self.scrolled(page),
-                    KeyCode::Home => return self.scrolled(-(self.lines.len() as i32)),
-                    KeyCode::End => return self.scrolled(self.lines.len() as i32),
+                    KeyCode::Home => return self.scrolled(-(self.rows.max(1) as i32)),
+                    KeyCode::End => return self.scrolled(self.rows.max(1) as i32),
                     // Up/Down scroll the text; Tab and Left/Right move
                     // between buttons.
                     KeyCode::Up => return self.scrolled(-1),
@@ -210,71 +215,122 @@ impl Panel {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        // Buttons wrap onto as many rows as they need, at the bottom.
+        // Buttons wrap onto as many rows as they need, at the bottom; a
+        // label wider than the panel wraps on rows of its own.
+        let iw = inner.width.max(1) as usize;
         let mut all: Vec<(String, String, PanelAction)> = self
             .buttons
             .iter()
             .map(|b| {
                 (
                     button_id(&b.id),
-                    format!("[ {} ]", b.label),
+                    format!("[ {} ]", sanitize(&b.label)),
                     PanelAction::Button(b.id.clone()),
                 )
             })
             .collect();
         all.push((CLOSE_ID.into(), "[ close ]".into(), PanelAction::Close));
-        let mut rows: Vec<Vec<(String, String, PanelAction)>> = vec![Vec::new()];
+        let mut placed: Vec<Placed> = Vec::new();
+        let mut row = 0usize;
         let mut used = 0usize;
-        for b in all {
-            let w = width(&b.1) + 1;
-            if used + w > inner.width as usize && !rows.last().is_some_and(Vec::is_empty) {
-                rows.push(Vec::new());
+        for (id, label, action) in all {
+            let w = width(&label);
+            if w > iw {
+                if used > 0 {
+                    row += 1;
+                }
+                let parts = wrap_text(&label, iw);
+                let n = parts.len();
+                placed.push((row, 0, parts, (id, action)));
+                row += n;
+                used = 0;
+                continue;
+            }
+            if used > 0 && used + w > iw {
+                row += 1;
                 used = 0;
             }
-            used += w;
-            rows.last_mut().expect("a row").push(b);
+            placed.push((row, used as u16, vec![label], (id, action)));
+            used += w + 1;
         }
-        let button_rows = (rows.len() as u16).min(inner.height.saturating_sub(1));
+        let total_button_rows = if used > 0 { row + 1 } else { row };
+        let button_rows = (total_button_rows as u16).min(inner.height.saturating_sub(1));
         let text_area = Rect {
             height: inner.height.saturating_sub(button_rows),
             ..inner
         };
+        // A title the border cuts shows in full above the text.
+        let title_w = width(&self.title) + 2;
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        if title_w > area.width.saturating_sub(2) as usize {
+            let st = theme.fg(Token::Accent);
+            lines.extend(
+                wrap_text(&self.title, iw)
+                    .into_iter()
+                    .map(|t| Line::from(Span::styled(t, st))),
+            );
+        }
+        lines.extend(wrap_lines(self.lines.iter().cloned(), iw, &[]));
+        self.rows = lines.len();
         self.view_height = text_area.height.max(1) as usize;
         self.scroll = self.scroll.min(self.max_scroll());
         hits.register_pane(PANEL_PANE, text_area);
         let first = self.scroll;
-        crate::selection::update(PANEL_PANE, |r| r.set_scroll(first));
-        let visible: Vec<Line<'static>> = self
-            .lines
-            .iter()
+        let visible: Vec<Line<'static>> = lines
+            .into_iter()
             .skip(self.scroll)
             .take(text_area.height as usize)
-            .cloned()
             .collect();
+        let joins: Vec<_> = visible.iter().map(soft_join).collect();
+        crate::selection::update(PANEL_PANE, |r| {
+            r.set_scroll(first);
+            r.set_joins(joins);
+        });
         frame.render_widget(Paragraph::new(visible), text_area);
 
-        for (r, row) in rows.iter().take(button_rows as usize).enumerate() {
-            let y = text_area.bottom() + r as u16;
-            let mut x = inner.x;
-            for (id, label, action) in row {
-                let w = (width(label) as u16).min(inner.right().saturating_sub(x));
-                let rect = Rect::new(x, y, w, 1);
-                let style = if hits.is_focused(&ElementId(id.clone())) {
-                    theme.focused()
-                } else {
-                    theme.fg(Token::Link)
-                };
-                frame.render_widget(Paragraph::new(Span::styled(label.clone(), style)), rect);
-                hits.register_button(id.clone(), rect, action.clone());
-                x = x.saturating_add(w + 1);
+        // Buttons that do not fit the rows left are cut from the top: the
+        // close button (last) stays, and Esc always closes.
+        let skip = total_button_rows.saturating_sub(button_rows as usize);
+        for (r, x0, parts, (id, action)) in placed {
+            let rows: Vec<(usize, &String)> = parts
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (r + i, p))
+                .filter(|(rr, _)| *rr >= skip)
+                .collect();
+            let Some(&(top, _)) = rows.first() else {
+                continue;
+            };
+            let style = if hits.is_focused(&ElementId(id.clone())) {
+                theme.focused()
+            } else {
+                theme.fg(Token::Link)
+            };
+            let x = inner.x + x0;
+            let mut bw = 0u16;
+            for (rr, part) in &rows {
+                let y = text_area.bottom() + (rr - skip) as u16;
+                let w = (width(part) as u16).min(inner.right().saturating_sub(x));
+                bw = bw.max(w);
+                frame.render_widget(
+                    Paragraph::new(Span::styled((*part).clone(), style)),
+                    Rect::new(x, y, w, 1),
+                );
             }
+            let rect = Rect::new(
+                x,
+                text_area.bottom() + (top - skip) as u16,
+                bw,
+                rows.len() as u16,
+            );
+            hits.register_button(id.clone(), rect, action.clone());
         }
-        if self.lines.len() > self.view_height {
+        if self.rows > self.view_height {
             let pos = format!(
                 " {}-{}/{} ",
                 self.scroll + 1,
-                (self.scroll + self.view_height).min(self.lines.len()),
-                self.lines.len()
+                (self.scroll + self.view_height).min(self.rows),
+                self.rows
             );
             let w = width(&pos) as u16;
             if area.width > w + 2 {
@@ -287,6 +343,9 @@ impl Panel {
         self.interaction.end_frame(hits);
     }
 }
+
+/// A laid-out button: first row, column, label rows, id and action.
+type Placed = (usize, u16, Vec<String>, (String, PanelAction));
 
 #[cfg(test)]
 mod tests {

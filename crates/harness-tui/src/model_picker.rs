@@ -52,8 +52,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 
-use crate::chat::text::{truncate, truncate_line, width};
+use crate::chat::text::{sanitize, truncate, truncate_line, width, wrap_text};
 use crate::interaction::HitMap;
+use crate::item_detail::{ItemDetail, hard_end, hard_wrap};
 use crate::theme::{Theme, Token};
 
 /// Palette entry id that opens the picker.
@@ -125,7 +126,15 @@ pub fn dialog_height(height: u16) -> u16 {
 pub enum PickerAction {
     /// The row with this item index: select it and switch.
     Row(usize),
+    /// Scroll the selected model's full text by this many rows (▲/▼).
+    Detail(i32),
+    /// Open or close the selected model's full text (`→ full text`).
+    ToggleDetail,
 }
+
+/// Element id prefix of the selected model's full text (see
+/// [`crate::item_detail`]).
+pub const DETAIL_PREFIX: &str = "models";
 
 /// The result of an input event.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,6 +172,7 @@ pub struct ModelPicker {
     page: usize,
     notice: Option<String>,
     matcher: Matcher,
+    detail: ItemDetail,
 }
 
 impl std::fmt::Debug for ModelPicker {
@@ -223,6 +233,7 @@ fn cells(e: &CatalogEntry) -> [String; COLS] {
             Availability::Unavailable(r) => r.clone(),
         },
     ]
+    .map(|c| sanitize(&c).replace('\n', " "))
 }
 
 fn pad(text: &str, w: usize, right: bool) -> String {
@@ -253,6 +264,7 @@ impl ModelPicker {
             page: 1,
             notice: None,
             matcher: Matcher::new(nucleo_matcher::Config::DEFAULT),
+            detail: ItemDetail::new(),
         };
         p.set_catalog(catalog);
         p.selected = p
@@ -449,8 +461,14 @@ impl ModelPicker {
         }
         let plain = key.modifiers.difference(KeyModifiers::SHIFT).is_empty();
         let page = self.page.max(1) as isize;
+        let shift = key.modifiers == KeyModifiers::SHIFT;
         match key.code {
             KeyCode::Esc => return PickerOutcome::Close,
+            // Shift+Up/Down scroll the selected model's full text.
+            KeyCode::Up if shift => self.detail.scroll(-1),
+            KeyCode::Down if shift => self.detail.scroll(1),
+            // Right opens (and closes) the selected model's full text.
+            KeyCode::Right if plain => self.detail.toggle(),
             KeyCode::Enter => return self.choose(),
             KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => self.move_by(-1),
             KeyCode::Down | KeyCode::Tab => self.move_by(1),
@@ -483,6 +501,14 @@ impl ModelPicker {
                 }
                 self.selected = Some(item);
                 self.choose()
+            }
+            PickerAction::Detail(n) => {
+                self.detail.scroll(n);
+                PickerOutcome::Changed
+            }
+            PickerAction::ToggleDetail => {
+                self.detail.toggle();
+                PickerOutcome::Changed
             }
         }
     }
@@ -529,6 +555,44 @@ impl ModelPicker {
             w[col] -= excess.min(w[col].saturating_sub(floor));
         }
         w
+    }
+
+    /// The selected model in full, labelled cell by cell, with its
+    /// provider's list status, when its row (or its provider's header) at
+    /// these column widths cuts any of it; else nothing.
+    fn full_text(&self, theme: &Theme, widths: &[usize; COLS], w: usize) -> Vec<Line<'static>> {
+        let Some(Item::Entry(i)) = self.selected.and_then(|s| self.items.get(s)) else {
+            return Vec::new();
+        };
+        let e = &self.catalog.entries()[*i];
+        let row = &self.cells[*i];
+        let header = self.header_line(theme, e.provider(), 0);
+        let cut = row.iter().zip(widths).any(|(c, w)| width(c) > *w)
+            || PREFIX + widths.iter().sum::<usize>() + GAP * (COLS - 1) > w
+            || crate::chat::text::line_width(&header) > w;
+        if !cut {
+            return Vec::new();
+        }
+        let mut v: Vec<Line<'static>> = COLUMNS
+            .iter()
+            .zip(row)
+            .filter(|(_, c)| !c.is_empty())
+            .map(|(name, c)| {
+                Line::from(vec![
+                    Span::styled(format!("{name}: "), theme.fg(Token::Muted)),
+                    Span::styled(c.clone(), theme.fg(Token::Fg)),
+                ])
+            })
+            .collect();
+        if let Some(st) = self.catalog.provider_status(e.provider())
+            && let Some(err) = &st.error
+        {
+            v.push(Line::from(Span::styled(
+                format!("live list refresh failed: {}", sanitize(err)),
+                theme.fg(Token::Warn),
+            )));
+        }
+        v
     }
 
     fn row_line(
@@ -600,7 +664,7 @@ impl ModelPicker {
         if let Some(st) = self.catalog.provider_status(provider) {
             if let Some(err) = &st.error {
                 spans.push(Span::styled(
-                    format!(" · live list refresh failed: {err}"),
+                    format!(" · live list refresh failed: {}", sanitize(err)),
                     theme.fg(Token::Warn),
                 ));
             } else if st.stale && !self.catalog.refreshing() {
@@ -653,29 +717,43 @@ impl ModelPicker {
             );
         };
 
-        // Query line with the match count and the refresh indicator.
-        let mut spans = vec![
+        // Query line with the match count and the refresh indicator,
+        // wrapped by character so the cursor follows the text.
+        let query = vec![
             Span::styled("› ", theme.fg(Token::Accent)),
-            Span::styled(self.query.clone(), theme.fg(Token::Fg)),
-            Span::styled(
-                format!(
-                    "  {} of {} models",
-                    self.matches,
-                    self.catalog.entries().len()
-                ),
-                theme.fg(Token::Muted),
-            ),
+            Span::styled(sanitize(&self.query), theme.fg(Token::Fg)),
         ];
+        let (crow, ccol) = hard_end(&query, w);
+        let mut spans = query;
+        spans.push(Span::styled(
+            format!(
+                "  {} of {} models",
+                self.matches,
+                self.catalog.entries().len()
+            ),
+            theme.fg(Token::Muted),
+        ));
         if self.catalog.refreshing() {
             let used: usize = spans.iter().map(|s| width(&s.content)).sum();
             let gap = w.saturating_sub(used + width(REFRESHING)).max(2);
             spans.push(Span::raw(" ".repeat(gap)));
             spans.push(Span::styled(REFRESHING, theme.fg(Token::Running)));
         }
-        line_at(frame, inner.y, Line::from(spans));
-        let cx = inner.x + (2 + width(&self.query)).min(w.saturating_sub(1)) as u16;
-        frame.set_cursor_position(Position::new(cx, inner.y));
-        if inner.height < 3 {
+        let head = hard_wrap(spans, w);
+        let head_h = head
+            .len()
+            .min((inner.height as usize).saturating_sub(2).max(1));
+        let first = (crow + 1).saturating_sub(head_h);
+        for (i, l) in head.into_iter().skip(first).take(head_h).enumerate() {
+            line_at(frame, inner.y + i as u16, l);
+        }
+        let cy = inner.y + (crow - first).min(head_h - 1) as u16;
+        frame.set_cursor_position(Position::new(
+            inner.x + ccol.min(w.saturating_sub(1)) as u16,
+            cy,
+        ));
+        let head_h = head_h as u16;
+        if inner.height < head_h + 2 {
             return;
         }
 
@@ -690,29 +768,71 @@ impl ModelPicker {
         }
         line_at(
             frame,
-            inner.y + 1,
+            inner.y + head_h,
             Line::from(Span::styled(
                 head,
                 theme.fg(Token::Muted).add_modifier(Modifier::BOLD),
             )),
         );
 
-        // Bottom line: the notice after an unusable choice, else key hints.
-        let hint_rows = u16::from(inner.height >= 5);
-        if hint_rows == 1 {
-            let line = match &self.notice {
-                Some(n) => Line::from(Span::styled(n.clone(), theme.fg(Token::Warn))),
-                None => Line::from(Span::styled(HINTS, theme.fg(Token::Muted))),
-            };
-            line_at(frame, inner.bottom() - 1, line);
+        // Bottom lines: the notice after an unusable choice, else key
+        // hints, wrapped while the list keeps a row.
+        let (bottom, token) = match &self.notice {
+            Some(n) => (wrap_text(n, w), Token::Warn),
+            None => (wrap_text(HINTS, w), Token::Muted),
+        };
+        let hint_rows = if inner.height >= head_h + 4 {
+            (bottom.len() as u16).min(inner.height - head_h - 2)
+        } else {
+            0
+        };
+        for (i, l) in bottom.into_iter().take(hint_rows as usize).enumerate() {
+            line_at(
+                frame,
+                inner.bottom() - hint_rows + i as u16,
+                Line::from(Span::styled(l, theme.fg(token))),
+            );
         }
 
-        let list = Rect::new(
+        let mut list = Rect::new(
             inner.x,
-            inner.y + 2,
+            inner.y + head_h + 1,
             inner.width,
-            inner.height.saturating_sub(2 + hint_rows),
+            inner.height.saturating_sub(head_h + 1 + hint_rows),
         );
+        let full = self.full_text(theme, &widths, w);
+        if let Some(sel) = self.selected {
+            self.detail.select(sel);
+        }
+        let detail_h = self.detail.rows_for(&full, list.width, list.height);
+        list.height -= detail_h;
+        self.detail.render_hint(
+            frame,
+            Rect::new(
+                rect.x + 1,
+                rect.bottom() - 1,
+                rect.width.saturating_sub(2),
+                1,
+            ),
+            !full.is_empty(),
+            theme,
+            hits,
+            DETAIL_PREFIX,
+            wrap(PickerAction::ToggleDetail),
+        );
+        if detail_h > 0 {
+            let r = Rect::new(list.x, list.bottom(), list.width, detail_h);
+            self.detail.render(
+                frame,
+                r,
+                full,
+                theme,
+                hits,
+                DETAIL_PREFIX,
+                wrap(PickerAction::Detail(-1)),
+                wrap(PickerAction::Detail(1)),
+            );
+        }
         let rows = list.height as usize;
         self.page = rows.max(1);
         if rows == 0 {
@@ -723,13 +843,15 @@ impl ModelPicker {
             let msg = if self.catalog.entries().is_empty() {
                 "no models: add an API key to a [provider.*] section of harness.ini".to_owned()
             } else {
-                format!("no models match `{}`", self.query)
+                format!("no models match `{}`", sanitize(&self.query))
             };
-            line_at(
-                frame,
-                list.y,
-                Line::from(Span::styled(msg, theme.fg(Token::Muted))),
-            );
+            for (i, l) in wrap_text(&msg, w).into_iter().take(rows).enumerate() {
+                line_at(
+                    frame,
+                    list.y + i as u16,
+                    Line::from(Span::styled(l, theme.fg(Token::Muted))),
+                );
+            }
             return;
         }
         if let Some(sel) = self.selected {

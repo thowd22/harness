@@ -89,7 +89,12 @@ becomes tall enough to show everything follows again.
 Every tool call is a card. The header shows the status icon (`○` pending,
 spinner while running, `✔` ok, `✗` error, `⏸` waiting for approval), the tool
 name, a summary of the arguments, badges, and on the right the duration and
-timestamp. The card background is tinted by its state.
+timestamp. The card background is tinted by its state. Nothing in a card
+is cut off: when the summary and badges do not fit in the top border, the
+icon and tool name stay there and the rest wraps onto rows inside the box;
+long output, code and diff lines wrap inside the box too (continuation
+rows leave the line-number gutter blank), and copy buttons that do not fit
+in the bottom border get their own row above it.
 
 | tool | header | body |
 |---|---|---|
@@ -281,8 +286,15 @@ or Tab/arrows and Enter; Esc closes) to open a job's latest output (`output
 j1`, with `refresh` and `stop` there too), stop a running job (`stop j1`,
 its whole process group) or refresh the list. A job's end also reaches the
 agent as a notice on its next request ([tools.md](tools.md#background-jobs-run_in_background)). It
-updates from run events as they arrive. On narrow terminals the least important parts (remotes, path,
-tokens, verify, agents) are dropped first.
+updates from run events as they arrive. When the segments do not fit on one
+row, the status line wraps onto more rows (up to three, and at most a sixth
+of the screen) instead of cutting anything; long paths, branches and model
+names wrap too. When even that is not enough, the least important parts
+(remotes, path, tokens, verify, agents) are left out and a `+N more` button
+ends the last row: click it, or Shift+Tab to it and Enter, to open the full
+status in a panel (directory, branch, model and mode, context, tokens,
+cost, verify, goal, agents, jobs, remotes and every failed MCP server). The
+palette entry **Show status** opens the same panel at any time.
 
 An open session with nothing in flight, including a fresh one waiting for
 its first prompt, shows as ready, not running: a run counts as working only

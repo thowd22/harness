@@ -229,8 +229,9 @@ impl StatusLine {
         }
     }
 
-    /// Renders the footer at `width` cells.
-    pub fn line(&self, theme: &Theme, spinner: &Spinner, width: usize) -> Line<'static> {
+    /// The segments in display order, with their priority (lower is
+    /// dropped first) and the button id of the clickable ones.
+    fn segments(&self, theme: &Theme, spinner: &Spinner) -> Vec<Segment> {
         // (priority: lower is dropped first, spans)
         let muted = theme.fg(Token::Muted);
         let num = theme.fg(Token::Number);
@@ -251,6 +252,7 @@ impl StatusLine {
                 Span::styled(self.mode.as_str().to_owned(), theme.fg(Token::Accent)),
             ],
         ));
+        let mcp_at = segs.len();
         if let Some(label) = self.mcp_label() {
             segs.push((9, vec![Span::styled(label, theme.fg(Token::Error))]));
         }
@@ -306,6 +308,7 @@ impl StatusLine {
                 ],
             ));
         }
+        let goal_at = segs.len();
         if let Some(goal) = &self.goal {
             segs.push((7, goal.clone()));
         }
@@ -320,6 +323,7 @@ impl StatusLine {
                 )],
             ));
         }
+        let jobs_at = segs.len();
         if let Some(label) = self.jobs_label() {
             segs.push((8, vec![Span::styled(label, theme.fg(Token::Running))]));
         }
@@ -333,6 +337,33 @@ impl StatusLine {
                 )],
             ));
         }
+        segs.into_iter()
+            .enumerate()
+            .map(|(i, (prio, spans))| Segment {
+                prio,
+                spans,
+                button: if i == mcp_at && self.mcp_label().is_some() {
+                    Some(MCP_INDICATOR_ID)
+                } else if i == jobs_at && self.jobs_label().is_some() {
+                    Some(JOBS_INDICATOR_ID)
+                } else if i == goal_at && self.goal.is_some() {
+                    Some(GOAL_INDICATOR_ID)
+                } else {
+                    None
+                },
+            })
+            .collect()
+    }
+
+    /// Renders the footer on one row of `width` cells, dropping the least
+    /// important segments that do not fit. The chat uses [`Self::layout`],
+    /// which wraps onto more rows instead.
+    pub fn line(&self, theme: &Theme, spinner: &Spinner, width: usize) -> Line<'static> {
+        let mut segs: Vec<(u8, Vec<Span<'static>>)> = self
+            .segments(theme, spinner)
+            .into_iter()
+            .map(|s| (s.prio, s.spans))
+            .collect();
         let sep_w = 3;
         let total = |segs: &[(u8, Vec<Span<'static>>)]| -> usize {
             segs.iter()
@@ -364,14 +395,194 @@ impl StatusLine {
     }
 }
 
-/// `path` with `home` replaced by `~`, truncated to 40 cells.
+impl StatusLine {
+    /// Lays the status line out at `width` on at most `max_rows` rows:
+    /// segments wrap onto more rows rather than being cut. When they still
+    /// do not fit, the least important ones are left out and a `+N more`
+    /// button ([`STATUS_MORE_ID`]) ends the last row; it opens the full
+    /// status ([`Self::details`]).
+    pub fn layout(
+        &self,
+        theme: &Theme,
+        spinner: &Spinner,
+        width: usize,
+        max_rows: usize,
+    ) -> StatusLayout {
+        let max_rows = max_rows.max(1);
+        let mut segs = self.segments(theme, spinner);
+        let all = segs.len();
+        loop {
+            let hidden = all - segs.len();
+            let mut shown: Vec<Segment> = Vec::new();
+            for s in &segs {
+                shown.push(Segment {
+                    prio: s.prio,
+                    spans: s.spans.clone(),
+                    button: s.button,
+                });
+            }
+            if hidden > 0 {
+                shown.push(Segment {
+                    prio: u8::MAX,
+                    spans: vec![Span::styled(
+                        format!("+{hidden} more"),
+                        theme.fg(Token::Link),
+                    )],
+                    button: Some(STATUS_MORE_ID),
+                });
+            }
+            let (lines, buttons) = pack(&shown, width, theme);
+            if lines.len() <= max_rows || segs.is_empty() {
+                let mut lines = lines;
+                lines.truncate(max_rows);
+                let buttons = buttons
+                    .into_iter()
+                    .filter(|b| usize::from(b.row) < max_rows)
+                    .collect();
+                return StatusLayout {
+                    lines,
+                    buttons,
+                    hidden,
+                };
+            }
+            let (idx, _) = segs
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, s)| s.prio)
+                .expect("non-empty");
+            segs.remove(idx);
+        }
+    }
+
+    /// The full status, one item per line, for the details panel the
+    /// "more" button opens.
+    pub fn details(&self, theme: &Theme, spinner: &Spinner) -> Vec<String> {
+        let text = |spans: &[Span<'static>]| -> String {
+            spans.iter().map(|s| s.content.as_ref()).collect()
+        };
+        let mut out = vec![
+            format!("Directory: {}", self.cwd),
+            format!("Branch: {}", self.branch.as_deref().unwrap_or("none")),
+        ];
+        for s in self.segments(theme, spinner).iter().skip(1) {
+            out.push(text(&s.spans));
+        }
+        if !self.mcp_failed.is_empty() {
+            out.push(format!(
+                "Failed MCP servers: {}",
+                self.mcp_failed.join(", ")
+            ));
+        }
+        out
+    }
+}
+
+/// `path` with `home` replaced by `~`. Long paths are kept whole: the
+/// status line wraps them.
 pub fn display_path(path: &Path, home: Option<&Path>) -> String {
-    let s = match home.and_then(|h| path.strip_prefix(h).ok()) {
+    match home.and_then(|h| path.strip_prefix(h).ok()) {
         Some(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
         Some(rest) => format!("~/{}", rest.display()),
         None => path.display().to_string(),
-    };
-    truncate(&s, 40)
+    }
+}
+
+/// One status segment.
+struct Segment {
+    prio: u8,
+    spans: Vec<Span<'static>>,
+    button: Option<&'static str>,
+}
+
+/// Interaction id of the goal-progress indicator (shown while the goal bar
+/// is collapsed); clicking it opens the status details with the goal and
+/// every task.
+pub const GOAL_INDICATOR_ID: &str = "status.goal";
+
+/// Interaction id of the status line's "more" button, shown when segments
+/// did not fit; it opens the status details panel.
+pub const STATUS_MORE_ID: &str = "status.more";
+
+/// A clickable part of the status line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusButton {
+    /// Interaction id ([`MCP_INDICATOR_ID`], [`JOBS_INDICATOR_ID`],
+    /// [`GOAL_INDICATOR_ID`], [`STATUS_MORE_ID`]).
+    pub id: &'static str,
+    /// Row in [`StatusLayout::lines`].
+    pub row: u16,
+    /// First column.
+    pub col: u16,
+    /// Width in cells.
+    pub width: u16,
+}
+
+/// The status line laid out on one or more rows ([`StatusLine::layout`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct StatusLayout {
+    /// The rows.
+    pub lines: Vec<Line<'static>>,
+    /// Where the buttons are (a wrapped button has one entry per row).
+    pub buttons: Vec<StatusButton>,
+    /// Segments left out for lack of rows; the full status is then one
+    /// click (or Tab + Enter) away on the "more" button.
+    pub hidden: usize,
+}
+
+/// Packs segments into rows of `width`: segments are separated by ` │ `,
+/// move to the next row when they do not fit and wrap when they are wider
+/// than a row.
+fn pack(segs: &[Segment], width: usize, theme: &Theme) -> (Vec<Line<'static>>, Vec<StatusButton>) {
+    let width = width.max(1);
+    let mut rows: Vec<Vec<Span<'static>>> = vec![Vec::new()];
+    let mut buttons = Vec::new();
+    let mut w = 0usize;
+    for seg in segs {
+        let sw: usize = seg.spans.iter().map(|s| self::width(&s.content)).sum();
+        let sep = if w > 0 { 3 } else { 0 };
+        if w + sep + sw <= width {
+            if sep > 0 {
+                rows.last_mut()
+                    .expect("a row")
+                    .push(Span::styled(" │ ", theme.fg(Token::Border)));
+            }
+            if let Some(id) = seg.button {
+                buttons.push(StatusButton {
+                    id,
+                    row: (rows.len() - 1) as u16,
+                    col: (w + sep) as u16,
+                    width: sw as u16,
+                });
+            }
+            rows.last_mut()
+                .expect("a row")
+                .extend(seg.spans.iter().cloned());
+            w += sep + sw;
+            continue;
+        }
+        if w > 0 {
+            rows.push(Vec::new());
+        }
+        let pieces = crate::chat::text::wrap_line(Line::from(seg.spans.clone()), width, &[]);
+        let n = pieces.len();
+        for (i, p) in pieces.into_iter().enumerate() {
+            let pw = crate::chat::text::line_width(&p);
+            if let Some(id) = seg.button {
+                buttons.push(StatusButton {
+                    id,
+                    row: (rows.len() - 1) as u16,
+                    col: 0,
+                    width: pw as u16,
+                });
+            }
+            rows.last_mut().expect("a row").extend(p.spans);
+            w = pw;
+            if i + 1 < n {
+                rows.push(Vec::new());
+            }
+        }
+    }
+    (rows.into_iter().map(Line::from).collect(), buttons)
 }
 
 #[cfg(test)]
@@ -672,5 +883,73 @@ mod tests {
             display_path(Path::new("/srv/x"), Some(Path::new("/home/u"))),
             "/srv/x"
         );
+    }
+
+    fn rows(l: &StatusLayout) -> Vec<String> {
+        l.lines.iter().map(text).collect()
+    }
+
+    #[test]
+    fn layout_wraps_long_values_onto_more_rows_instead_of_cutting() {
+        let theme = Theme::default();
+        let long = "/private/var/folders/n6/hn37q6pj7sj_9dm0000gn/T/.tmpXyZ/project/src_end";
+        let mut s = sample();
+        s.cwd = long.into();
+        let l = s.layout(&theme, &Spinner::new(false), 40, 6);
+        assert_eq!(l.hidden, 0, "{:?}", rows(&l));
+        assert!(l.lines.len() > 1);
+        for r in rows(&l) {
+            assert!(width(&r) <= 40, "{r}");
+            assert!(!r.contains('…'), "nothing is cut: {r}");
+        }
+        let joined: String = rows(&l).concat();
+        assert!(joined.contains(long), "{joined}");
+        assert!(joined.contains("gpu-box"), "remotes are kept: {joined}");
+        // Wide enough, it is one row like `line`.
+        let wide = s.layout(&theme, &Spinner::new(false), 400, 3);
+        assert_eq!(wide.lines.len(), 1);
+    }
+
+    #[test]
+    fn layout_offers_more_when_rows_run_out_and_details_have_everything() {
+        let theme = Theme::default();
+        let mut s = sample();
+        s.cwd = "/a/very/long/path/that/needs/rows/of/its/own/to/show/in/full_end".into();
+        s.set_mcp_failed(vec!["docs".into()]);
+        s.apply(&job("j1", "running"));
+        let l = s.layout(&theme, &Spinner::new(false), 30, 2);
+        assert_eq!(l.lines.len(), 2, "{:?}", rows(&l));
+        assert!(l.hidden > 0);
+        let more = format!("+{} more", l.hidden);
+        assert!(rows(&l).concat().contains(&more), "{:?}", rows(&l));
+        let b = l
+            .buttons
+            .iter()
+            .find(|b| b.id == STATUS_MORE_ID)
+            .expect("more button");
+        let row = &rows(&l)[usize::from(b.row)];
+        let cut: String = row
+            .chars()
+            .skip(usize::from(b.col))
+            .take(more.chars().count())
+            .collect();
+        assert_eq!(cut, more, "button covers its label");
+        // The MCP and jobs indicators keep their buttons where they show.
+        for b in &l.buttons {
+            assert!(usize::from(b.row) < l.lines.len());
+        }
+        let details = s.details(&theme, &Spinner::new(false));
+        let all = details.join("\n");
+        for want in [
+            "/a/very/long/path/that/needs/rows/of/its/own/to/show/in/full_end",
+            "Branch: main",
+            "sonnet · auto-edit",
+            "$0.84",
+            "gpu-box",
+            "⚙ 1 job",
+            "Failed MCP servers: docs",
+        ] {
+            assert!(all.contains(want), "{want}: {all}");
+        }
     }
 }

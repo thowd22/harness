@@ -1,11 +1,15 @@
 //! Maps OpenRouter Chat Completions chunks to normalized [`StreamEvent`]s.
 //!
 //! Block indices are assigned in order of first appearance (reasoning, text,
-//! each tool call). At the end, merged `reasoning_details` become one opaque
+//! each tool call). Chat Completions streams tool calls one after another,
+//! so a tool call is complete (and gets its [`StreamEvent::BlockStop`]) as
+//! soon as the next tool call or visible text starts, or the choice reports
+//! its `finish_reason`; the agent can then start it before the message
+//! ends. At the end, merged `reasoning_details` become one opaque
 //! block (provider `openrouter`) that is sent back on the next turn, and
 //! notices report the call's cost and missing reasoning.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde_json::{Map, Value};
 
@@ -27,6 +31,8 @@ pub(crate) struct ChatMapper {
     reasoning: Option<usize>,
     text: Option<usize>,
     tools: HashMap<u64, usize>,
+    /// Tool blocks whose `BlockStop` was already sent.
+    closed: HashSet<usize>,
     details: BTreeMap<u64, Map<String, Value>>,
     encrypted: bool,
     finish: Option<String>,
@@ -60,6 +66,22 @@ impl ChatMapper {
     fn alloc(&mut self) -> usize {
         self.next += 1;
         self.next - 1
+    }
+
+    /// Sends `BlockStop` for every open tool block, in index order: a later
+    /// tool call, text or the finish reason means they are complete.
+    fn close_tools(&mut self, out: &mut Vec<StreamEvent>) {
+        let mut open: Vec<usize> = self
+            .tools
+            .values()
+            .copied()
+            .filter(|i| !self.closed.contains(i))
+            .collect();
+        open.sort_unstable();
+        for index in open {
+            self.closed.insert(index);
+            out.push(StreamEvent::BlockStop { index });
+        }
     }
 
     fn reasoning_text(&mut self, text: &str, out: &mut Vec<StreamEvent>) {
@@ -154,6 +176,7 @@ impl ChatMapper {
             .and_then(Value::as_str)
             .filter(|t| !t.is_empty())
         {
+            self.close_tools(out);
             let index = match self.text {
                 Some(i) => i,
                 None => {
@@ -180,6 +203,7 @@ impl ChatMapper {
             let index = match self.tools.get(&key) {
                 Some(i) => *i,
                 None => {
+                    self.close_tools(out);
                     let i = self.alloc();
                     self.tools.insert(key, i);
                     out.push(StreamEvent::ToolUseStart {
@@ -215,6 +239,9 @@ impl ChatMapper {
                 });
             }
             self.finish = Some(reason.to_owned());
+            // The choice is done: its tool calls are complete even though
+            // the usage chunk and `[DONE]` are still to come.
+            self.close_tools(out);
         }
         Ok(())
     }
@@ -230,6 +257,7 @@ impl ChatMapper {
             .into_iter()
             .chain(self.text)
             .chain(self.tools.values().copied())
+            .filter(|i| !self.closed.contains(i))
             .collect();
         open.sort_unstable();
         out.extend(
@@ -441,6 +469,144 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.retry_reason().is_some());
+    }
+
+    /// Feeds chunks one at a time and returns, for each chunk, the events
+    /// it produced (the last entry is `[DONE]`).
+    fn steps(mapper: &mut ChatMapper, chunks: &[Value]) -> Vec<Vec<StreamEvent>> {
+        let mut out: Vec<Vec<StreamEvent>> = chunks
+            .iter()
+            .map(|c| {
+                mapper
+                    .on_event(&SseEvent {
+                        event: "message".into(),
+                        data: c.to_string(),
+                        id: None,
+                        retry: None,
+                    })
+                    .unwrap()
+            })
+            .collect();
+        out.push(
+            mapper
+                .on_event(&SseEvent {
+                    event: "message".into(),
+                    data: "[DONE]".into(),
+                    id: None,
+                    retry: None,
+                })
+                .unwrap(),
+        );
+        out
+    }
+
+    fn stop_step(steps: &[Vec<StreamEvent>], index: usize) -> usize {
+        let found: Vec<usize> = steps
+            .iter()
+            .enumerate()
+            .flat_map(|(n, evs)| {
+                evs.iter()
+                    .filter(move |e| **e == StreamEvent::BlockStop { index })
+                    .map(move |_| n)
+            })
+            .collect();
+        assert_eq!(
+            found.len(),
+            1,
+            "block {index} stops exactly once: {steps:?}"
+        );
+        found[0]
+    }
+
+    #[test]
+    fn tool_calls_stop_when_the_next_one_starts_and_at_finish() {
+        let call = |i: u64, id: Option<&str>, name: Option<&str>, args: &str| {
+            let mut f = json!({"arguments": args});
+            if let Some(n) = name {
+                f["name"] = json!(n);
+            }
+            let mut c = json!({"index": i, "function": f});
+            if let Some(id) = id {
+                c["id"] = json!(id);
+            }
+            json!({"choices": [{"delta": {"tool_calls": [c]}}]})
+        };
+        let mut m = ChatMapper::default();
+        let steps = steps(
+            &mut m,
+            &[
+                json!({"id": "g", "choices": [{"delta": {"content": "Reading."}}]}),
+                call(0, Some("c0"), Some("read"), ""),
+                call(0, None, None, "{\"path\":"),
+                call(0, None, None, "\"a.rs\"}"),
+                call(1, Some("c1"), Some("grep"), "{\"pattern\""),
+                call(1, None, None, ":\"x\"}"),
+                json!({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}),
+                json!({"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 3}}),
+            ],
+        );
+        // Text block 0, tool blocks 1 and 2.
+        assert_eq!(
+            stop_step(&steps, 1),
+            4,
+            "first call stops when the second starts"
+        );
+        let pos = |evs: &[StreamEvent], want: &StreamEvent| evs.iter().position(|e| e == want);
+        assert!(
+            pos(&steps[4], &StreamEvent::BlockStop { index: 1 })
+                < steps[4]
+                    .iter()
+                    .position(|e| matches!(e, StreamEvent::ToolUseStart { .. })),
+            "the stop precedes the next call's start"
+        );
+        assert_eq!(
+            stop_step(&steps, 2),
+            6,
+            "last call stops at finish_reason, before usage and [DONE]"
+        );
+        assert_eq!(stop_step(&steps, 0), 8, "text stops at the end");
+        let all: Vec<StreamEvent> = steps.concat();
+        assert!(matches!(
+            all.last(),
+            Some(StreamEvent::MessageStop { stop, .. }) if stop.kind == StopKind::ToolUse
+        ));
+        // The accumulated message is unchanged by the earlier stops.
+        let mut b = crate::provider::ResponseBuilder::new();
+        for e in all {
+            b.apply(e).unwrap();
+        }
+        let msg = b.finish().unwrap().message;
+        assert_eq!(
+            msg.content[1],
+            crate::model::ContentBlock::ToolUse {
+                id: "c0".into(),
+                name: "read".into(),
+                input: json!({"path": "a.rs"})
+            }
+        );
+        assert_eq!(
+            msg.content[2],
+            crate::model::ContentBlock::ToolUse {
+                id: "c1".into(),
+                name: "grep".into(),
+                input: json!({"pattern": "x"})
+            }
+        );
+    }
+
+    #[test]
+    fn text_after_a_tool_call_completes_it() {
+        let mut m = ChatMapper::default();
+        let steps = steps(
+            &mut m,
+            &[
+                json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "c0", "function": {"name": "read", "arguments": "{}"}}]}}]}),
+                json!({"choices": [{"delta": {"content": "and then"}}]}),
+                json!({"choices": [{"delta": {}, "finish_reason": "stop"}]}),
+            ],
+        );
+        assert_eq!(stop_step(&steps, 0), 1);
+        assert_eq!(stop_step(&steps, 1), 3);
     }
 
     #[test]

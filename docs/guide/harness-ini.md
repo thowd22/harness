@@ -15,10 +15,12 @@ todo_nudge_after = 3             ; remind agents to plan with todo after N model
 
 [provider.anthropic]
 api_key_cmd = pass show anthropic
+cache_ttl = 5m           ; 5m | 1h | mixed (1h on tools+system); thinking_display, cache_ttl_auto_1h: docs/providers-anthropic.md
 
 [provider.openrouter]
 api_key_env = OPENROUTER_API_KEY
 app_name = harness
+session_id = true        ; sticky upstream routing per session (default; false to turn off)
 
 [models]
 sonnet = anthropic/claude-sonnet-5-5
@@ -42,6 +44,12 @@ clipboard = osc52        ; osc52 | system | auto: where copies and drag selectio
 enabled = true
 dream = daily
 headless_access = false
+
+[experimental]                   ; opt-in speed experiments, all off by default (docs/performance.md)
+prewarm_connection = false       ; open the provider connection while the session starts
+early_tool_start = false         ; start read-only tool calls while the reply still streams
+cache_prewarm = false            ; write the prompt cache before the first request (Anthropic)
+stagger_subagents = false        ; same-prefix subagents wait for the first one's response to begin
 ```
 
 Credentials: `api_key` (inline; the file must then be mode 600),

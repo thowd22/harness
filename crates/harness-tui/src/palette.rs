@@ -23,9 +23,10 @@ use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 
-use crate::chat::text::{truncate, width};
+use crate::chat::text::{sanitize, truncate, truncate_line, width};
 use crate::fuzzy::{self, Fuzzy};
 use crate::interaction::{ElementId, HitMap};
+use crate::item_detail::{ItemDetail, hard_end, hard_wrap};
 use crate::keys::{Action, Keymap};
 use crate::theme::{Theme, Token};
 
@@ -218,7 +219,15 @@ pub struct Invocation {
 pub enum PaletteAction {
     /// Run (or start prompting for) visible row `n` of the filtered list.
     Select(usize),
+    /// Scroll the selected entry's full text by this many rows (its ▲/▼).
+    Detail(i32),
+    /// Open or close the selected entry's full text (`→ full text`).
+    ToggleDetail,
 }
+
+/// Element id prefix of the palette's full-text detail (see
+/// [`crate::item_detail`]).
+pub const DETAIL_PREFIX: &str = "palette";
 
 /// Result of a palette event.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -253,6 +262,7 @@ pub struct Palette {
     scroll: usize,
     prompt: Option<ArgPrompt>,
     page: usize,
+    detail: ItemDetail,
 }
 
 impl std::fmt::Debug for Palette {
@@ -285,6 +295,7 @@ impl Palette {
             scroll: 0,
             prompt: None,
             page: 10,
+            detail: ItemDetail::new(),
         };
         p.set_entries(entries);
         p
@@ -482,6 +493,14 @@ impl Palette {
                 }
                 self.choose(*row)
             }
+            PaletteAction::Detail(n) => {
+                self.detail.scroll(*n);
+                PaletteOutcome::Changed
+            }
+            PaletteAction::ToggleDetail => {
+                self.detail.toggle();
+                PaletteOutcome::Changed
+            }
         }
     }
 
@@ -527,8 +546,14 @@ impl Palette {
             return PaletteOutcome::Changed;
         }
         let n = self.filtered.len();
+        let shift = key.modifiers == KeyModifiers::SHIFT;
         match key.code {
             KeyCode::Esc => return self.back(),
+            // Shift+Up/Down scroll the selected entry's full text.
+            KeyCode::Up if shift => self.detail.scroll(-1),
+            KeyCode::Down if shift => self.detail.scroll(1),
+            // Right opens (and closes) the selected entry's full text.
+            KeyCode::Right if plain => self.detail.toggle(),
             KeyCode::Enter => return self.choose(self.selected),
             KeyCode::Down | KeyCode::Tab
                 if n > 0 && !key.modifiers.contains(KeyModifiers::SHIFT) =>
@@ -594,72 +619,109 @@ impl Palette {
             return;
         }
         let w = inner.width as usize;
-        // Query / argument line.
-        let (line, cursor_x) = match &self.prompt {
+        // Query / argument line, wrapped by character so the cursor lands
+        // after the text typed so far.
+        let (spans, typed) = match &self.prompt {
             Some(p) => {
                 let e = &self.entries[p.entry];
                 let spec = &e.args[p.values.len()];
                 let mut spans = vec![
-                    Span::styled(format!("{} › ", e.title), theme.fg(Token::Accent)),
-                    Span::styled(format!("{}: ", spec.name), theme.fg(Token::Muted)),
+                    Span::styled(
+                        format!("{} › ", sanitize(&e.title)),
+                        theme.fg(Token::Accent),
+                    ),
+                    Span::styled(
+                        format!("{}: ", sanitize(&spec.name)),
+                        theme.fg(Token::Muted),
+                    ),
+                    Span::styled(sanitize(&p.current), theme.fg(Token::Fg)),
                 ];
-                let x = spans.iter().map(|s| width(&s.content)).sum::<usize>() + width(&p.current);
+                let typed = spans.len();
                 if p.current.is_empty()
                     && let Some(h) = &spec.hint
                 {
-                    spans.push(Span::styled(h.clone(), theme.fg(Token::Muted)));
-                } else {
-                    spans.push(Span::styled(p.current.clone(), theme.fg(Token::Fg)));
+                    spans.push(Span::styled(sanitize(h), theme.fg(Token::Muted)));
                 }
                 if let Some(err) = &p.error {
                     spans.push(Span::styled(format!("  {err}"), theme.fg(Token::Error)));
                 }
-                (Line::from(spans), x)
+                (spans, typed)
             }
-            None => {
-                let spans = vec![
+            None => (
+                vec![
                     Span::styled("› ", theme.fg(Token::Accent)),
-                    Span::styled(self.query.clone(), theme.fg(Token::Fg)),
+                    Span::styled(sanitize(&self.query), theme.fg(Token::Fg)),
                     Span::styled(
                         format!("  {} of {}", self.filtered.len(), self.entries.len()),
                         theme.fg(Token::Muted),
                     ),
-                ];
-                (Line::from(spans), 2 + width(&self.query))
-            }
+                ],
+                2,
+            ),
         };
+        let (crow, ccol) = hard_end(&spans[..typed], w);
+        let head = hard_wrap(spans, w);
+        // The prompt has the whole palette; the query leaves room for rows.
+        let room = if self.prompt.is_some() {
+            inner.height as usize
+        } else {
+            (inner.height as usize).saturating_sub(2).max(1)
+        };
+        let head_h = head.len().min(room).max(1);
+        let first = (crow + 1).saturating_sub(head_h);
+        let shown: Vec<Line<'static>> = head.into_iter().skip(first).take(head_h).collect();
         frame.render_widget(
-            Paragraph::new(line),
-            Rect::new(inner.x, inner.y, inner.width, 1),
+            Paragraph::new(shown),
+            Rect::new(inner.x, inner.y, inner.width, head_h as u16),
         );
-        let cx = inner.x + cursor_x.min(w.saturating_sub(1)) as u16;
-        frame.set_cursor_position(Position::new(cx, inner.y));
-        let list = Rect::new(
+        let cy = (crow - first).min(head_h - 1) as u16;
+        let cx = inner.x + ccol.min(w.saturating_sub(1)) as u16;
+        frame.set_cursor_position(Position::new(cx, inner.y + cy));
+        let mut list = Rect::new(
             inner.x,
-            inner.y + 1,
+            inner.y + head_h as u16,
             inner.width,
-            inner.height.saturating_sub(1),
+            inner.height.saturating_sub(head_h as u16),
+        );
+        if self.prompt.is_some() || list.height == 0 {
+            self.page = (list.height as usize).max(1);
+            return;
+        }
+        let pattern = (!self.query.trim().is_empty()).then(|| fuzzy::query(&self.query));
+        // The selected entry's full text, when its row cuts it.
+        let mut detail = Vec::new();
+        if let Some(&sel) = self.filtered.get(self.selected) {
+            self.scroll_to(list.height as usize);
+            let widths = self.title_widths(list.height as usize, w);
+            let e = &self.entries[sel];
+            let title_w = widths.get(&e.kind).copied().unwrap_or(0);
+            if row_parts(e, title_w, w).3 {
+                detail = self.detail_lines(sel, theme);
+            }
+            self.detail.select(sel);
+        }
+        let cut = !detail.is_empty();
+        let detail_h = self.detail.rows_for(&detail, list.width, list.height);
+        list.height -= detail_h;
+        self.detail.render_hint(
+            frame,
+            Rect::new(
+                rect.x + 1,
+                rect.bottom() - 1,
+                rect.width.saturating_sub(2),
+                1,
+            ),
+            cut,
+            theme,
+            hits,
+            DETAIL_PREFIX,
+            wrap(PaletteAction::ToggleDetail),
         );
         let rows = list.height as usize;
         self.page = rows.max(1);
-        if self.prompt.is_some() || rows == 0 {
-            return;
-        }
-        if self.selected < self.scroll {
-            self.scroll = self.selected;
-        } else if self.selected >= self.scroll + rows {
-            self.scroll = self.selected + 1 - rows;
-        }
-        let pattern = (!self.query.trim().is_empty()).then(|| fuzzy::query(&self.query));
-        // Titles take 2/5 of the row; a kind with longer titles (past
-        // runs) widens its own column up to 3/5 so its rows stay aligned.
-        let (min_w, max_w) = ((w * 2 / 5).max(10), (w * 3 / 5).max(10));
-        let mut title_ws: std::collections::BTreeMap<EntryKind, usize> = Default::default();
-        for &i in self.filtered.iter().skip(self.scroll).take(rows) {
-            let e = &self.entries[i];
-            let t = title_ws.entry(e.kind).or_insert(min_w);
-            *t = (*t).max(width(&e.title).min(max_w));
-        }
+        self.scroll_to(rows);
+        let title_ws = self.title_widths(rows, w);
+        let min_w = (w * 2 / 5).max(10);
         let mut lines = Vec::new();
         let mut indices = Vec::new();
         for (row, &idx) in self
@@ -678,7 +740,7 @@ impl Palette {
             } else {
                 theme.bg(Token::Surface)
             };
-            let title = fit_title(&e.title, title_w, e.keep_tail);
+            let (title, desc, source, _) = row_parts(e, title_w, w);
             indices.clear();
             if let Some(p) = &pattern {
                 self.matcher.word_indices(p, &title, &mut indices);
@@ -698,28 +760,18 @@ impl Palette {
                 " ".repeat(title_w.saturating_sub(width(&title)) + 1),
                 base,
             ));
-            let source = match &e.scope {
-                Some(s) => format!("{} · {s}", e.kind.label()),
-                None => e.kind.label().to_owned(),
-            };
-            let key = e.keybinding.clone().unwrap_or_default();
-            let right = format!(" {source}{}{key}", if key.is_empty() { "" } else { "  " });
-            let desc_w = w.saturating_sub(2 + title_w + 1 + width(&right));
-            spans.push(Span::styled(
-                format!("{:<desc_w$}", truncate(&e.description, desc_w)),
-                base.patch(theme.fg(Token::Muted)),
-            ));
+            spans.push(Span::styled(desc, base.patch(theme.fg(Token::Muted))));
             spans.push(Span::styled(
                 format!(" {source}"),
                 base.patch(theme.fg(Token::Agent)),
             ));
-            if !key.is_empty() {
+            if let Some(key) = e.keybinding.as_deref().filter(|k| !k.is_empty()) {
                 spans.push(Span::styled(
                     format!("  {key}"),
                     base.patch(theme.fg(Token::Keyword)),
                 ));
             }
-            lines.push(Line::from(spans));
+            lines.push(truncate_line(Line::from(spans), w));
             hits.register(
                 id,
                 Rect::new(list.x, list.y + (row - self.scroll) as u16, list.width, 1),
@@ -733,7 +785,95 @@ impl Palette {
             )));
         }
         frame.render_widget(Paragraph::new(lines), list);
+        if detail_h > 0 {
+            // Right below the rows shown.
+            let used = (self.filtered.len() - self.scroll.min(self.filtered.len())).clamp(1, rows);
+            let r = Rect::new(list.x, list.y + used as u16, list.width, detail_h);
+            self.detail.render(
+                frame,
+                r,
+                detail,
+                theme,
+                hits,
+                DETAIL_PREFIX,
+                wrap(PaletteAction::Detail(-1)),
+                wrap(PaletteAction::Detail(1)),
+            );
+        }
     }
+
+    /// Keeps the selection inside `rows` visible rows.
+    fn scroll_to(&mut self, rows: usize) {
+        let rows = rows.max(1);
+        if self.selected < self.scroll {
+            self.scroll = self.selected;
+        } else if self.selected >= self.scroll + rows {
+            self.scroll = self.selected + 1 - rows;
+        }
+    }
+
+    /// Title column widths of the visible rows by kind: 2/5 of the row; a
+    /// kind with longer titles (past runs) widens its own column up to 3/5
+    /// so its rows stay aligned.
+    fn title_widths(&self, rows: usize, w: usize) -> std::collections::BTreeMap<EntryKind, usize> {
+        let (min_w, max_w) = ((w * 2 / 5).max(10), (w * 3 / 5).max(10));
+        let mut title_ws: std::collections::BTreeMap<EntryKind, usize> = Default::default();
+        for &i in self.filtered.iter().skip(self.scroll).take(rows) {
+            let e = &self.entries[i];
+            let t = title_ws.entry(e.kind).or_insert(min_w);
+            *t = (*t).max(width(&sanitize(&e.title)).min(max_w));
+        }
+        title_ws
+    }
+
+    /// Entry `idx` in full, for the detail below the list: title,
+    /// description, then source and key.
+    fn detail_lines(&self, idx: usize, theme: &Theme) -> Vec<Line<'static>> {
+        let e = &self.entries[idx];
+        let mut v = vec![Line::from(Span::styled(
+            sanitize(&e.title),
+            theme.fg(Token::Fg).add_modifier(Modifier::BOLD),
+        ))];
+        if !e.description.is_empty() {
+            v.extend(
+                sanitize(&e.description)
+                    .lines()
+                    .map(|l| Line::from(Span::styled(l.to_owned(), theme.fg(Token::Muted)))),
+            );
+        }
+        let mut src = vec![Span::styled(source_label(e), theme.fg(Token::Agent))];
+        if let Some(k) = e.keybinding.as_deref().filter(|k| !k.is_empty()) {
+            src.push(Span::styled(format!("  {k}"), theme.fg(Token::Keyword)));
+        }
+        v.push(Line::from(src));
+        v
+    }
+}
+
+/// `kind · scope`.
+fn source_label(e: &PaletteEntry) -> String {
+    match &e.scope {
+        Some(s) => format!("{} · {}", e.kind.label(), sanitize(s)),
+        None => e.kind.label().to_owned(),
+    }
+}
+
+/// The parts of `e`'s row at `w` cells with a `title_w` title column:
+/// the (possibly cut) title, the padded (possibly cut) description, the
+/// source, and whether anything was cut.
+fn row_parts(e: &PaletteEntry, title_w: usize, w: usize) -> (String, String, String, bool) {
+    let full_title = sanitize(&e.title);
+    let title = fit_title(&full_title, title_w, e.keep_tail);
+    let source = source_label(e);
+    let key = e.keybinding.clone().unwrap_or_default();
+    let right = format!(" {source}{}{key}", if key.is_empty() { "" } else { "  " });
+    let desc_w = w.saturating_sub(2 + title_w + 1 + width(&right));
+    let full_desc = sanitize(&e.description).replace('\n', " ");
+    let cut_desc = truncate(&full_desc, desc_w);
+    let cut = title != full_title
+        || cut_desc != full_desc
+        || 2 + title_w + 1 + desc_w + width(&right) > w;
+    (title, format!("{cut_desc:<desc_w$}"), source, cut)
 }
 
 /// Built-in commands, with keybindings from `keymap`, plus the autonomy
@@ -1205,6 +1345,107 @@ mod tests {
         };
         assert_eq!(it.handle_mouse(&outside), Some(Dispatch::Back));
         assert_eq!(p.back(), PaletteOutcome::Closed);
+    }
+
+    fn mouse_at(it: &mut Interaction<PaletteAction>, x: u16, y: u16) -> Option<PaletteAction> {
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        };
+        match it.handle_mouse(&click) {
+            Some(Dispatch::Activate(a)) => Some(a),
+            _ => None,
+        }
+    }
+
+    /// A cut row offers `→ full text` on the bottom border; Right or a
+    /// click opens the entry's full text below the rows, Shift+Down or ▼
+    /// scrolls it, and Right or a click on `← hide full text` closes it.
+    #[test]
+    fn cut_rows_open_their_full_text_by_keyboard_and_mouse() {
+        let long = "a description that is much too long for its column ".repeat(8) + "tail_end";
+        let mut p = Palette::new(vec![PaletteEntry::new(
+            "x",
+            "Long entry",
+            long.clone(),
+            EntryKind::Workflow,
+        )]);
+        p.open();
+        let mut it = Interaction::new();
+        let term = draw(&mut p, &mut it);
+        let text = buffer_text(term.backend().buffer());
+        assert!(text.contains("→ full text"), "{text}");
+        assert!(!text.contains("tail_end"), "{text}");
+        // Keyboard: Right opens; the whole description wraps below.
+        assert_eq!(p.handle_key(&key("right")), PaletteOutcome::Changed);
+        let term = draw(&mut p, &mut it);
+        let text = buffer_text(term.backend().buffer());
+        assert!(text.contains("─ full text"), "{text}");
+        assert!(text.contains("← hide full text"), "{text}");
+        assert!(text.contains("tail_end"), "{text}");
+        assert_eq!(p.handle_key(&key("right")), PaletteOutcome::Changed);
+        let term = draw(&mut p, &mut it);
+        assert!(!buffer_text(term.backend().buffer()).contains("tail_end"));
+        // Mouse: click the hint to open, ▼ scrolls a short palette.
+        let (x, y) = find_text(term.backend().buffer(), "→ full text").unwrap();
+        let a = mouse_at(&mut it, x, y).expect("hint is clickable");
+        assert_eq!(a, PaletteAction::ToggleDetail);
+        p.activate(&a);
+        let term = draw(&mut p, &mut it);
+        assert!(buffer_text(term.backend().buffer()).contains("tail_end"));
+        // A click on `← hide full text` closes it, a second click reopens.
+        let (x, y) = find_text(term.backend().buffer(), "← hide full text").unwrap();
+        let a = mouse_at(&mut it, x + 2, y).expect("hide is clickable");
+        p.activate(&a);
+        let term = draw(&mut p, &mut it);
+        assert!(!buffer_text(term.backend().buffer()).contains("tail_end"));
+        let (x, y) = find_text(term.backend().buffer(), "→ full text").unwrap();
+        let a = mouse_at(&mut it, x, y).expect("hint is clickable");
+        p.activate(&a);
+        let theme = Theme::default();
+        let mut small = Terminal::new(TestBackend::new(60, 12)).unwrap();
+        let mut redraw = |p: &mut Palette, it: &mut Interaction<PaletteAction>| {
+            let mut hits = it.begin_frame();
+            small
+                .draw(|f| p.render(f, f.area(), &theme, &mut hits, &|a| a))
+                .unwrap();
+            it.end_frame(hits);
+            (
+                buffer_text(small.backend().buffer()),
+                find_text(small.backend().buffer(), "▼"),
+            )
+        };
+        let (text, down) = redraw(&mut p, &mut it);
+        assert!(text.contains("1-"), "a position shows: {text}");
+        let (x, y) = down.expect("▼ shows when the text overflows");
+        let a = mouse_at(&mut it, x, y).expect("▼ is clickable");
+        assert_eq!(a, PaletteAction::Detail(1));
+        p.activate(&a);
+        let (text, _) = redraw(&mut p, &mut it);
+        assert!(text.contains("2-"), "{text}");
+        p.handle_key(&key("shift+down"));
+        let (text, _) = redraw(&mut p, &mut it);
+        assert!(text.contains("3-"), "{text}");
+        p.handle_key(&key("shift+up"));
+        let (text, _) = redraw(&mut p, &mut it);
+        assert!(text.contains("2-"), "{text}");
+    }
+
+    #[test]
+    fn long_queries_and_prompts_wrap_with_the_cursor_after_the_text() {
+        let mut p = Palette::new(sample());
+        p.open();
+        let q = "x".repeat(150);
+        p.set_query(&q);
+        let mut it = Interaction::new();
+        let mut term = draw(&mut p, &mut it);
+        let text = buffer_text(term.backend().buffer());
+        assert_eq!(text.matches('x').count(), 150, "{text}");
+        let pos = term.get_cursor_position().unwrap();
+        // "› " + 150 chars in a 94-wide palette: row 2, column 2 + 150 - 94.
+        assert_eq!((pos.x, pos.y), (3 + 58, 2), "{text}");
     }
 
     #[test]

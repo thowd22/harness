@@ -98,6 +98,44 @@ rewritten history is re-recorded with the next request, so resuming a session
 rebuilds the compacted conversation. If compaction fails, the problem is
 logged and the run continues.
 
+### Background compaction (experimental, off by default)
+
+In-line compaction makes the turn that crosses `compact_at` wait for the
+whole summary call, often 10-60 s with a large model. With
+`[context] background_compaction = true` the summary starts earlier, when the
+next request reaches `background_compact_at` (default 0.7) of the window, and
+the agent keeps working while it runs. At `compact_at` the finished summary is
+swapped in; a summary still running is awaited, so the turn waits only for
+the rest of it.
+
+- The summary covers the history before the cut that `keep_recent_turns` gave
+  when it started. Everything after that cut stays verbatim: the latest
+  `keep_recent_turns` turns plus the turns added while the summary ran. The
+  handoff is the same one in-line compaction would write for that part, and
+  the verbatim tail always contains what in-line compaction would keep.
+- If the swapped-in history is still over `compact_at`, it is compacted
+  in-line once more.
+- If the summary call fails, compaction falls back to in-line at
+  `compact_at` (no further background attempts until a compaction succeeds).
+- Cancelling a turn cancels its summary (the `compaction` node ends as
+  cancelled) and the next turn starts a new one. A summary started by an
+  earlier turn is cancelled the same way when you cancel the turn that is
+  waiting for it at `compact_at`. A summary still pending when the session
+  ends is cancelled and recorded before the run log closes. `/compact`
+  discards a pending summary and compacts in-line with its focus.
+- If the history before the cut changed meanwhile (for example a rewind),
+  the summary is dropped and the next one covers the new history. Elided
+  tool results and dropped reasoning do not count as a change.
+- Nothing is swapped in until `compact_at`, and the swap re-records the
+  history like in-line compaction, so session resume stays exact. A summary
+  still running when the session ends is simply lost.
+- The summary's tokens are charged to the run that swaps it in (or that
+  drops it). Both modes make one summary call per compaction, unless a
+  background summary is dropped.
+
+`harness bench --fake --compaction` measures the difference (see
+[performance.md](performance.md#background-compaction)).
+
 ## No context anxiety
 
 Models tend to wrap up early when they believe the context is nearly full.
@@ -130,4 +168,6 @@ harness CI: default agent `coder` with tools [...]: initial context 1308 tokens 
 | `compact_at` | 0.8 | Compact when the next request reaches this fraction of the window |
 | `keep_recent_turns` | 6 | Assistant turns kept verbatim, and the age at which results may be elided |
 | `elide_tool_results_over` | 4000 | Tool results above this many tokens can be elided |
+| `background_compaction` | false | Start the handoff summary in the background and swap it in at `compact_at` (experimental, see above) |
+| `background_compact_at` | 0.7 | With `background_compaction`: start the summary when the next request reaches this fraction of the window (capped at `compact_at`) |
 | `mcp_schema_budget` | 2000 | Estimated tokens of an agent's selected MCP tool schemas above which one `mcp_tools` search-and-call tool is offered instead (see [mcp.md](mcp.md#context-cost)) |

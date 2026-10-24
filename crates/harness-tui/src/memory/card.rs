@@ -16,7 +16,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use time::OffsetDateTime;
 
-use crate::chat::text::{sanitize, truncate, width};
+use crate::chat::text::{sanitize, width, wrap_line};
 use crate::interaction::{ElementId, HitMap};
 use crate::theme::{Theme, Token};
 
@@ -125,10 +125,75 @@ impl MemoryCard {
         }
     }
 
-    /// Rows the card needs.
+    /// Rows the card needs at its widest (one row per bullet; see
+    /// [`MemoryCard::height_for`] for a given width).
     pub fn height(&self) -> u16 {
         // Borders + bullets + note line + button/status line.
         (2 + self.bullets.len() + 2) as u16
+    }
+
+    /// Rows [`MemoryCard::render`] needs at `width`: bullets and notes wrap.
+    pub fn height_for(&self, width: u16) -> u16 {
+        let theme = Theme::default();
+        let (_, body) = self.block_parts(&theme, width.saturating_sub(2) as usize);
+        let status = usize::from(self.undone || self.commit().is_some());
+        (2 + body.len() + status) as u16
+    }
+
+    fn sign(&self) -> (&'static str, Token) {
+        if self.action == MemoryAction::Deleted {
+            ("−", Token::DiffRemoved)
+        } else {
+            ("+", Token::DiffAdded)
+        }
+    }
+
+    /// The content rows at inner width `iw`: the note (when `note_row`),
+    /// the bullets and the future-sessions note, wrapped.
+    fn content(&self, theme: &Theme, iw: usize, note_row: bool) -> Vec<Line<'static>> {
+        let iw = iw.max(1);
+        let mut out = Vec::new();
+        if note_row {
+            let note = self.note.as_deref().unwrap_or("memory");
+            out.extend(wrap_line(
+                Line::from(Span::styled(sanitize(note), theme.fg(Token::Path))),
+                iw,
+                &[],
+            ));
+        }
+        let (sign, token) = self.sign();
+        for b in &self.bullets {
+            out.extend(wrap_line(
+                Line::from(vec![
+                    Span::styled(format!("{sign} "), theme.fg(token)),
+                    Span::styled(sanitize(b), theme.fg(Token::Fg)),
+                ]),
+                iw,
+                &[Span::raw("  ")],
+            ));
+        }
+        out.extend(wrap_line(
+            Line::from(Span::styled(FUTURE_SESSIONS_NOTE, theme.fg(Token::Muted))),
+            iw,
+            &[],
+        ));
+        out
+    }
+
+    /// The title spans of the block version, and its content rows (the
+    /// note moves into the content when the border cannot hold it).
+    fn block_parts(&self, theme: &Theme, iw: usize) -> (Vec<Span<'static>>, Vec<Line<'static>>) {
+        let note = sanitize(self.note.as_deref().unwrap_or("memory"));
+        let title = format!(" {} ", self.title());
+        let fits = width_of(&title) + width_of(&note) < iw;
+        let mut spans = vec![Span::styled(
+            title,
+            theme.fg(Token::Agent).add_modifier(Modifier::BOLD),
+        )];
+        if fits {
+            spans.push(Span::styled(format!("{note} "), theme.fg(Token::Path)));
+        }
+        (spans, self.content(theme, iw, !fits))
     }
 
     /// The card as transcript lines `width` columns wide, and the index of
@@ -139,51 +204,56 @@ impl MemoryCard {
         width: usize,
         focused: bool,
     ) -> (Vec<Line<'static>>, Option<usize>) {
-        let width = width.max(12);
+        let width = width.max(4);
         let iw = width - 4;
         let border = theme.fg(Token::Agent);
-        let note = self.note.as_deref().unwrap_or("memory");
+        let note = sanitize(self.note.as_deref().unwrap_or("memory"));
         let title = format!(" {} ", self.title());
-        let note = truncate(&sanitize(note), iw.saturating_sub(width_of(&title) + 2));
-        let used = 2 + width_of(&title) + width_of(&note) + 1;
-        let mut out = vec![Line::from(vec![
-            Span::styled("╭─", border),
-            Span::styled(title, border.add_modifier(Modifier::BOLD)),
-            Span::styled(format!("{note} "), theme.fg(Token::Path)),
-            Span::styled(
-                format!("{}╮", "─".repeat(width.saturating_sub(used + 1))),
-                border,
-            ),
-        ])];
-        let row = |spans: Vec<Span<'static>>| {
-            let w: usize = spans.iter().map(|s| width_of(&s.content)).sum();
-            let mut v = vec![Span::styled("│ ", border)];
-            v.extend(spans);
+        // `╭─` + title + note + ` ` + at least `─╮`.
+        let fits = 2 + width_of(&title) + width_of(&note) + 1 + 2 <= width;
+        let title_fits = 2 + width_of(&title) + 2 <= width;
+        let mut head = vec![Span::styled("╭─", border)];
+        if title_fits {
+            head.push(Span::styled(title, border.add_modifier(Modifier::BOLD)));
+        }
+        if fits {
+            head.push(Span::styled(format!("{note} "), theme.fg(Token::Path)));
+        }
+        let used: usize = head.iter().map(|s| width_of(&s.content)).sum();
+        head.push(Span::styled(
+            format!("{}╮", "─".repeat(width.saturating_sub(used + 1))),
+            border,
+        ));
+        let mut out = vec![Line::from(head)];
+        let row = |mut l: Line<'static>| {
+            let marker = crate::chat::text::take_wrap_marker(&mut l);
+            let w: usize = l.spans.iter().map(|s| width_of(&s.content)).sum();
+            let mut v: Vec<Span<'static>> = marker.into_iter().collect();
+            v.push(Span::styled("│ ", border));
+            v.extend(l.spans);
             v.push(Span::raw(" ".repeat(iw.saturating_sub(w))));
             v.push(Span::styled(" │", border));
             Line::from(v)
         };
-        let (sign, token) = if self.action == MemoryAction::Deleted {
-            ("−", Token::DiffRemoved)
-        } else {
-            ("+", Token::DiffAdded)
-        };
-        for b in &self.bullets {
-            out.push(row(vec![
-                Span::styled(format!("{sign} "), theme.fg(token)),
-                Span::styled(
-                    truncate(&sanitize(b), iw.saturating_sub(2)),
-                    theme.fg(Token::Fg),
-                ),
-            ]));
+        let mut content = Vec::new();
+        if !title_fits {
+            content.extend(wrap_line(
+                Line::from(Span::styled(
+                    self.title().to_owned(),
+                    border.add_modifier(Modifier::BOLD),
+                )),
+                iw.max(1),
+                &[],
+            ));
         }
-        out.push(row(vec![Span::styled(
-            truncate(FUTURE_SESSIONS_NOTE, iw),
-            theme.fg(Token::Muted),
-        )]));
+        content.extend(self.content(theme, iw, !fits));
+        out.extend(content.into_iter().map(row));
         let mut button = None;
         if self.undone {
-            out.push(row(vec![Span::styled("undone", theme.fg(Token::Muted))]));
+            out.push(row(Line::from(Span::styled(
+                "undone",
+                theme.fg(Token::Muted),
+            ))));
         } else if self.commit().is_some() {
             let style = if focused {
                 theme.focused()
@@ -191,7 +261,7 @@ impl MemoryCard {
                 theme.fg(Token::Link)
             };
             button = Some(out.len());
-            out.push(row(vec![Span::styled(UNDO_LABEL, style)]));
+            out.push(row(Line::from(Span::styled(UNDO_LABEL, style))));
         }
         out.push(Line::from(Span::styled(
             format!("╰{}╯", "─".repeat(width.saturating_sub(2))),
@@ -200,7 +270,8 @@ impl MemoryCard {
         (out, button)
     }
 
-    /// Draws the card in `area` and registers the undo button.
+    /// Draws the card in `area` ([`MemoryCard::height_for`] rows) and
+    /// registers the undo button.
     pub fn render<A: Clone>(
         &self,
         frame: &mut Frame<'_>,
@@ -209,48 +280,14 @@ impl MemoryCard {
         hits: &mut HitMap<A>,
         wrap: &dyn Fn(MemoryCardAction) -> A,
     ) {
-        let note = self.note.as_deref().unwrap_or("memory");
+        let (title, lines) = self.block_parts(theme, area.width.saturating_sub(2) as usize);
         let block = Block::new()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(theme.fg(Token::Agent))
-            .title(Line::from(vec![
-                Span::styled(
-                    format!(" {} ", self.title()),
-                    theme.fg(Token::Agent).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(format!("{} ", sanitize(note)), theme.fg(Token::Path)),
-            ]));
+            .title(Line::from(title));
         let inner = block.inner(area);
         frame.render_widget(block, area);
-        let iw = inner.width as usize;
-        let sign = if self.action == MemoryAction::Deleted {
-            "−"
-        } else {
-            "+"
-        };
-        let token = if self.action == MemoryAction::Deleted {
-            Token::DiffRemoved
-        } else {
-            Token::DiffAdded
-        };
-        let mut lines: Vec<Line<'static>> = self
-            .bullets
-            .iter()
-            .map(|b| {
-                Line::from(vec![
-                    Span::styled(format!("{sign} "), theme.fg(token)),
-                    Span::styled(
-                        truncate(&sanitize(b), iw.saturating_sub(2)),
-                        theme.fg(Token::Fg),
-                    ),
-                ])
-            })
-            .collect();
-        lines.push(Line::from(Span::styled(
-            truncate(FUTURE_SESSIONS_NOTE, iw),
-            theme.fg(Token::Muted),
-        )));
         let status_row = inner.y + lines.len() as u16;
         frame.render_widget(Paragraph::new(lines), inner);
         if status_row >= inner.bottom() {

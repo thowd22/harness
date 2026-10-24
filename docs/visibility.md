@@ -162,7 +162,10 @@ it for the session.
 Changed files of the session or of one node, from the change ledger: kind,
 `+N −M`, change sources and hygiene classifications inline
 (`⚑ out of scope`, `⚑ temp/debug`, `⚑ whitespace-only`, `⚑ new untracked`),
-and the selected file's diff with syntax colours. `[revert]` (or `r` on the
+and the selected file's diff with syntax colours. Generated build and test
+artifacts written by bash (`__pycache__/*.pyc`, see
+[hygiene](hygiene.md#generated-files)) are listed after the real changes,
+labelled `· generated`. `[revert]` (or `r` on the
 selected file) restores a file from its checkpoint.
 
 ## UI gallery (`harness ui-demo`, `harness_tui::demo`)

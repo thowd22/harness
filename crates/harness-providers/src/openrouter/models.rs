@@ -51,6 +51,21 @@ impl ModelInfo {
         })
     }
 
+    /// The entry for a model from a cached live list
+    /// ([`crate::catalog::LiveModel`], as [`crate::catalog::ModelListCache`]
+    /// stores OpenRouter's list). Facts the list does not state count as
+    /// unsupported.
+    pub fn from_live(m: &crate::catalog::LiveModel) -> Self {
+        Self {
+            id: m.id.clone(),
+            context_length: m.context_window.unwrap_or(0),
+            max_completion_tokens: m.max_output_tokens.unwrap_or(0),
+            supports_tools: m.tools.unwrap_or(false),
+            supports_reasoning: m.reasoning.unwrap_or(false),
+            supports_images: m.vision.unwrap_or(false),
+        }
+    }
+
     /// The model's capabilities. `caching` is set for Anthropic models,
     /// whose requests carry explicit cache breakpoints
     /// ([`super::request::uses_cache_breakpoints`]).

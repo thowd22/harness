@@ -13,6 +13,73 @@ to built-in prompts, agents, workflows and `harness.ini` defaults.
 
 ### Added
 
+- `[context] background_compaction` (off by default, with
+  `background_compact_at = 0.7`): the handoff summary starts in the
+  background at 0.7 of the window and is swapped in at `compact_at`, so the
+  turn that crosses it no longer waits for the summary call; the latest
+  `keep_recent_turns` turns and every turn added meanwhile stay verbatim,
+  and a failed, cancelled or outdated summary falls back to in-line
+  compaction. `harness bench --fake --compaction` measures it (summary
+  wait 2.5 s to 0.06 ms in the bundled run). See
+  [docs/context.md](docs/context.md#background-compaction-experimental-off-by-default).
+  The fake provider gains `match_system` for scripted replies matched by
+  system prompt.
+- `harness bench`: a latency benchmark of a bundled two-turn coding task
+  (fix a bug, add a method with a test) in a temporary git repository.
+  `--fake` runs offline against the scripted fake provider and measures
+  harness overhead; `--model REF` runs a real model. It reports, per model
+  call, time to first byte and token, output tokens/s, call time, cached and
+  uncached input, request sizes and cache-prefix stability, and per gap the
+  tool, verify, hook and harness-overhead time, plus turn and tool totals,
+  event-recording and TUI render cost, as a table and JSON. See
+  [docs/performance.md](docs/performance.md), which also records the
+  baseline. The timing probe exists only under `harness bench`. CI runs
+  `scripts/bench-guard.sh` on Ubuntu and macOS: `harness bench --fake`
+  best of 7, failing when harness overhead per call or session start
+  passes its limit (see
+  [docs/performance.md](docs/performance.md#ci-overhead-guard)).
+- OpenAI requests carry a `prompt_cache_key` (a hash of the instructions
+  and tools, shared by every turn and by subagents with the same prefix),
+  so cache-warm turns route to the same prompt cache. New opt-in
+  `[provider.openai] prompt_cache_retention = 24h` (default `default`:
+  nothing is sent, so the organisation's own retention applies, including
+  in-memory caching under Zero Data Retention) asks for 24-hour retention
+  on the models that support it. See
+  [docs/providers-openai.md](docs/providers-openai.md).
+- `[experimental]` section in harness.ini for opt-in speed experiments, all
+  off by default: `prewarm_connection` (open the provider connection while
+  the session starts).
+- `[experimental] early_tool_start` (off by default): a reply's leading
+  read-only tool calls that policy allows without asking start as soon as
+  each call is complete in the stream, instead of after the whole message;
+  results, approvals and the event log are unchanged, and stream errors,
+  retries and cancellation cancel them. Every provider now reports each tool
+  call's end as soon as its arguments are complete: OpenRouter closes a call
+  when the next one or text starts and at `finish_reason` (before, only at
+  the end of the message). See
+  [docs/performance.md](docs/performance.md#early-tool-start).
+- Anthropic and OpenRouter request options and cache experiments, all off
+  by default (TASK-161.4): `[provider.anthropic] thinking_display =
+  summarized | omitted | updates` (`updates` adds its beta header),
+  `cache_ttl = 5m | 1h | mixed`, and `cache_ttl_auto_1h` (one-hour
+  breakpoints while a background job runs or after a long tool round);
+  `[provider.openrouter] reasoning_exclude`; `[experimental] cache_prewarm`
+  (a non-streaming `max_tokens: 0` call writes the prompt cache when an
+  interactive session starts or resumes, after `/compact` and before a
+  subagent fan-out, recorded as a `cache-prewarm` node with its cost) and
+  `stagger_subagents` (sibling requests with the same cached prefix wait
+  for the first response to begin, then read the cache). See
+  [docs/providers-anthropic.md](docs/providers-anthropic.md) and
+  [docs/performance.md](docs/performance.md#prompt-cache-options).
+- `[provider.openrouter] service_tier = default | fast` (unset by default:
+  nothing is sent). `fast` asks OpenRouter for the priority tier, which for
+  Claude Opus 5.5 is Anthropic fast mode at 2x the token price (live:
+  turns 2.2x faster, session cost +73%, eval pass rate unchanged).
+  OpenRouter model ids with the routing suffixes `:nitro` and `:floor`
+  (e.g. `openrouter/anthropic/claude-opus-5.5:nitro`) are now accepted:
+  the catalog check uses the base model's entry (before, they were
+  rejected as unknown models). See
+  [docs/performance.md](docs/performance.md#fast-mode-nitro-reasoning-and-effort-task-1617).
 - Select text with the mouse anywhere in the TUI and copy it on release.
   Press, drag and release over the chat transcript (messages, tool cards
   and their output), the input box, the map, node detail, the diff screen,
@@ -61,6 +128,32 @@ to built-in prompts, agents, workflows and `harness.ini` defaults.
 
 ### Changed
 
+- Faster session start and warm connections (TASK-161.1). The OpenRouter
+  tool-support check at session start reads the cached model list
+  (`<data_dir>/model-lists/`, fresh for `[general] model_list_ttl`) instead
+  of downloading the ~800 KB catalog every time (session start 0.3-0.8 s
+  before, 6.2 ms with a cached list); a stale list is refreshed in the background, and models the
+  list lacks or marks tool-less are still checked against the live
+  catalog. All providers for the same base URL (main agent, subagents,
+  session summaries, dreaming, the catalog download) now share one HTTP
+  connection pool with longer keepalive (idle 300 s, TCP and HTTP/2
+  keepalive), so later providers skip the cold DNS/TCP/TLS setup; each
+  provider still sends only its own credentials. OpenRouter requests carry
+  a `session_id` by default (`[provider.openrouter] session_id`).
+
+- The TUI fits every view on screen and inside its border at any terminal
+  size, and no longer cuts text off with `…`: long words, paths, URLs,
+  code and diff lines and CJK/emoji wrap inside tool cards, subagent
+  cards, notices, panels, pickers, popups and toasts; card headers keep
+  the tool name in the border and wrap the rest inside the box. The status
+  line, footer, activity line and selection bar wrap onto more rows; when
+  the status line still runs out of room, a `+N more` button (and the new
+  palette entry **Show status**) opens the full status in a panel. Popups
+  size to their content and scroll when they cannot fit. Tabs are drawn as
+  spaces to 4-column stops. A layout test matrix checks every view at
+  40x12 to 250x60. See [docs/tui.md](docs/tui.md#layout-everything-fits-nothing-is-hidden).
+  (TASK-160)
+
 - `bash_jobs` has a `wait` action: it blocks until a background job ends
   (or `timeout` seconds, default 60, at most 600) and returns its exit
   status and new output, so agents stop polling with `sleep`. The exit is
@@ -99,6 +192,27 @@ to built-in prompts, agents, workflows and `harness.ini` defaults.
 
 ### Fixed
 
+- Running a test suite or a build no longer ends a turn with
+  "unverified: N file changes" when the only changes are generated
+  artifacts. Bash changes to well-known build and test output
+  (`__pycache__/`, `*.pyc`, `.pytest_cache/`, `.mypy_cache/`, `target/`,
+  `node_modules/`, coverage files, `.DS_Store`, ...) are recorded as
+  generated (`file_changed` gains `"generated": true`): they stay visible in
+  node detail and `/diff` (listed last, labelled `generated`) but do not
+  count toward the unverified notice, `verify_when = on_changes` or the
+  node's files-changed count, and checkpoints leave them out. A workspace
+  below its repository root now also honours the parent `.gitignore` files
+  up to that root (never a `.gitignore` above the repository, and not
+  when that repository ignores the workspace itself, as a dotfiles home
+  whose `.gitignore` is `*` does). Source files changed by bash, tracked
+  files that match the list (a source directory named `target/`), and
+  tracked files an ignore rule matches (force-added), still count. See
+  docs/hygiene.md.
+- Copy-on-select polish: copying a tool card's header no longer keeps a
+  piece of its border rule when the title is truncated (`line-th…─ 7ms`
+  is now `line-th… 7ms`), and a drag that starts on a panel, picker or
+  dialog border selects from the nearest text cell inside it, as one from
+  a chat card's border already did.
 - Prompt caching works for Claude models on OpenRouter. Requests to
   `anthropic/...` models now carry up to four `cache_control` breakpoints,
   placed like the Anthropic provider's (last tool, system prompt layers,
@@ -120,6 +234,11 @@ to built-in prompts, agents, workflows and `harness.ini` defaults.
   `Operation not permitted` outside the writable paths now ends its output
   with a one-line `harness sandbox:` note naming `[sandbox]` in
   harness.ini, so the model stops guessing at the cause.
+- The end-of-session memory extractor and the dream pass accept
+  `project/overview` bullets up to 1000 characters, like the memory tool;
+  before, they applied the 400-character limit to every path and dropped
+  valid overview proposals. The per-path limit now has one definition
+  (`guard::limit_for_path`) shared by all three.
 
 ## [0.3.0] - 2026-10-23
 
@@ -504,4 +623,35 @@ fingerprint. CI fails until the entry exists; `cargo test -p harness-eval
     instead of `sleep`; the tools layer and the `edit` description say to
     open files with `read`, not `cat`, because `edit` needs a `read` first
     (the model's first edit failed after it had used `cat`).
+  defaults-fingerprint: 46b4cecb7b8e
+- Speed work (TASK-161). One default changes; every other new setting is
+  opt-in and off by default, and request bodies with the defaults are
+  byte-identical except for OpenRouter's `session_id` and OpenAI's
+  `prompt_cache_key` (golden snapshots reviewed):
+  - New `[provider.openrouter] session_id`, default on: every OpenRouter
+    request carries one `session_id` per harness process, so the session
+    (subagents, compaction and summaries included) keeps routing to one
+    upstream and its warm prompt cache, also after pauses. Measured with
+    no change in cost, cache share or latency; `session_id = false` turns
+    it off. It replaces the pre-release `[experimental]
+    openrouter_session_id`, which is now an unknown key. (TASK-161.1)
+  - New `[experimental]` section, all `false`: `prewarm_connection`
+    (TASK-161.1), `early_tool_start` (TASK-161.2), `cache_prewarm` and
+    `stagger_subagents` (TASK-161.4).
+  - `[provider.openai] prompt_cache_retention`, default `default` (nothing
+    sent; `24h` opt-in). `prompt_cache_key` is sent on API-key requests;
+    it is derived from the instructions and tools, so prompts are
+    unchanged. (TASK-161.3)
+  - `[provider.anthropic] thinking_display` (default `summarized`;
+    `omitted` or `updates`), `cache_ttl` (default `5m`; `1h` or `mixed`:
+    1h on the tool and system breakpoints, 5m on the messages) and
+    `cache_ttl_auto_1h` (default `false`); `[provider.openrouter]
+    reasoning_exclude` (default `false`). (TASK-161.4)
+  - `[context] background_compaction` (default `false`) and
+    `background_compact_at` (default `0.7`). (TASK-161.5)
+  - `[provider.openrouter] service_tier` (unset: nothing sent; `fast` or
+    `default`). The coder's effort stays unset: low effort was 24% faster
+    and 40% cheaper with every eval passing, but the suites pass on every
+    arm, so a harder eval comes first. (TASK-161.7)
+  Prompts and tool descriptions are unchanged.
   defaults-fingerprint: 46b4cecb7b8e

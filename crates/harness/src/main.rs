@@ -5,6 +5,7 @@
 //! - `harness run [OPTIONS] <PROMPT>`: headless agent run (`docs/headless.md`).
 //! - `harness wf list|help|run`: workflows (`docs/workflows.md`).
 //! - `harness eval run|compare`: eval suites (`docs/evals.md`).
+//! - `harness bench`: latency benchmark (`docs/performance.md`).
 //! - `harness login|logout <provider>`: API key login (`docs/providers.md`).
 //! - `harness doctor`, `harness lint`, `harness config check|show`,
 //!   `harness schema`, `harness runs show`, `harness sessions`,
@@ -16,6 +17,7 @@
 //! logging with credential redaction and installs the terminal-safe panic
 //! hook (see `docs/logging.md`).
 
+mod bench;
 mod cli;
 mod commands;
 mod core;
@@ -50,6 +52,7 @@ Commands:
   run [OPTIONS] <PROMPT>     run an agent headlessly (harness run --help)
   wf list|help|run           list, describe or run workflows (harness wf --help)
   eval run|compare           run eval suites, compare results (harness eval --help)
+  bench --fake|--model REF   latency benchmark of a scripted coding task (harness bench --help)
   doctor                     check config, credentials, providers, sandbox, remotes, MCP servers, prompts
   lint                       lint prompts, agents, skills and memory
   models [--all] [--json]    list usable models from every provider (--refresh, --offline)
@@ -156,6 +159,22 @@ fn cmd_eval(args: &[String]) -> ExitCode {
     )))
 }
 
+fn cmd_bench(args: &[String]) -> ExitCode {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("{}", bench::USAGE);
+        return ExitCode::SUCCESS;
+    }
+    let (cfg, _, secrets) = startup_or_exit();
+    let redactor = wiring::redactor(&secrets);
+    ExitCode::from(runtime().block_on(bench::main(
+        args,
+        cfg,
+        secrets,
+        redactor,
+        &mut std::io::stdout(),
+    )))
+}
+
 fn cmd_tui(args: &[String]) -> ExitCode {
     let opts = match tui::parse(args) {
         Ok(o) => o,
@@ -216,6 +235,7 @@ fn run_main() -> ExitCode {
         Some("run") => cmd_run(&args[1..]),
         Some("wf") => cmd_wf(&args[1..]),
         Some("eval") => cmd_eval(&args[1..]),
+        Some("bench") => cmd_bench(&args[1..]),
         Some("sessions") => match args[1..].first().map(String::as_str) {
             None => {
                 let (_, data, _) = startup_or_exit();

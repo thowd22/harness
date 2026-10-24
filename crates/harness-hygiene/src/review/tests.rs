@@ -130,6 +130,7 @@ fn input_from_ledger_changes() {
             before_hash: None,
             after_hash: None,
             diffs: vec!["--- a/src/a.rs\n+++ b/src/a.rs\n".into()],
+            generated: false,
         },
         NetChange {
             path: "old.rs".into(),
@@ -138,6 +139,7 @@ fn input_from_ledger_changes() {
             before_hash: None,
             after_hash: None,
             diffs: vec![],
+            generated: false,
         },
     ];
     let i = ReviewInput::from_ledger("t", None, &changes);

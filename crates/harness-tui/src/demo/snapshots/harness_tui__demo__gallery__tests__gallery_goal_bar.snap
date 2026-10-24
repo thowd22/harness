@@ -1,13 +1,14 @@
 ---
 source: crates/harness-tui/src/demo/gallery.rs
+assertion_line: 492
 expression: "snap(Page::GoalBar)"
 ---
  ui-demo  chat   map   detail   goal bar   palette   approvals   diff   inspector   history
- fix-bug  ◐ running  30.0s  $0.39  ↑24.8k ↓1.4k cache 96%  critical path 47.0s  ⏸ 1…┌ Goal ────────────────────────────┐
-1.0s $0.080      ────►✔ prove-fail 6.0s         ────►◐ fix 0ms $0.31 ↻1        ────►│Fix header parsing bug (#142)     │
-                                                      ├──►◐ Researcher (haiku) 0ms  │Tasks ─────────────────────── 1/4 │
-                                                      └──►✔ Researcher (haiku) 9.0s │✔ Reproduce with failing test     │
-                                                                                    │  Implementer · sonnet            │
+ fix-bug  ◐ running  30.0s  $0.39  ↑24.8k ↓1.4k cache 96%  critical path 47.0s  ⏸ 1 ┌ Goal ────────────────────────────┐
+ waiting                                                                            │Fix header parsing bug (#142)     │
+1.0s $0.080      ────►✔ prove-fail 6.0s         ────►◐ fix 0ms $0.31 ↻1        ────►│Tasks ─────────────────────── 1/4 │
+                                                      ├──►◐ Researcher (haiku) 0ms  │✔ Reproduce with failing test     │
+                                                      └──►✔ Researcher (haiku) 9.0s │  Implementer · sonnet            │
                                                                                     │◐ Fix parse_header                │
                                                                                     │  Implementer · sonnet            │
                                                                                     │○ Bug-fix proof                   │
@@ -33,7 +34,7 @@ expression: "snap(Page::GoalBar)"
                                                                                     │                                  │
                                                                                     │                                  │
                                                                                     │                                  │
-                                                                                    └──────────────────────────────────┘
+◐ Researcher · haiku · read src/net/mod.rs  (Enter: detail · Space: live)           └──────────────────────────────────┘
 --- styles ---
 0 0-8: fg=Rgb(189, 147, 249) bg=Rgb(40, 42, 54) mod=BOLD
 0 9-14: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
@@ -62,50 +63,53 @@ expression: "snap(Page::GoalBar)"
 1 28-46: fg=Rgb(241, 250, 140) bg=Rgb(40, 42, 54)
 1 47-72: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
 1 73-77: fg=Rgb(241, 250, 140) bg=Rgb(40, 42, 54)
-1 78-83: fg=Rgb(255, 184, 108) bg=Rgb(40, 42, 54) mod=BOLD
+1 78-82: fg=Rgb(255, 184, 108) bg=Rgb(40, 42, 54) mod=BOLD
+1 83-83: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 1 84-84: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
 1 85-90: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54) mod=BOLD
 1 91-119: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
-2 0-10: fg=Rgb(241, 250, 140) bg=Rgb(40, 42, 54)
-2 11-16: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
-2 17-21: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
-2 22-23: fg=Rgb(80, 250, 123) bg=Rgb(40, 42, 54)
-2 24-33: fg=Rgb(189, 147, 249) bg=Rgb(40, 42, 54) mod=BOLD
-2 34-38: fg=Rgb(241, 250, 140) bg=Rgb(40, 42, 54)
-2 39-47: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
-2 48-52: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
-2 53-54: fg=Rgb(139, 233, 253) bg=Rgb(40, 42, 54)
-2 55-57: fg=Rgb(255, 184, 108) bg=Rgb(40, 42, 54) mod=BOLD
-2 58-67: fg=Rgb(241, 250, 140) bg=Rgb(40, 42, 54)
-2 68-70: fg=Rgb(255, 184, 108) bg=Rgb(40, 42, 54)
-2 71-78: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
-2 79-84: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
+2 0-0: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
+2 1-7: fg=Rgb(255, 184, 108) bg=Rgb(40, 42, 54) mod=BOLD
+2 8-83: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
+2 84-84: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
 2 85-118: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 2 119-119: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
-3 0-53: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
-3 54-57: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
-3 58-59: fg=Rgb(139, 233, 253) bg=Rgb(68, 71, 90)
-3 60-69: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90) mod=BOLD
-3 70-77: fg=Rgb(98, 114, 164) bg=Rgb(68, 71, 90)
-3 78-81: fg=Rgb(241, 250, 140) bg=Rgb(68, 71, 90)
-3 82-82: fg=Rgb(98, 114, 164) bg=Rgb(68, 71, 90)
-3 83-83: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
-3 84-113: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
+3 0-10: fg=Rgb(241, 250, 140) bg=Rgb(40, 42, 54)
+3 11-16: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
+3 17-21: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
+3 22-23: fg=Rgb(80, 250, 123) bg=Rgb(40, 42, 54)
+3 24-33: fg=Rgb(189, 147, 249) bg=Rgb(40, 42, 54) mod=BOLD
+3 34-38: fg=Rgb(241, 250, 140) bg=Rgb(40, 42, 54)
+3 39-47: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
+3 48-52: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
+3 53-54: fg=Rgb(139, 233, 253) bg=Rgb(40, 42, 54)
+3 55-57: fg=Rgb(255, 184, 108) bg=Rgb(40, 42, 54) mod=BOLD
+3 58-67: fg=Rgb(241, 250, 140) bg=Rgb(40, 42, 54)
+3 68-70: fg=Rgb(255, 184, 108) bg=Rgb(40, 42, 54)
+3 71-78: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
+3 79-113: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
 3 114-118: fg=Rgb(241, 250, 140) bg=Rgb(40, 42, 54) mod=BOLD
 3 119-119: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
 4 0-53: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 4 54-57: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
-4 58-59: fg=Rgb(80, 250, 123) bg=Rgb(40, 42, 54)
-4 60-69: fg=Rgb(189, 147, 249) bg=Rgb(40, 42, 54) mod=BOLD
-4 70-77: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
-4 78-82: fg=Rgb(241, 250, 140) bg=Rgb(40, 42, 54)
+4 58-59: fg=Rgb(139, 233, 253) bg=Rgb(68, 71, 90)
+4 60-69: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90) mod=BOLD
+4 70-77: fg=Rgb(98, 114, 164) bg=Rgb(68, 71, 90)
+4 78-81: fg=Rgb(241, 250, 140) bg=Rgb(68, 71, 90)
+4 82-82: fg=Rgb(98, 114, 164) bg=Rgb(68, 71, 90)
 4 83-83: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 4 84-84: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
 4 85-86: fg=Rgb(80, 250, 123) bg=Rgb(40, 42, 54)
 4 87-113: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
 4 114-118: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 4 119-119: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
-5 0-83: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
+5 0-53: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
+5 54-57: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
+5 58-59: fg=Rgb(80, 250, 123) bg=Rgb(40, 42, 54)
+5 60-69: fg=Rgb(189, 147, 249) bg=Rgb(40, 42, 54) mod=BOLD
+5 70-77: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
+5 78-82: fg=Rgb(241, 250, 140) bg=Rgb(40, 42, 54)
+5 83-83: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 5 84-106: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
 5 107-118: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 5 119-119: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
@@ -212,5 +216,10 @@ expression: "snap(Page::GoalBar)"
 30 84-84: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
 30 85-118: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 30 119-119: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
-31 0-83: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
+31 0-1: fg=Rgb(139, 233, 253) bg=Rgb(40, 42, 54)
+31 2-11: fg=Rgb(189, 147, 249) bg=Rgb(40, 42, 54) mod=BOLD
+31 12-22: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
+31 23-41: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
+31 42-72: fg=Rgb(189, 147, 249) bg=Rgb(40, 42, 54)
+31 73-83: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 31 84-119: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)

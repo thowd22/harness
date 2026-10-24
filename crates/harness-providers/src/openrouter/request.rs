@@ -57,6 +57,12 @@ pub fn build_body(request: &ChatRequest, options: &OpenRouterOptions) -> Value {
     body.insert("model".into(), json!(request.model));
     body.insert("stream".into(), json!(true));
     body.insert("usage".into(), json!({"include": true}));
+    if let Some(id) = &options.session_id {
+        body.insert("session_id".into(), json!(id));
+    }
+    if let Some(tier) = options.service_tier {
+        body.insert("service_tier".into(), json!(tier.as_str()));
+    }
     if !request.tools.is_empty() {
         let mut tools: Vec<Value> = request
             .tools
@@ -106,6 +112,10 @@ pub fn build_body(request: &ChatRequest, options: &OpenRouterOptions) -> Value {
             (None, Some(budget)) => json!({"max_tokens": budget}),
             (None, None) => json!({"enabled": true}),
         };
+        let mut reasoning = reasoning;
+        if options.reasoning_exclude {
+            reasoning["exclude"] = json!(true);
+        }
         body.insert("reasoning".into(), reasoning);
     }
     if let Some(provider) = routing(options) {
@@ -334,6 +344,7 @@ fn assistant(m: &Message) -> Value {
 mod tests {
     use super::*;
     use crate::model::{ThinkingConfig, ToolSpec};
+    use crate::openrouter::ServiceTier;
 
     fn opts() -> OpenRouterOptions {
         OpenRouterOptions {
@@ -341,6 +352,9 @@ mod tests {
             provider_order: vec!["anthropic".into(), "openai".into()],
             allow_fallbacks: Some(false),
             cache_ttl: None,
+            session_id: None,
+            reasoning_exclude: false,
+            service_tier: None,
         }
     }
 
@@ -381,6 +395,64 @@ mod tests {
             b["messages"][0],
             json!({"role": "system", "content": "sys"})
         );
+    }
+
+    #[test]
+    fn session_id_is_sent_only_when_set() {
+        let r = ChatRequest::new("anthropic/claude-opus-5.5");
+        assert!(
+            build_body(&r, &OpenRouterOptions::default())
+                .get("session_id")
+                .is_none()
+        );
+        let sticky = OpenRouterOptions {
+            session_id: Some("harness-abc".into()),
+            ..Default::default()
+        };
+        assert_eq!(build_body(&r, &sticky)["session_id"], json!("harness-abc"));
+    }
+
+    #[test]
+    fn service_tier_is_sent_only_when_set() {
+        let r = ChatRequest::new("anthropic/claude-opus-5.5");
+        assert!(
+            build_body(&r, &OpenRouterOptions::default())
+                .get("service_tier")
+                .is_none()
+        );
+        for (tier, want) in [
+            (ServiceTier::Fast, "fast"),
+            (ServiceTier::Default, "default"),
+        ] {
+            let o = OpenRouterOptions {
+                service_tier: Some(tier),
+                ..Default::default()
+            };
+            assert_eq!(build_body(&r, &o)["service_tier"], json!(want));
+        }
+    }
+
+    #[test]
+    fn reasoning_exclusion_is_opt_in_and_keeps_the_effort() {
+        let mut r = ChatRequest::new("anthropic/claude-opus-5.5");
+        r.thinking = Some(ThinkingConfig {
+            effort: Some(ReasoningEffort::High),
+            budget_tokens: None,
+        });
+        assert_eq!(
+            build_body(&r, &OpenRouterOptions::default())["reasoning"],
+            json!({"effort": "high"})
+        );
+        let exclude = OpenRouterOptions {
+            reasoning_exclude: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            build_body(&r, &exclude)["reasoning"],
+            json!({"effort": "high", "exclude": true})
+        );
+        r.thinking = None;
+        assert!(build_body(&r, &exclude).get("reasoning").is_none());
     }
 
     #[test]

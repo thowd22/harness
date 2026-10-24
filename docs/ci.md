@@ -10,7 +10,15 @@ passed on (`scripts/release-ci-gate.sh`).
 | rustfmt | ubuntu-latest | `cargo fmt --all -- --check` |
 | clippy | ubuntu-latest, macos-latest | `cargo clippy --workspace --all-targets -- -D warnings` |
 | test | ubuntu-latest, macos-latest | `cargo nextest run --workspace --locked --profile ci`, then `cargo test --workspace --locked --doc` |
+| harness overhead guard (in test) | ubuntu-latest, macos-latest | `scripts/bench-guard.sh target/debug/harness`: `harness bench --fake`, fails when overhead per call or session start passes its limit |
 | cargo-deny | ubuntu-latest | `cargo deny check` (advisories, licenses, bans, sources from `deny.toml`) |
+
+The harness overhead guard runs in the test job after the test suite, on
+the dev-profile binary the tests built. It takes the best of 7 runs per
+attempt and fails only when 3 attempts in a row are over a limit, so a
+noisy runner does not fail it. It needs only POSIX tools (no jq). Its
+limits, baseline and how to update them are in docs/performance.md
+([CI overhead guard](performance.md#ci-overhead-guard)).
 
 Tests run under [cargo-nextest](https://nexte.st) with the `ci` profile in
 `.config/nextest.toml`: a test running longer than 60 s is reported as slow
@@ -75,6 +83,7 @@ RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets -- -D warnings
 cargo nextest run --workspace --locked --profile ci   # or: cargo test --workspace --locked
 cargo test --workspace --locked --doc
 scripts/hermetic-guard.sh                              # tests stay off HOME and XDG dirs
+cargo build -p harness && scripts/bench-guard.sh       # harness overhead guard
 cargo deny check
 ```
 

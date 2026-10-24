@@ -429,3 +429,86 @@ fn a_transient_overlay_keeps_the_text_under_it_and_blocks_presses() {
     let (out, _) = sel.mouse(&ev(release(21, 0)), now);
     assert_eq!(out, MouseOutcome::Copy("alpha gamma delta".into()));
 }
+
+#[test]
+fn smart_chrome_drops_a_card_header_rule_of_any_width() {
+    let lines = [
+        "╭ ✔ bash  $ line-th…─ 7ms · 17:24:02 ╮",
+        "│ out                                │",
+        "╭ ✔ read  a.rs ── 7ms ╮",
+        "╭ ✔ bash  $ echo a ─ b ─ ╮",
+    ];
+    let r = TextRegion::new("t", Rect::new(0, 0, 40, 4)).chrome(Chrome::Smart);
+    let mut ui = Ui::new(&lines, vec![r]);
+    assert_eq!(
+        copied(ui.select((0, 0), (39, 0))),
+        "bash  $ line-th… 7ms · 17:24:02"
+    );
+    assert_eq!(copied(ui.select((0, 2), (39, 2))), "read  a.rs  7ms");
+    // A rule inside the title is text; only the fill before the end goes.
+    assert_eq!(copied(ui.select((0, 3), (39, 3))), "bash  $ echo a ─ b");
+    assert!(!ui.highlighted(3).contains("b ─"), "{}", ui.highlighted(3));
+}
+
+/// A modal (its own filter row and a list pane inside its border) over
+/// the screen.
+fn modal_ui() -> Ui {
+    let lines = [
+        "╭ Servers ─────────────╮",
+        "│ filter: abc          │",
+        "│ entry 00             │",
+        "│ entry 01             │",
+        "│ entry 02             │",
+        "╰──────────────────────╯",
+    ];
+    let screen = TextRegion::new("screen", Rect::new(0, 0, 40, 12)).chrome(Chrome::Drawing);
+    let modal = TextRegion::new("modal", Rect::new(0, 0, 24, 6)).chrome(Chrome::Drawing);
+    let pane = TextRegion::new("list", Rect::new(2, 2, 20, 3));
+    Ui::new(&lines, vec![screen, modal, pane])
+}
+
+#[test]
+fn a_press_on_a_border_selects_from_the_nearest_text_cell_inside_it() {
+    let mut ui = modal_ui();
+    // The left border, on a list row.
+    assert_eq!(copied(ui.select((0, 3), (9, 4))), "entry 01\nentry 02");
+    assert_eq!(ui.sel.selection().unwrap().region, "list");
+    // The right border, dragging left.
+    assert_eq!(copied(ui.select((23, 2), (2, 2))), "entry 00");
+    // The bottom border, dragging up: from the list's last row.
+    assert_eq!(
+        copied(ui.select((5, 5), (2, 2))),
+        "entry 00\nentry 01\nentr"
+    );
+    // A corner.
+    assert_eq!(copied(ui.select((0, 5), (9, 4))), "entry 02");
+    // A press on the border next to the modal's own text stays in the
+    // modal, as before.
+    assert_eq!(copied(ui.select((0, 1), (10, 1))), "filter: a");
+    assert_eq!(ui.sel.selection().unwrap().region, "modal");
+    // A press without movement on a border is still a click.
+    assert_eq!(ui.mouse(click(0, 3)).0, MouseOutcome::Pass);
+    assert_eq!(ui.mouse(release(0, 3)).0, MouseOutcome::Pass);
+    assert!(ui.sel.selection().is_none());
+}
+
+#[test]
+fn a_press_on_text_or_a_border_inside_a_region_is_unchanged() {
+    // A box drawn inside a single region (a chat card, a map node): the
+    // border is that region's own and the drag starts on it.
+    let lines = ["┌──────┐", "│ node │", "└──────┘"];
+    let r = TextRegion::new("map", Rect::new(0, 0, 40, 3)).chrome(Chrome::Drawing);
+    let mut ui = Ui::new(&lines, vec![r]);
+    assert_eq!(copied(ui.select((0, 1), (7, 1))), "node");
+    assert_eq!(ui.sel.selection().unwrap().anchor, Point { ord: 1, col: 0 });
+    // A border next to a region that is not inside the pressed one (the
+    // input box under the chat) does not jump into it.
+    let lines = ["╰──────╯", "input text"];
+    let chat = TextRegion::new("chat", Rect::new(0, 0, 40, 1)).chrome(Chrome::Smart);
+    let input = TextRegion::new("input", Rect::new(0, 1, 40, 1));
+    let mut ui = Ui::new(&lines, vec![chat, input]);
+    assert_eq!(ui.mouse(click(3, 0)).0, MouseOutcome::Pass);
+    ui.mouse(drag(5, 1));
+    ui.mouse(release(5, 1));
+    assert!(ui.sel.selection().is_none_or(|s| s.region == "chat"));
+}

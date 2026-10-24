@@ -161,6 +161,17 @@ pub fn plain_line(rendered: &str) -> Option<String> {
     // Card frame: `╭ header ──── right ╮` and `│ body │`.
     if let Some(rest) = s.strip_prefix("╭ ") {
         s = rest.trim_end_matches('╮').trim_end().to_owned();
+        // The header rule before the right-hand metadata, however short
+        // (a title truncated to fit leaves it a cell or two wide).
+        let end = if s.ends_with('─') {
+            Some(s.len())
+        } else {
+            s.rfind("─ ").map(|i| i + '─'.len_utf8())
+        };
+        if let Some(end) = end {
+            let start = s[..end].trim_end_matches('─').len();
+            s.replace_range(start..end, "");
+        }
     } else if let Some(rest) = s.strip_prefix("│ ") {
         s = rest.trim_end_matches('│').trim_end().to_owned();
     }
@@ -522,6 +533,11 @@ mod tests {
                 "╭ ✔ edit  src/a.rs  +1 −1 ────────── 3ms · 14:32 ╮",
                 Some("✔ edit  src/a.rs  +1 −1  3ms · 14:32"),
             ),
+            (
+                "╭ ✔ bash  $ line-th…─ 7ms · 17:24:02 ╮",
+                Some("✔ bash  $ line-th… 7ms · 17:24:02"),
+            ),
+            ("╭ ✔ bash  $ a ─ b ─ ╮", Some("✔ bash  $ a ─ b")),
             (
                 "│    6 │-    let x = 1;                         │",
                 Some("-    let x = 1;"),

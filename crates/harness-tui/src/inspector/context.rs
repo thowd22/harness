@@ -20,7 +20,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::estimate_tokens;
-use crate::chat::text::{fmt_tokens, right_align, sanitize, truncate};
+use crate::chat::text::{fmt_tokens, right_align, sanitize, wrap_line};
 use crate::interaction::{Dispatch, HitMap, Interaction};
 use crate::theme::{Theme, Token};
 
@@ -224,6 +224,8 @@ pub struct ContextView {
     theme: Theme,
     expanded: HashSet<usize>,
     scroll: usize,
+    /// The focused row last frame (keyboard focus moving scrolls to it).
+    focus_seen: Option<usize>,
     interaction: Interaction<usize>,
 }
 
@@ -242,6 +244,7 @@ impl ContextView {
             theme,
             expanded: HashSet::new(),
             scroll: 0,
+            focus_seen: None,
             interaction: Interaction::new(),
         }
     }
@@ -262,14 +265,31 @@ impl ContextView {
         }
     }
 
-    /// Handles input: click or Enter on a row expands it, Tab/arrows move
-    /// focus, the wheel and PgUp/PgDn scroll, Esc backs out.
+    /// Handles input: click or Enter on a row expands it, Tab moves focus
+    /// over the shown rows and Up/Down over all of them (scrolling to it),
+    /// the wheel and PgUp/PgDn scroll, Esc backs out.
     pub fn handle(&mut self, ev: &Event) -> Option<ContextOutput> {
         let d = match ev {
             Event::Key(k) if k.kind != KeyEventKind::Release => {
                 match k.code {
                     KeyCode::PageDown => self.scroll += 10,
                     KeyCode::PageUp => self.scroll = self.scroll.saturating_sub(10),
+                    // Up/Down step through every row, also those scrolled
+                    // out of view (the view scrolls to the focused one).
+                    KeyCode::Up | KeyCode::Down if !self.report.items.is_empty() => {
+                        let n = self.report.items.len();
+                        let cur = self
+                            .interaction
+                            .focused()
+                            .and_then(|f| (0..n).find(|&i| row_id(i) == f.0));
+                        let next = match (cur, k.code) {
+                            (None, _) => 0,
+                            (Some(i), KeyCode::Up) => i.saturating_sub(1),
+                            (Some(i), _) => (i + 1).min(n - 1),
+                        };
+                        self.interaction.set_focus(row_id(next));
+                        return None;
+                    }
                     _ => {}
                 }
                 self.interaction.handle_key(k)
@@ -322,16 +342,30 @@ impl ContextView {
             )),
             _ => head.push(Span::styled(" · window unknown", t.fg(Token::Muted))),
         }
-        lines.push((None, Line::from(head)));
+        let w = w.max(1);
+        let indent = [Span::raw("    ")];
+        for l in wrap_line(Line::from(head), w, &indent) {
+            lines.push((None, l));
+        }
         let kinds: Vec<String> = r
             .by_kind()
             .iter()
             .map(|(k, n)| format!("{} {}", k.label(), fmt_tokens(*n)))
             .collect();
-        lines.push((
-            None,
+        for l in wrap_line(
             Line::from(Span::styled(kinds.join(" · "), t.fg(Token::Muted))),
-        ));
+            w,
+            &[],
+        ) {
+            lines.push((None, l));
+        }
+        let focused_row = self.interaction.focused().and_then(|f| {
+            r.items
+                .iter()
+                .enumerate()
+                .position(|(i, _)| row_id(i) == f.0)
+        });
+        let mut focus_rows = None;
         for (i, item) in r.items.iter().enumerate() {
             let focused = hits.is_focused(&crate::interaction::ElementId::from(row_id(i)));
             let arrow = if self.expanded.contains(&i) {
@@ -342,44 +376,80 @@ impl ContextView {
             let left = Line::from(vec![
                 Span::styled(arrow, t.fg(Token::Accent)),
                 Span::styled(format!("{:<7}", item.kind.label()), t.fg(Token::Muted)),
-                Span::styled(item.name.clone(), t.fg(Token::Agent)),
+                Span::styled(sanitize(&item.name), t.fg(Token::Agent)),
                 Span::styled(
                     item.source
                         .as_ref()
-                        .map(|s| format!("  {s}"))
+                        .map(|s| format!("  {}", sanitize(s)))
                         .unwrap_or_default(),
                     t.fg(Token::Path),
                 ),
             ]);
             let right = vec![Span::styled(fmt_tokens(item.tokens), t.fg(Token::Number))];
-            let mut line = right_align(left, right, w, Span::raw(" "));
-            if focused {
-                line = line.patch_style(t.focused());
+            let rw: usize = right
+                .iter()
+                .map(|s| crate::chat::text::width(&s.content))
+                .sum();
+            // The row wraps (tokens at the right of its first row) so long
+            // names and sources show in full.
+            let mut rows = wrap_line(left, w.saturating_sub(rw + 1).max(1), &indent);
+            let first = rows.remove(0);
+            rows.insert(0, right_align(first, right, w, Span::raw(" ")));
+            let start = lines.len();
+            for mut line in rows {
+                if focused {
+                    line = line.patch_style(t.focused());
+                }
+                lines.push((Some(i), line));
             }
-            lines.push((Some(i), line));
             if self.expanded.contains(&i) {
-                for l in item.text.lines().take(12) {
-                    lines.push((
-                        None,
+                for l in item.text.lines() {
+                    for wl in wrap_line(
                         Line::from(Span::styled(
-                            truncate(&format!("    {}", sanitize(l)), w),
+                            format!("    {}", sanitize(l)),
                             t.fg(Token::Muted),
                         )),
-                    ));
+                        w,
+                        &indent,
+                    ) {
+                        lines.push((None, wl));
+                    }
                 }
+            }
+            if focused_row == Some(i) {
+                focus_rows = Some((start, lines.len()));
             }
         }
         let h = usize::from(area.height);
+        // Keyboard focus on a row out of view scrolls to it (its header).
+        if let Some((a, _)) = focus_rows
+            && (a < self.scroll || a >= self.scroll + h)
+            && self.focus_seen != focused_row
+        {
+            self.scroll = a.saturating_sub(h / 2);
+        }
+        self.focus_seen = focused_row;
         self.scroll = self.scroll.min(lines.len().saturating_sub(h));
         let mut shown = Vec::new();
-        for (row, (item, line)) in lines.into_iter().skip(self.scroll).take(h).enumerate() {
+        let visible: Vec<(Option<usize>, Line<'static>)> =
+            lines.into_iter().skip(self.scroll).take(h).collect();
+        let mut row = 0usize;
+        while row < visible.len() {
+            let item = visible[row].0;
+            let mut end = row + 1;
+            while end < visible.len() && item.is_some() && visible[end].0 == item {
+                end += 1;
+            }
             if let Some(i) = item {
                 hits.register(
                     row_id(i),
-                    Rect::new(area.x, area.y + row as u16, area.width, 1),
+                    Rect::new(area.x, area.y + row as u16, area.width, (end - row) as u16),
                     i,
                 );
             }
+            row = end;
+        }
+        for (_, line) in visible {
             shown.push(line);
         }
         frame.render_widget(Paragraph::new(shown), area);
@@ -548,5 +618,90 @@ mod tests {
         v.handle(&key("enter"));
         assert!(v.is_expanded(0));
         assert_eq!(v.handle(&key("esc")), Some(ContextOutput::Back));
+    }
+
+    fn long_report(fx: &mut crate::layout_matrix::Fx) -> ContextReport {
+        let mut r = ContextReport::new(Some(200_000));
+        r.add_memory(&fx.prose("mem"), &fx.path("memsrc"));
+        r.add_skills(&fx.prose("skill"), Some(fx.path("skillsrc")));
+        for i in 0..8 {
+            r.add_system_prompt(&format!("{}\n{}", fx.word(&format!("sys{i}")), "more"));
+        }
+        r
+    }
+
+    /// TASK-160 layout matrix: rows and expanded text wrap inside the
+    /// view at every size, and every row's text is reachable by expanding
+    /// it (Enter) and scrolling (wheel).
+    #[test]
+    fn context_view_fits_and_everything_is_reachable() {
+        use crate::layout_matrix::*;
+        matrix("context", |w, h, check| {
+            let mut fx = Fx::new();
+            let mut v = ContextView::new(long_report(&mut fx), Theme::default());
+            for i in 0..v.report().items.len() {
+                v.toggle(i);
+            }
+            let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+            let mut pages = Vec::new();
+            for _ in 0..400 {
+                let buf = frame(&mut t, |f| v.render(f, f.area()));
+                if check {
+                    assert_clean("context", &buf, buf.area);
+                }
+                let s = screen(&buf);
+                if pages.last() == Some(&s) {
+                    break;
+                }
+                pages.push(s);
+                v.handle(&crate::interaction::testing::wheel_down(1, 1));
+            }
+            if !check {
+                return;
+            }
+            // Wheel steps overlap the page before; join the pages at the
+            // longest overlap.
+            let mut text: Vec<&str> = Vec::new();
+            for p in &pages {
+                let rows: Vec<&str> = p.lines().collect();
+                let k = (0..=rows.len().min(text.len()))
+                    .rev()
+                    .find(|&k| text[text.len() - k..] == rows[..k])
+                    .unwrap_or(0);
+                text.extend(&rows[k..]);
+            }
+            assert_reachable("context", &[text.join("\n")], &fx.all());
+        });
+    }
+
+    /// Long rows wrap (no `…`), and keyboard focus moving to a row out of
+    /// view scrolls to it; the wheel scrolls; Enter and a click expand.
+    #[test]
+    fn long_rows_wrap_and_focus_scrolls_by_keyboard_and_mouse() {
+        let mut fx = crate::layout_matrix::Fx::new();
+        let mut v = ContextView::new(long_report(&mut fx), Theme::default());
+        let mut t = Terminal::new(TestBackend::new(50, 12)).unwrap();
+        t.draw(|f| v.render(f, f.area())).unwrap();
+        let text = buffer_text(t.backend().buffer());
+        assert!(!text.contains('…'), "{text}");
+        // Keyboard: Down to the last row; the view follows; Enter expands.
+        let n = v.report().items.len();
+        for _ in 0..n {
+            v.handle(&key("down"));
+            t.draw(|f| v.render(f, f.area())).unwrap();
+        }
+        v.handle(&key("enter"));
+        assert!(v.is_expanded(n - 1));
+        t.draw(|f| v.render(f, f.area())).unwrap();
+        let text = buffer_text(t.backend().buffer());
+        assert!(text.contains("system prompt"), "{text}");
+        // Mouse: wheel up to the top, click the first row to expand it.
+        for _ in 0..40 {
+            v.handle(&crate::interaction::testing::wheel_up(1, 1));
+        }
+        t.draw(|f| v.render(f, f.area())).unwrap();
+        let (x, y) = find_text(t.backend().buffer(), "▸ memory").unwrap();
+        v.handle(&click(x, y));
+        assert!(v.is_expanded(0));
     }
 }

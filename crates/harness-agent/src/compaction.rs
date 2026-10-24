@@ -11,7 +11,11 @@
 //!   a `compaction` child node of the agent, with its own model call and
 //!   cost, so it shows in the map and node detail.
 //! - [`manager`]: the [`ContextManager`] request hook that ties tracking,
-//!   reasoning retention, elision and compaction together.
+//!   reasoning retention, elision and compaction together. With
+//!   [`ContextSettings::background_at`] (`[context] background_compaction`)
+//!   the summary starts earlier on its own task and is swapped in at
+//!   `compact_at`; a failed, cancelled or outdated one falls back to
+//!   in-line compaction.
 
 pub mod elide;
 pub mod handoff;

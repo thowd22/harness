@@ -3,8 +3,14 @@
 //! The ledger takes a [`Snapshot`] before and after each bash command and
 //! compares them to find the files the command created, modified or
 //! deleted. A snapshot walks the worktree with the same rules git uses for
-//! untracked files (`.gitignore`, `.git/info/exclude`), always skips `.git`,
-//! and includes hidden files. Symlinks are not followed.
+//! untracked files (`.gitignore`, also in parent directories up to the
+//! nearest repository root but not above it, and `.git/info/exclude`),
+//! always skips `.git`, and includes hidden files. Symlinks are not
+//! followed. Tracked files are always included, even when an ignore rule
+//! matches them, and a workspace its enclosing repository ignores (under a
+//! dotfiles home whose `.gitignore` is `*`) uses only its own ignore files.
+//! Ignored untracked files are not part of a snapshot, so a command that
+//! only writes ignored files changes nothing (see [`crate::artifacts`]).
 //!
 //! Hashing every file before and after every command would be slow, so
 //! [`Snapshot::take_with_cache`] reuses the hash of a file whose length and
@@ -102,14 +108,29 @@ impl Snapshot {
     ) -> io::Result<Snapshot> {
         let mut files = BTreeMap::new();
         let mut text_budget = opts.text_total_bytes;
+        // A workspace below its repository root also honours the
+        // `.gitignore` files above it, up to that root and no further, as
+        // git does. With `require_git(true)` the ignore crate stops at the
+        // first ancestor with a `.git`, so a `.gitignore` above the
+        // repository (a dotfiles home with `*`, a stray one in a parent
+        // directory) never hides files. At the repository root, or outside
+        // a repository, only the workspace's own ignore files count.
+        //
+        // When the enclosing repository ignores the workspace directory
+        // itself (a project or a force-added config directory under a
+        // dotfiles home whose `.gitignore` is `*`), its rules say nothing
+        // useful about the workspace, so only the workspace's own ignore
+        // files count, as outside a repository.
+        let repo = repository_root(root);
+        let below_repo_root = matches!(repo, Some(r) if r != root && !ignored_by_parents(r, root));
         let walker = ignore::WalkBuilder::new(root)
             .hidden(false)
             .git_ignore(true)
             .git_exclude(true)
             .git_global(false)
             .ignore(false)
-            .parents(false)
-            .require_git(false)
+            .parents(below_repo_root)
+            .require_git(below_repo_root)
             .follow_links(false)
             .filter_entry(|e| e.file_name() != ".git")
             .build();
@@ -125,34 +146,32 @@ impl Snapshot {
                 Ok(m) => m,
                 Err(_) => continue,
             };
-            let len = meta.len();
-            let modified = meta.modified().ok();
-            let cached = previous
-                .and_then(|p| p.files.get(&rel))
-                .filter(|f| f.len == len && f.modified.is_some() && f.modified == modified);
-            let state = match cached {
-                Some(f) => f.clone(),
-                None => match std::fs::read(entry.path()) {
-                    Ok(bytes) => {
-                        let keep = len <= opts.text_file_bytes && len <= text_budget;
-                        let text = keep
-                            .then(|| std::str::from_utf8(&bytes).ok().map(Arc::<str>::from))
-                            .flatten();
-                        FileState {
-                            len,
-                            modified,
-                            hash: hex::encode(Sha256::digest(&bytes)),
-                            text,
-                        }
-                    }
-                    // Vanished or unreadable between listing and reading.
-                    Err(_) => continue,
-                },
-            };
-            if let Some(t) = &state.text {
-                text_budget = text_budget.saturating_sub(t.len() as u64);
+            if let Some(state) =
+                file_state(entry.path(), &meta, &rel, opts, &mut text_budget, previous)
+            {
+                files.insert(rel, state);
             }
-            files.insert(rel, state);
+        }
+        // Git never ignores a tracked file: add the tracked files an
+        // ignore rule hid from the walk.
+        if repo.is_some() {
+            for rel in crate::artifacts::tracked_but_ignored(root) {
+                if files.contains_key(&rel) || rel.split('/').any(|c| c == ".git") {
+                    continue;
+                }
+                let path = root.join(&rel);
+                let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                    continue;
+                };
+                if !meta.is_file() {
+                    continue;
+                }
+                if let Some(state) =
+                    file_state(&path, &meta, &rel, opts, &mut text_budget, previous)
+                {
+                    files.insert(rel, state);
+                }
+            }
         }
         Ok(Snapshot {
             root: root.to_path_buf(),
@@ -209,6 +228,89 @@ impl Snapshot {
         out.sort_by(|x, y| x.path.cmp(&y.path));
         out
     }
+}
+
+/// The state of the file at `path` (workspace-relative `rel`), reusing
+/// `previous` when its length and modification time are unchanged; `None`
+/// when it vanished or cannot be read. Kept text is charged to
+/// `text_budget`.
+fn file_state(
+    path: &Path,
+    meta: &std::fs::Metadata,
+    rel: &str,
+    opts: &SnapshotOptions,
+    text_budget: &mut u64,
+    previous: Option<&Snapshot>,
+) -> Option<FileState> {
+    let len = meta.len();
+    let modified = meta.modified().ok();
+    let cached = previous
+        .and_then(|p| p.files.get(rel))
+        .filter(|f| f.len == len && f.modified.is_some() && f.modified == modified);
+    let state = match cached {
+        Some(f) => f.clone(),
+        None => {
+            // Vanished or unreadable between listing and reading.
+            let bytes = std::fs::read(path).ok()?;
+            let keep = len <= opts.text_file_bytes && len <= *text_budget;
+            let text = keep
+                .then(|| std::str::from_utf8(&bytes).ok().map(Arc::<str>::from))
+                .flatten();
+            FileState {
+                len,
+                modified,
+                hash: hex::encode(Sha256::digest(&bytes)),
+                text,
+            }
+        }
+    };
+    if let Some(t) = &state.text {
+        *text_budget = text_budget.saturating_sub(t.len() as u64);
+    }
+    Some(state)
+}
+
+/// True if the repository at `repo` ignores `dir` (a directory below
+/// `repo`) or one of the directories between them, by the `.gitignore`
+/// files from `repo` down to `dir`'s parent and `.git/info/exclude`. A
+/// deeper `.gitignore` takes precedence, and git does not look inside an
+/// ignored directory, so the first ignored component decides.
+fn ignored_by_parents(repo: &Path, dir: &Path) -> bool {
+    use ignore::gitignore::{Gitignore, GitignoreBuilder};
+    let Ok(rel) = dir.strip_prefix(repo) else {
+        return false;
+    };
+    // Lowest precedence first.
+    let mut matchers: Vec<Gitignore> = Vec::new();
+    let mut exclude = GitignoreBuilder::new(repo);
+    if exclude.add(repo.join(".git/info/exclude")).is_none()
+        && let Ok(g) = exclude.build()
+    {
+        matchers.push(g);
+    }
+    let mut current = repo.to_path_buf();
+    for component in rel.components() {
+        let file = current.join(".gitignore");
+        if file.is_file() {
+            let (g, _) = Gitignore::new(&file);
+            matchers.push(g);
+        }
+        current.push(component);
+        for m in matchers.iter().rev() {
+            match m.matched(&current, true) {
+                ignore::Match::Ignore(_) => return true,
+                ignore::Match::Whitelist(_) => break,
+                ignore::Match::None => {}
+            }
+        }
+    }
+    false
+}
+
+/// The nearest enclosing repository root of `dir`: the first of `dir` and
+/// its ancestors that has a `.git` (directory or file).
+fn repository_root(dir: &Path) -> Option<&Path> {
+    dir.ancestors().find(|a| a.join(".git").exists())
 }
 
 /// `path` relative to `root` with `/` separators, or `None` if it is not
@@ -271,6 +373,137 @@ mod tests {
         let s = Snapshot::take(root, &SnapshotOptions::default()).unwrap();
         let names: Vec<&str> = s.files().keys().map(String::as_str).collect();
         assert_eq!(names, vec![".gitignore", ".hidden"]);
+    }
+
+    #[test]
+    fn a_workspace_below_the_repository_root_honours_parent_gitignores() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        write(repo, ".gitignore", "*.log\nbuild/\n");
+        let ws = repo.join("app");
+        write(&ws, "main.py", "x");
+        write(&ws, "run.log", "x");
+        write(&ws, "build/out.bin", "x");
+        let s = Snapshot::take(&ws, &SnapshotOptions::default()).unwrap();
+        let names: Vec<&str> = s.files().keys().map(String::as_str).collect();
+        assert_eq!(names, vec!["main.py"]);
+
+        // Outside a repository, a parent's .gitignore does not apply.
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), ".gitignore", "*.log\n");
+        let ws = dir.path().join("app");
+        write(&ws, "run.log", "x");
+        let s = Snapshot::take(&ws, &SnapshotOptions::default()).unwrap();
+        assert!(s.get("run.log").is_some());
+    }
+
+    fn names(root: &Path) -> Vec<String> {
+        let s = Snapshot::take(root, &SnapshotOptions::default()).unwrap();
+        s.files().keys().cloned().collect()
+    }
+
+    #[test]
+    fn a_gitignore_above_the_repository_root_does_not_apply() {
+        // A dotfiles home: the home directory is a repository whose
+        // .gitignore ignores everything; projects below are their own
+        // repositories.
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        std::fs::create_dir_all(home.join(".git")).unwrap();
+        write(home, ".gitignore", "*\n!.bashrc\n");
+        let proj = home.join("code/proj");
+        std::fs::create_dir_all(proj.join(".git")).unwrap();
+        write(&proj, ".gitignore", "*.log\n");
+        write(&proj, "main.py", "x");
+        write(&proj, "run.log", "x");
+        // The workspace at the nested repository's root.
+        assert_eq!(names(&proj), vec![".gitignore", "main.py"]);
+        // A workspace below the nested repository's root honours the
+        // nested repository's .gitignore, but not the home one.
+        let app = proj.join("app");
+        write(&app, "new.py", "x");
+        write(&app, "app.log", "x");
+        assert_eq!(names(&app), vec!["new.py"]);
+
+        // A plain directory with a stray .gitignore above a repository.
+        let dir = tempfile::tempdir().unwrap();
+        let outer = dir.path();
+        write(outer, ".gitignore", "*.txt\n*.py\n");
+        let repo = outer.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        write(&repo, ".gitignore", "build/\n");
+        let ws = repo.join("app");
+        write(&ws, "notes.txt", "x");
+        write(&ws, "main.py", "x");
+        write(&ws, "build/out.bin", "x");
+        assert_eq!(names(&ws), vec!["main.py", "notes.txt"]);
+        assert_eq!(
+            names(&repo),
+            vec![".gitignore", "app/main.py", "app/notes.txt"]
+        );
+    }
+
+    fn git(root: &Path, args: &[&str]) {
+        let st = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t.invalid"])
+            .args(args)
+            .current_dir(root)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(st.success(), "git {args:?}");
+    }
+
+    #[test]
+    fn a_workspace_ignored_by_its_enclosing_repository_sees_its_files() {
+        // A dotfiles home whose .gitignore ignores everything, with
+        // force-added (tracked) files and a plain project below it.
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        git(home, &["init", "-q"]);
+        write(home, ".gitignore", "*\n");
+        write(home, ".config/nvim/init.lua", "x");
+        write(home, ".config/nvim/lua/plug.lua", "x");
+        git(home, &["add", "-f", ".config/nvim/init.lua"]);
+        write(home, "scratch/proj/main.py", "x");
+        write(home, "scratch/proj/.gitignore", "*.log\n");
+        write(home, "scratch/proj/run.log", "x");
+        // The workspace is a directory the home repository ignores, so
+        // its ignore rules say nothing about the workspace's files: a
+        // tracked dotfile and an untracked one both count.
+        assert_eq!(
+            names(&home.join(".config/nvim")),
+            vec!["init.lua", "lua/plug.lua"]
+        );
+        // A plain project under such a home keeps only its own rules.
+        assert_eq!(
+            names(&home.join("scratch/proj")),
+            vec![".gitignore", "main.py"]
+        );
+    }
+
+    #[test]
+    fn tracked_files_are_listed_even_when_an_ignore_rule_matches_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        git(repo, &["init", "-q"]);
+        write(repo, ".gitignore", "*.log\n");
+        write(repo, "app/keep.log", "x");
+        write(repo, "app/main.py", "x");
+        write(repo, "top.log", "x");
+        git(repo, &["add", "-f", "app/keep.log", "top.log"]);
+        write(repo, "app/other.log", "x");
+        write(repo, "new.log", "x");
+        // Below the repository root (parent .gitignore applies).
+        assert_eq!(names(&repo.join("app")), vec!["keep.log", "main.py"]);
+        // At the repository root (its own .gitignore applies).
+        assert_eq!(
+            names(repo),
+            vec![".gitignore", "app/keep.log", "app/main.py", "top.log"]
+        );
     }
 
     #[test]

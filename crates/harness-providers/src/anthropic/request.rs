@@ -7,6 +7,16 @@
 //! of the user turn before it, so the next call reads everything this call
 //! wrote.
 //!
+//! [`RequestOptions::cache_ttl`] picks the lifetime of those breakpoints
+//! ([`CacheTtl`]): five minutes (the default), one hour, or one hour on the
+//! tool and system breakpoints and five minutes on the message ones
+//! ([`CacheTtl::Mixed`]; the API requires longer lifetimes to come first,
+//! which this layout keeps). [`RequestOptions::thinking_display`] sets
+//! `thinking.display` on adaptive-thinking models ([`ThinkingDisplay`]).
+//!
+//! [`build_prewarm_body`] builds the non-generating `max_tokens: 0` call
+//! that writes the cache for a request's prefix ahead of the real call.
+//!
 //! Thinking blocks are sent back exactly as received: a
 //! [`ContentBlock::Reasoning`] with a signature becomes a `thinking` block
 //! with the same text and signature, and an `anthropic`
@@ -46,6 +56,66 @@ pub enum CacheMode {
     Off,
 }
 
+/// Lifetime of the prompt-cache breakpoints
+/// (`[provider.anthropic] cache_ttl`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CacheTtl {
+    /// Five minutes on every breakpoint (no `ttl` field is sent).
+    #[default]
+    FiveMinutes,
+    /// One hour on every breakpoint (`"ttl": "1h"`; writes cost 2x
+    /// instead of 1.25x).
+    OneHour,
+    /// One hour on the tool and system breakpoints, five minutes on the
+    /// message breakpoints: the stable prefix survives long pauses while
+    /// the conversation tail pays the cheaper write.
+    Mixed,
+}
+
+/// The `cache_control` value for a breakpoint with `ttl`.
+fn cache_control(one_hour: bool) -> Value {
+    if one_hour {
+        json!({"type": "ephemeral", "ttl": "1h"})
+    } else {
+        json!({"type": "ephemeral"})
+    }
+}
+
+/// How adaptive thinking is returned (`thinking.display`,
+/// `[provider.anthropic] thinking_display`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThinkingDisplay {
+    /// Readable reasoning summaries stream as thinking text (the default;
+    /// the TUI shows them live).
+    #[default]
+    Summarized,
+    /// Thinking blocks come back empty (signature only). The model thinks
+    /// and is billed the same; only the visible text goes.
+    Omitted,
+    /// Only the model's between-tool progress notes come back as thinking
+    /// text (beta [`THINKING_UPDATES_BETA`], added by the provider).
+    Updates,
+}
+
+impl ThinkingDisplay {
+    /// The wire value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Summarized => "summarized",
+            Self::Omitted => "omitted",
+            Self::Updates => "updates",
+        }
+    }
+}
+
+/// Beta flag that `thinking.display: "updates"` requires.
+pub const THINKING_UPDATES_BETA: &str = "thinking-display-updates-2026-08-18";
+
+/// Placeholder user message of a pre-warm call with no message of its own
+/// to end on. It is read during prefill but never answered, and carries no
+/// breakpoint.
+pub const PREWARM_PLACEHOLDER: &str = "warmup";
+
 /// What the builder needs to know about the target model.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ModelProfile {
@@ -63,6 +133,10 @@ pub struct RequestOptions {
     pub cache: CacheMode,
     /// `max_tokens` when the request does not set one.
     pub default_max_tokens: u32,
+    /// Lifetime of the cache breakpoints.
+    pub cache_ttl: CacheTtl,
+    /// `thinking.display` on adaptive-thinking models.
+    pub thinking_display: ThinkingDisplay,
 }
 
 impl Default for RequestOptions {
@@ -70,6 +144,8 @@ impl Default for RequestOptions {
         Self {
             cache: CacheMode::Auto,
             default_max_tokens: DEFAULT_MAX_TOKENS,
+            cache_ttl: CacheTtl::FiveMinutes,
+            thinking_display: ThinkingDisplay::Summarized,
         }
     }
 }
@@ -131,7 +207,7 @@ pub fn build_body(
             ThinkingStyle::Adaptive => {
                 body.insert(
                     "thinking".into(),
-                    json!({"type": "adaptive", "display": "summarized"}),
+                    json!({"type": "adaptive", "display": options.thinking_display.as_str()}),
                 );
                 if let Some(effort) = thinking
                     .effort
@@ -180,6 +256,9 @@ pub fn build_body(
     }
 
     let cache = options.cache == CacheMode::Auto && caps.caching;
+    // Tool and system breakpoints, then message breakpoints.
+    let prefix_cc = cache_control(options.cache_ttl != CacheTtl::FiveMinutes);
+    let message_cc = cache_control(options.cache_ttl == CacheTtl::OneHour);
     let mut breakpoints = 0usize;
 
     if !request.tools.is_empty() {
@@ -189,7 +268,7 @@ pub fn build_body(
             .map(|t| json!({"name": t.name, "description": t.description, "input_schema": t.input_schema}))
             .collect();
         if cache && let Some(last) = tools.last_mut() {
-            mark(last);
+            mark(last, &prefix_cc);
             breakpoints += 1;
         }
         body.insert("tools".into(), Value::Array(tools));
@@ -219,7 +298,7 @@ pub fn build_body(
             // from the most stable one (end of the base prompt), while the
             // messages keep their minimum.
             if let Some(last) = blocks.last_mut() {
-                mark(last);
+                mark(last, &prefix_cc);
                 breakpoints += 1;
             }
             let inner = blocks.len().saturating_sub(1);
@@ -227,7 +306,7 @@ pub fn build_body(
                 if breakpoints + MESSAGE_BREAKPOINTS_MIN >= MAX_CACHE_BREAKPOINTS {
                     break;
                 }
-                mark(b);
+                mark(b, &prefix_cc);
                 breakpoints += 1;
             }
         }
@@ -241,7 +320,11 @@ pub fn build_body(
         .filter(|(_, blocks)| !blocks.is_empty())
         .collect();
     if cache {
-        place_message_breakpoints(&mut messages, MAX_CACHE_BREAKPOINTS - breakpoints);
+        place_message_breakpoints(
+            &mut messages,
+            MAX_CACHE_BREAKPOINTS - breakpoints,
+            &message_cc,
+        );
     }
     let messages: Vec<Value> = messages
         .into_iter()
@@ -249,6 +332,49 @@ pub fn build_body(
         .collect();
     body.insert("messages".into(), Value::Array(messages));
     Ok(Value::Object(body))
+}
+
+/// The cache pre-warm body for `request`: the same body [`build_body`]
+/// builds (same tools, system, thinking and effort, so the entry it writes
+/// is the one the real call reads), sent without streaming and with
+/// `max_tokens: 0`, so the API runs prefill, writes the cache at the
+/// breakpoints and returns no output.
+///
+/// `request.messages` is the part shared with the next real call (empty
+/// at session start). A placeholder user message
+/// ([`PREWARM_PLACEHOLDER`], unmarked) always ends the body, so the
+/// breakpoints stay on the shared prefix and a conversation ending with
+/// an assistant turn is not sent as a prefill.
+///
+/// `None` when a pre-warm cannot help or would be rejected: caching is
+/// off or unsupported, or the model uses budget thinking
+/// (`thinking.type: "enabled"` is rejected with `max_tokens: 0`). A forced
+/// `tool_choice` (also rejected) is dropped.
+pub fn build_prewarm_body(
+    request: &ChatRequest,
+    profile: &ModelProfile,
+    options: &RequestOptions,
+) -> Result<Option<Value>, ProviderError> {
+    if options.cache != CacheMode::Auto || !profile.capabilities.caching {
+        return Ok(None);
+    }
+    if request.thinking.is_some() && profile.thinking == ThinkingStyle::Budget {
+        return Ok(None);
+    }
+    let mut req = request.clone();
+    if matches!(req.tool_choice, ToolChoice::Any | ToolChoice::Tool { .. }) {
+        req.tool_choice = ToolChoice::Auto;
+    }
+    let mut body = build_body(&req, profile, options)?;
+    body["stream"] = json!(false);
+    body["max_tokens"] = json!(0);
+    if let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) {
+        messages.push(json!({
+            "role": "user",
+            "content": [{"type": "text", "text": PREWARM_PLACEHOLDER}],
+        }));
+    }
+    Ok(Some(body))
 }
 
 /// `system` split at `layers` (byte offsets of later layers; invalid or
@@ -275,9 +401,9 @@ fn role_str(role: Role) -> &'static str {
     }
 }
 
-fn mark(block: &mut Value) {
+fn mark(block: &mut Value, cache_control: &Value) {
     if let Some(obj) = block.as_object_mut() {
-        obj.insert("cache_control".into(), json!({"type": "ephemeral"}));
+        obj.insert("cache_control".into(), cache_control.clone());
     }
 }
 
@@ -292,7 +418,11 @@ fn cacheable(block: &Value) -> bool {
 
 /// Marks the last cacheable block of the final message and of the user
 /// message before the final user message.
-fn place_message_breakpoints(messages: &mut [(Role, Vec<Value>)], budget: usize) {
+fn place_message_breakpoints(
+    messages: &mut [(Role, Vec<Value>)],
+    budget: usize,
+    cache_control: &Value,
+) {
     let mut targets = Vec::new();
     if let Some(last) = messages.len().checked_sub(1) {
         targets.push(last);
@@ -305,7 +435,7 @@ fn place_message_breakpoints(messages: &mut [(Role, Vec<Value>)], budget: usize)
     }
     for idx in targets.into_iter().take(budget) {
         if let Some(block) = messages[idx].1.iter_mut().rev().find(|b| cacheable(b)) {
-            mark(block);
+            mark(block, cache_control);
         }
     }
 }
@@ -721,6 +851,221 @@ mod tests {
         assert!(bp.contains(&"system[2]".to_owned()), "{bp:?}");
         assert!(bp.len() <= MAX_CACHE_BREAKPOINTS, "{bp:?}");
         assert!(bp.iter().any(|b| b.starts_with("messages")), "{bp:?}");
+    }
+
+    fn ttls(v: &Value) -> Vec<(String, Option<String>)> {
+        let mut out = Vec::new();
+        let mut push = |at: String, b: &Value| {
+            if let Some(cc) = b.get("cache_control") {
+                assert_eq!(cc["type"], "ephemeral");
+                out.push((at, cc.get("ttl").and_then(Value::as_str).map(str::to_owned)));
+            }
+        };
+        for (i, t) in v["tools"].as_array().into_iter().flatten().enumerate() {
+            push(format!("tools[{i}]"), t);
+        }
+        for (i, b) in v["system"].as_array().into_iter().flatten().enumerate() {
+            push(format!("system[{i}]"), b);
+        }
+        for (m, msg) in v["messages"].as_array().unwrap().iter().enumerate() {
+            for (i, b) in msg["content"].as_array().unwrap().iter().enumerate() {
+                push(format!("messages[{m}][{i}]"), b);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn cache_ttl_sets_the_lifetime_of_each_breakpoint() {
+        let mut req = tool_loop();
+        req.messages.push(Message::assistant("done"));
+        req.messages.push(Message::user("next"));
+        let p = profile(ThinkingStyle::Adaptive);
+        let body = |ttl| {
+            let o = RequestOptions {
+                cache_ttl: ttl,
+                ..Default::default()
+            };
+            build_body(&req, &p, &o).unwrap()
+        };
+        let h = || Some("1h".to_owned());
+        let at = |s: &str| s.to_owned();
+        assert_eq!(
+            ttls(&body(CacheTtl::FiveMinutes)),
+            [
+                (at("tools[1]"), None),
+                (at("system[0]"), None),
+                (at("messages[2][1]"), None),
+                (at("messages[4][0]"), None)
+            ]
+        );
+        assert_eq!(
+            ttls(&body(CacheTtl::OneHour)),
+            [
+                (at("tools[1]"), h()),
+                (at("system[0]"), h()),
+                (at("messages[2][1]"), h()),
+                (at("messages[4][0]"), h())
+            ]
+        );
+        // One hour on the stable prefix, five minutes on the tail: longer
+        // lifetimes come first, as the API requires.
+        assert_eq!(
+            ttls(&body(CacheTtl::Mixed)),
+            [
+                (at("tools[1]"), h()),
+                (at("system[0]"), h()),
+                (at("messages[2][1]"), None),
+                (at("messages[4][0]"), None)
+            ]
+        );
+        // The lifetime never moves a breakpoint or changes other bytes.
+        let strip = |mut v: Value| {
+            fn walk(v: &mut Value) {
+                match v {
+                    Value::Object(o) => {
+                        o.remove("cache_control");
+                        o.values_mut().for_each(walk);
+                    }
+                    Value::Array(a) => a.iter_mut().for_each(walk),
+                    _ => {}
+                }
+            }
+            walk(&mut v);
+            v
+        };
+        assert_eq!(
+            strip(body(CacheTtl::Mixed)),
+            strip(body(CacheTtl::FiveMinutes))
+        );
+        assert_eq!(
+            strip(body(CacheTtl::OneHour)),
+            strip(body(CacheTtl::FiveMinutes))
+        );
+    }
+
+    #[test]
+    fn thinking_display_is_configurable_and_summarized_by_default() {
+        let mut req = ChatRequest::new("claude-opus-5-5");
+        req.messages.push(Message::user("hi"));
+        req.thinking = Some(ThinkingConfig {
+            budget_tokens: None,
+            effort: Some(ReasoningEffort::Medium),
+        });
+        let p = profile(ThinkingStyle::Adaptive);
+        assert_eq!(
+            RequestOptions::default().thinking_display,
+            ThinkingDisplay::Summarized
+        );
+        for (d, want) in [
+            (ThinkingDisplay::Summarized, "summarized"),
+            (ThinkingDisplay::Omitted, "omitted"),
+            (ThinkingDisplay::Updates, "updates"),
+        ] {
+            let o = RequestOptions {
+                thinking_display: d,
+                ..Default::default()
+            };
+            let body = build_body(&req, &p, &o).unwrap();
+            assert_eq!(
+                body["thinking"],
+                json!({"type": "adaptive", "display": want})
+            );
+            assert_eq!(body["output_config"], json!({"effort": "medium"}));
+        }
+        // Budget models have no display field.
+        let o = RequestOptions {
+            thinking_display: ThinkingDisplay::Omitted,
+            ..Default::default()
+        };
+        let body = build_body(&req, &profile(ThinkingStyle::Budget), &o).unwrap();
+        assert!(body["thinking"].get("display").is_none());
+    }
+
+    #[test]
+    fn prewarm_body_matches_the_real_call_without_generating() {
+        let p = profile(ThinkingStyle::Adaptive);
+        let o = RequestOptions {
+            cache_ttl: CacheTtl::Mixed,
+            thinking_display: ThinkingDisplay::Omitted,
+            ..Default::default()
+        };
+        // Session start: tools and system only.
+        let mut req = tool_loop();
+        req.messages.clear();
+        req.thinking = Some(ThinkingConfig {
+            budget_tokens: None,
+            effort: Some(ReasoningEffort::High),
+        });
+        let warm = build_prewarm_body(&req, &p, &o).unwrap().unwrap();
+        assert_eq!(warm["stream"], false);
+        assert_eq!(warm["max_tokens"], 0);
+        assert_eq!(
+            warm["messages"],
+            json!([{"role": "user", "content": [{"type": "text", "text": PREWARM_PLACEHOLDER}]}])
+        );
+        assert_eq!(
+            breakpoints(&warm),
+            ["tools[1]", "system[0]"],
+            "never on the placeholder"
+        );
+        // Everything the cache keys on is what the first real call sends.
+        req.messages.push(Message::user("fix it"));
+        let real = build_body(&req, &p, &o).unwrap();
+        for k in ["model", "tools", "system", "thinking", "output_config"] {
+            assert_eq!(warm[k], real[k], "{k}");
+        }
+
+        // After compaction or on resume: the conversation is the shared
+        // prefix; the placeholder follows it unmarked.
+        let mut req = tool_loop();
+        req.tool_choice = ToolChoice::Any;
+        let warm = build_prewarm_body(&req, &p, &o).unwrap().unwrap();
+        assert!(
+            warm.get("tool_choice").is_none(),
+            "forced choice is dropped"
+        );
+        let msgs = warm["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 4);
+        assert_eq!(msgs[3]["content"][0]["text"], PREWARM_PLACEHOLDER);
+        assert_eq!(
+            breakpoints(&warm),
+            ["tools[1]", "system[0]", "messages[0][0]", "messages[2][1]"]
+        );
+        let mut real_req = tool_loop();
+        real_req.messages.push(Message::user("next"));
+        let real = build_body(&real_req, &p, &o).unwrap();
+        assert_eq!(
+            warm["messages"][2], real["messages"][2],
+            "same marked block"
+        );
+
+        // Budget thinking and disabled caching cannot be pre-warmed.
+        let mut req = tool_loop();
+        req.thinking = Some(ThinkingConfig {
+            budget_tokens: Some(2_000),
+            effort: None,
+        });
+        assert!(
+            build_prewarm_body(&req, &profile(ThinkingStyle::Budget), &o)
+                .unwrap()
+                .is_none()
+        );
+        req.thinking = None;
+        assert!(
+            build_prewarm_body(&req, &profile(ThinkingStyle::Budget), &o)
+                .unwrap()
+                .is_some(),
+            "budget models without thinking are fine"
+        );
+        let off = RequestOptions {
+            cache: CacheMode::Off,
+            ..Default::default()
+        };
+        assert!(build_prewarm_body(&req, &p, &off).unwrap().is_none());
+        let mut no_cache = p;
+        no_cache.capabilities.caching = false;
+        assert!(build_prewarm_body(&req, &no_cache, &o).unwrap().is_none());
     }
 
     #[test]

@@ -231,7 +231,7 @@ pub async fn print(out: &mut dyn Write) -> Result<(), String> {
     }
     .with_dirs(&s.project, None);
     let mut app = App::new(app_cfg, ui_tx);
-    let mut term = Terminal::new(TestBackend::new(120, 40)).map_err(|e| e.to_string())?;
+    let mut term = Terminal::new(TestBackend::new(120, 44)).map_err(|e| e.to_string())?;
     let draw = |app: &mut App, term: &mut Terminal<TestBackend>| -> String {
         let _ = term.draw(|f| app.render(f));
         buffer_text(term.backend().buffer())

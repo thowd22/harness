@@ -72,8 +72,16 @@ Paths can be `MEMORY.md`, `tools/<tool>`, `projects/<key>/<topic>`, or the
 shorthand `project/<topic>` for the current project. Writing the same
 bullet twice does nothing.
 
-The tool description and schema state the limits up front: each bullet is
-one line of at most 400 characters (1000 in `project/overview`, see below),
+**Bullet limits.** A bullet is one line of at most **400 characters**,
+except in a project's overview note (`project/overview`, stored as
+`projects/<key>/overview.md`), where it may be up to **1000 characters**.
+A write carries at most 10 bullets, and the overview note holds at most 10.
+The per-path limit has one definition, `tool::guard::limit_for_path`, which
+the memory tool, the end-of-session extractor and the dream pass all use,
+so they always agree. The sections below refer to these as "the bullet
+limits".
+
+The tool description and schema state the bullet limits up front,
 and the schema sets `maxLength` on `text` and on each `bullets` item and
 `maxItems: 10` on `bullets`. Several lessons for the same note go in one
 `write` as `bullets`. Each bullet is checked on its own: the valid ones are
@@ -101,8 +109,8 @@ memory in these cases:
 Every write goes through the same checks, and is refused with a message the
 model can act on if it fails one:
 
-1. **Format.** The bullet is a single line of at most 400 characters
-   (1000 in a project's overview note). It is not a heading, has no
+1. **Format.** The bullet is a single line within the bullet limits
+   for its note. It is not a heading, has no
    hand-written `(src: …)` suffix, and every `[[link]]` is a valid note
    path. A bullet that is too long is refused with its length, the limit
    and how to split it into several bullets sent in one write.
@@ -127,9 +135,9 @@ Harness answers such a request this way, taught by the tool description and
 - The agent writes one **overview note**, `project/overview` (stored as
   `projects/<key>/overview.md`): the project's purpose, its architecture in
   a few sentences, how to build and test it, and the conventions that
-  matter. Overview bullets may be up to 1000 characters
-  (`guard::MAX_OVERVIEW_BULLET_CHARS`), and the note holds at most 10
-  bullets (`guard::MAX_OVERVIEW_BULLETS`). A write that would grow it past
+  matter. Its bullets get the longer overview limit and the note's bullet
+  cap from "Bullet limits" above
+  (`guard::MAX_OVERVIEW_BULLET_CHARS`, `guard::MAX_OVERVIEW_BULLETS`). A write that would grow it past
   that is refused with a hint to read the note and forget or merge bullets
   first; re-sending bullets it already has is not refused.
 - Everything else it found worth keeping goes in as **non-obvious
@@ -191,7 +199,9 @@ It sends a redacted transcript to a cheap model, normally
 `[memory] dream_model` (default `haiku`) resolved through the model registry,
 together with the memory that is already loaded. The model replies with a
 JSON array of `{path, text, reason}` candidates. Each candidate goes through
-the same write checks as the tool, and at most 5 are kept. Nothing is
+the same write checks as the tool, with the bullet limits of its path (a
+`project/overview` proposal gets the overview limit), and at most 5 are
+kept. Nothing is
 written automatically: show the proposals to the user, then call
 `extract::write_proposals(&tool, &accepted)` to save the ones they accept.
 

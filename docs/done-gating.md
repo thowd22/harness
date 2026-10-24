@@ -7,8 +7,13 @@ When a `Verifier` is configured (`[verify] command`, or the agent's
 
 - `LoopConfig::verify_when` sets when it runs. `Always` (the default) runs it
   every time the model ends its turn. `OnChanges` runs it only when the run
-  made a successful mutating tool call (anything that is not read-only,
-  bash included).
+  changed files: a successful mutating tool call (anything that is not
+  read-only, bash included), except a bash command that, according to the
+  change ledger, changed nothing or only
+  [generated files](hygiene.md#generated-files) such as `__pycache__/*.pyc`
+  (the ledger's bash reports `ToolEvent::WorktreeChanges`, which the
+  dispatcher keeps as `CallOutcome::changed`). An auto-detected verify
+  command uses `OnChanges`.
 - When verification fails, the failure goes back to the model as a user
   message with the command, its exit code and the end of its output. The
   model then gets another turn to fix it. This repeats at most

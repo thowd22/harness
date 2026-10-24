@@ -432,3 +432,37 @@ fn mcp_calls_show_server_tool_duration_and_result_and_toggle() {
     assert_eq!(card(&h), before);
     assert_eq!(h.send(&key("esc")), Some(DetailOutput::Back));
 }
+
+/// A turn header too long for the log wraps instead of being cut; every
+/// row of it toggles the turn by click, and Enter on it does too. A long
+/// verify output shows in full (wrapped), not just its tail.
+#[test]
+fn long_headers_wrap_and_every_row_toggles_by_click_and_keyboard() {
+    let model = "a-very-long-model-name-that-does-not-fit-the-header_end";
+    let mut b = EventBuilder::new();
+    b.start(NodeSpec::step("fix").agent("implementer").model(model));
+    b.model_call("fix", "c1", model);
+    b.delta("fix", "c1", DeltaChannel::Text, "Editing the parser.");
+    b.advance(1_000);
+    b.finish_call("fix", "c1", usage(500, 11_900, 812, 120), 1_000);
+    let out: Vec<String> = (0..30).map(|i| format!("output line {i}")).collect();
+    b.verify("fix", "cargo test", false, &out.join("\n"), 500);
+    let mut h = H::new(b.events(), 60, 80);
+    let text = h.draw();
+    assert!(text.contains("does-not-fit-the-"), "{text}");
+    assert!(text.contains("header_end"), "the model wraps: {text}");
+    assert!(!text.contains('…'), "{text}");
+    assert!(text.contains("output line 0"), "the whole output: {text}");
+    assert!(text.contains("output line 29"), "{text}");
+    // The turn starts collapsed or expanded; a click on its second header
+    // row flips it.
+    let before = text.contains("▾ ✔ Turn 1");
+    let (_, y) = find_text(h.term.backend().buffer(), "Turn 1").unwrap();
+    h.send(&click(10, y + 1));
+    let text = h.draw();
+    assert_eq!(text.contains("▾ ✔ Turn 1"), !before, "{text}");
+    // Keyboard: the header is focused now; Enter flips it back.
+    h.send(&key("enter"));
+    let text = h.draw();
+    assert_eq!(text.contains("▾ ✔ Turn 1"), before, "{text}");
+}

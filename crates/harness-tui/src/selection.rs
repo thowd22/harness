@@ -37,7 +37,9 @@
 //!
 //! - a press without movement stays a click (it is passed on unchanged),
 //! - press, drag and release selects from the press to the release and
-//!   copies on release; dragging past the top or bottom edge of a
+//!   copies on release; a drag from a border drawn around a nested region
+//!   (a panel's list inside its modal) starts at the nearest cell of that
+//!   region; dragging past the top or bottom edge of a
 //!   scrollable region scrolls it ([`Scroll`], repeated on ticks while the
 //!   pointer stays there),
 //! - a double click selects a word, a triple click a logical line,
@@ -390,6 +392,80 @@ impl FrameText {
             trim_start: region.chrome == Chrome::Drawing,
         })
     }
+
+    /// For a press on a border drawn around a region nested in region
+    /// `id` (a panel's or picker's list inside its modal, a pane inside
+    /// the screen), that inner region and its text cell nearest to
+    /// `(x, y)`: so a drag from a border selects the text it frames, as a
+    /// drag from a chat card's border does. A side border (`│`) frames
+    /// the text on its row, a top or bottom border (`─`) the text in its
+    /// column, a corner or junction the text diagonally inside it.
+    /// `None` when `(x, y)` is no border or frames no nested region.
+    fn inside_border(
+        &self,
+        id: &str,
+        x: u16,
+        y: u16,
+        buf: &Buffer,
+    ) -> Option<(String, (u16, u16))> {
+        let c = buf.cell(Position::new(x, y))?.symbol().chars().next()?;
+        if !is_box_drawing(c) {
+            return None;
+        }
+        // How far from the border the text may start (a cell of padding).
+        let (reach_x, reach_y) = match c {
+            '│' | '┃' | '║' | '▌' | '▎' | '▏' | '▕' | '▐' => (2, 0),
+            '─' | '━' | '═' => (0, 1),
+            _ => (2, 1),
+        };
+        let outer_idx = self.position(id)?;
+        let outer = self.items[outer_idx].rect();
+        let gap = |p: u16, lo: u16, hi: u16| -> u16 {
+            if p < lo {
+                lo - p
+            } else if p >= hi {
+                p - hi + 1
+            } else {
+                0
+            }
+        };
+        let mut best: Option<(u16, usize)> = None;
+        for (idx, item) in self.items.iter().enumerate().skip(outer_idx + 1) {
+            let Item::Region(r) = item else { continue };
+            if r.rect.intersection(outer) != r.rect {
+                continue;
+            }
+            let (dx, dy) = (
+                gap(x, r.rect.left(), r.rect.right()),
+                gap(y, r.rect.top(), r.rect.bottom()),
+            );
+            if dx > reach_x || dy > reach_y || (dx == 0 && dy == 0) {
+                continue;
+            }
+            // The nearest cell must be the region's own, not covered.
+            let cx = x.clamp(r.rect.left(), r.rect.right() - 1);
+            let cy = y.clamp(r.rect.top(), r.rect.bottom() - 1);
+            if !matches!(self.cover(idx, cx, cy), Cover::No | Cover::Overlay(_)) {
+                continue;
+            }
+            let d = dx + dy;
+            if best.is_none_or(|(bd, _)| d <= bd) {
+                best = Some((d, idx));
+            }
+        }
+        let (_, idx) = best?;
+        let r = self.items[idx].rect();
+        let Item::Region(region) = &self.items[idx] else {
+            return None;
+        };
+        Some((
+            region.id.clone(),
+            (
+                x.clamp(r.left(), r.right() - 1),
+                y.clamp(r.top(), r.bottom() - 1),
+            ),
+        ))
+    }
 }
 
 thread_local! {
@@ -532,10 +608,26 @@ fn smart_mask(cells: &mut [Option<String>]) -> bool {
         && matches!(ch(cells, p), '╭' | '│' | '╰')
         && ch(cells, p + 1) == ' '
     {
+        let header = ch(cells, p) == '╭';
         blank(cells, p, p + 2);
         if let Some(q) = (0..n).rev().find(|&i| ch(cells, i) != ' ')
             && matches!(ch(cells, q), '╮' | '│' | '╯')
         {
+            if header && ch(cells, q) == '╮' {
+                // The header rule between the title and the right-hand
+                // metadata: the last run of `─` before a blank. A title
+                // truncated to fit leaves it only a cell or two wide.
+                let end = (p + 2..q)
+                    .rev()
+                    .find(|&i| ch(cells, i) == '─' && matches!(ch(cells, i + 1), ' ' | '╮'));
+                if let Some(end) = end {
+                    let mut start = end;
+                    while start > p + 2 && ch(cells, start - 1) == '─' {
+                        start -= 1;
+                    }
+                    blank(cells, start, end + 1);
+                }
+            }
             blank(cells, q, q + 1);
         }
     }
@@ -704,7 +796,11 @@ pub enum KeyOutcome {
 struct Press {
     x: u16,
     y: u16,
+    /// The region a drag from here selects in.
     region: Option<String>,
+    /// Where in it the drag starts: the press, or the nearest text cell
+    /// when the press is on a border around the region.
+    from: (u16, u16),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -983,7 +1079,14 @@ impl Selector {
                 {
                     self.select_at(id, x, y, count == 3);
                 }
-                self.press = Some(Press { x, y, region });
+                let (region, from) = match region {
+                    Some(id) => match self.frame.inside_border(&id, x, y, &self.buf) {
+                        Some((inner, at)) => (Some(inner), at),
+                        None => (Some(id), (x, y)),
+                    },
+                    None => (None, (x, y)),
+                };
+                self.press = Some(Press { x, y, region, from });
                 (MouseOutcome::Pass, None)
             }
             MouseEventKind::Drag(MouseButton::Left) => {
@@ -991,6 +1094,7 @@ impl Selector {
                     x: px,
                     y: py,
                     region: Some(id),
+                    from,
                 }) = self.press.clone()
                 else {
                     return (MouseOutcome::Consumed, None);
@@ -1003,7 +1107,7 @@ impl Selector {
                     if (x, y) == (px, py) {
                         return (MouseOutcome::Consumed, None);
                     }
-                    let Some(anchor) = self.resolve(&id, px, py) else {
+                    let Some(anchor) = self.resolve(&id, from.0, from.1) else {
                         return (MouseOutcome::Consumed, None);
                     };
                     self.cache.clear();

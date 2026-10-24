@@ -343,6 +343,35 @@ mod tests {
     }
 
     #[test]
+    fn each_tool_call_stops_at_its_content_block_stop() {
+        let events = vec![
+            json!({"type": "message_start", "message": {"id": "m", "usage": {}}}),
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "t0", "name": "read", "input": {}}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{\"path\":"}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "\"a\"}"}}),
+            json!({"type": "content_block_stop", "index": 0}),
+            json!({"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "t1", "name": "grep", "input": {}}}),
+            json!({"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "{}"}}),
+            json!({"type": "content_block_stop", "index": 1}),
+            json!({"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 9}}),
+            json!({"type": "message_stop"}),
+        ];
+        let mut d = Decoder::new();
+        let steps: Vec<Vec<StreamEvent>> = events
+            .into_iter()
+            .map(|e| d.decode(&ev(e)).unwrap())
+            .collect();
+        assert_eq!(steps[4], vec![StreamEvent::BlockStop { index: 0 }]);
+        assert_eq!(steps[7], vec![StreamEvent::BlockStop { index: 1 }]);
+        let stops = steps
+            .iter()
+            .flatten()
+            .filter(|e| matches!(e, StreamEvent::BlockStop { .. }))
+            .count();
+        assert_eq!(stops, 2, "no other stops");
+    }
+
+    #[test]
     fn usage_combines_message_start_and_delta_with_cache_counters() {
         let out = run(vec![
             json!({"type": "message_start", "message": {"id": "msg_1", "model": "claude-opus-5-5",

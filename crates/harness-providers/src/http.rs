@@ -7,6 +7,14 @@
 //! attempts independent. [`HttpClient::post_sse`] does exactly that for raw
 //! SSE events.
 //!
+//! Connections are shared: every [`HttpClient`] for the same base URL (and
+//! connect timeout) uses one process-wide reqwest client, so a subagent,
+//! session summary or dreaming provider built after the main one reuses its
+//! warm (DNS, TCP, TLS, HTTP/2) connection. The shared client carries no
+//! credentials: each [`HttpClient`] sends its own
+//! [`HttpConfig::default_headers`] (auth, versions) with every request. See
+//! [`HttpClient::new`] for the pool settings.
+//!
 //! When [`HttpConfig::compression`] is set, large JSON bodies for the listed
 //! paths are gzip-encoded (see [`compression`]). A server that rejects the
 //! encoding gets the raw body once more and compression is switched off for
@@ -14,6 +22,8 @@
 
 pub mod compression;
 
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -73,23 +83,133 @@ impl HttpConfig {
     }
 }
 
+/// How long an idle pooled connection is kept open.
+pub const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// TCP keepalive interval on pooled connections.
+pub const TCP_KEEPALIVE: Duration = Duration::from_secs(30);
+
+/// HTTP/2 ping interval, also while a connection is idle, so a connection
+/// a NAT or load balancer silently dropped is noticed before the next
+/// request instead of by it.
+pub const HTTP2_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// How long an HTTP/2 keepalive ping may go unanswered before the
+/// connection is closed.
+pub const HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Key of a shared reqwest client: base URL, connect timeout and the tokio
+/// runtime the connections live on (a pooled connection's driver task runs
+/// on the runtime that opened it, so runtimes never share one).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct PoolKey {
+    base_url: String,
+    connect_timeout: Duration,
+    runtime: Option<tokio::runtime::Id>,
+}
+
+/// The process-wide shared clients.
+static POOLS: LazyLock<Mutex<HashMap<PoolKey, reqwest::Client>>> = LazyLock::new(Mutex::default);
+
+/// A reqwest client (rustls, HTTP/2 when offered) with the pool and
+/// keepalive settings above and no default headers.
+fn build_client(connect_timeout: Duration) -> Result<reqwest::Client, ProviderError> {
+    reqwest::Client::builder()
+        .connect_timeout(connect_timeout)
+        .pool_idle_timeout(POOL_IDLE_TIMEOUT)
+        .tcp_keepalive(TCP_KEEPALIVE)
+        .http2_keep_alive_interval(HTTP2_KEEPALIVE_INTERVAL)
+        .http2_keep_alive_timeout(HTTP2_KEEPALIVE_TIMEOUT)
+        .http2_keep_alive_while_idle(true)
+        .user_agent(concat!("harness/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| ProviderError::Other(format!("building HTTP client: {e}")))
+}
+
+/// Where an [`HttpClient`] gets its reqwest client.
+#[derive(Debug, Clone)]
+enum Pool {
+    /// The process-wide client for this config's base URL.
+    Shared,
+    /// A private client (its own connections).
+    Isolated(reqwest::Client),
+}
+
 /// Cheaply clonable HTTP client bound to one provider's [`HttpConfig`].
 #[derive(Debug, Clone)]
 pub struct HttpClient {
-    inner: reqwest::Client,
+    pool: Pool,
     config: HttpConfig,
 }
 
 impl HttpClient {
-    /// Builds a client (rustls, HTTP/2 when offered).
+    /// A client on the process-wide connection pool for `config.base_url`
+    /// (rustls, HTTP/2 when offered; idle connections kept
+    /// [`POOL_IDLE_TIMEOUT`], TCP keepalive [`TCP_KEEPALIVE`], HTTP/2 pings
+    /// every [`HTTP2_KEEPALIVE_INTERVAL`] while idle). Clients for the same
+    /// base URL share connections; `config.default_headers` stay with this
+    /// client and are sent with each of its requests only.
     pub fn new(config: HttpConfig) -> Result<Self, ProviderError> {
-        let inner = reqwest::Client::builder()
-            .connect_timeout(config.connect_timeout)
-            .default_headers(config.default_headers.clone())
-            .user_agent(concat!("harness/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|e| ProviderError::Other(format!("building HTTP client: {e}")))?;
-        Ok(Self { inner, config })
+        let client = Self {
+            pool: Pool::Shared,
+            config,
+        };
+        client.reqwest()?;
+        Ok(client)
+    }
+
+    /// A client with its own connection pool, shared with no other client.
+    /// For measuring connection setup (`harness bench --net`).
+    pub fn isolated(config: HttpConfig) -> Result<Self, ProviderError> {
+        Ok(Self {
+            pool: Pool::Isolated(build_client(config.connect_timeout)?),
+            config,
+        })
+    }
+
+    /// True when `self` and `other` send their requests over the same
+    /// connection pool (in the current tokio runtime).
+    pub fn shares_connections_with(&self, other: &HttpClient) -> bool {
+        match (&self.pool, &other.pool) {
+            (Pool::Shared, Pool::Shared) => self.pool_key() == other.pool_key(),
+            _ => false,
+        }
+    }
+
+    fn pool_key(&self) -> PoolKey {
+        PoolKey {
+            base_url: self.config.base_url.trim_end_matches('/').to_owned(),
+            connect_timeout: self.config.connect_timeout,
+            runtime: tokio::runtime::Handle::try_current().ok().map(|h| h.id()),
+        }
+    }
+
+    /// The reqwest client to send on: the shared one for this base URL and
+    /// runtime (built on first use), or the private one.
+    fn reqwest(&self) -> Result<reqwest::Client, ProviderError> {
+        if let Pool::Isolated(c) = &self.pool {
+            return Ok(c.clone());
+        }
+        let key = self.pool_key();
+        let mut pools = POOLS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(c) = pools.get(&key) {
+            return Ok(c.clone());
+        }
+        let c = build_client(key.connect_timeout)?;
+        pools.insert(key, c.clone());
+        Ok(c)
+    }
+
+    /// A request to `url` carrying this client's default headers.
+    fn request(
+        &self,
+        method: reqwest::Method,
+        url: String,
+    ) -> Result<reqwest::RequestBuilder, ProviderError> {
+        Ok(self
+            .reqwest()?
+            .request(method, url)
+            .headers(self.config.default_headers.clone()))
     }
 
     /// The client's configuration.
@@ -196,8 +316,8 @@ impl HttpClient {
         timeout: Option<Duration>,
     ) -> Result<reqwest::Response, Failure> {
         let mut req = self
-            .inner
-            .post(self.url(path))
+            .request(reqwest::Method::POST, self.url(path))
+            .map_err(Failure::Error)?
             .headers(headers.clone())
             .header(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         if gzipped {
@@ -231,6 +351,38 @@ impl HttpClient {
         } else {
             Err(Failure::Error(err))
         }
+    }
+
+    /// Sends `GET path` on this client's connection pool and waits for the
+    /// response headers only (the body is dropped). Returns the negotiated
+    /// HTTP version and the time to headers. Used to open (pre-warm) a
+    /// connection and by `harness bench` to measure connection setup.
+    pub async fn warm(&self, path: &str) -> Result<(String, Duration), ProviderError> {
+        let start = std::time::Instant::now();
+        let response = tokio::time::timeout(
+            self.config.connect_timeout * 2,
+            self.request(reqwest::Method::GET, self.url(path))?.send(),
+        )
+        .await
+        .map_err(|_| ProviderError::Timeout(self.config.connect_timeout * 2))?
+        .map_err(|e| map_reqwest(e, self.config.connect_timeout))?;
+        let took = start.elapsed();
+        Ok((format!("{:?}", response.version()), took))
+    }
+
+    /// `GET path` with this client's default headers and the whole-request
+    /// timeout. Returns the status and the body text, whatever the status.
+    pub async fn get_text(&self, path: &str) -> Result<(u16, String), ProviderError> {
+        let limit = self.config.request_timeout;
+        let response = self
+            .request(reqwest::Method::GET, self.url(path))?
+            .timeout(limit)
+            .send()
+            .await
+            .map_err(|e| map_reqwest(e, limit))?;
+        let status = response.status().as_u16();
+        let text = response.text().await.map_err(|e| map_reqwest(e, limit))?;
+        Ok((status, text))
     }
 
     /// Streams SSE events from a POST, with retries, stall detection and

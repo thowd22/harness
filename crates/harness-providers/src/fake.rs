@@ -179,6 +179,12 @@ pub struct FakeTurn {
     /// otherwise the error follows the content, in place of `MessageStop`.
     #[serde(default)]
     pub error: Option<FakeError>,
+    /// Serve this turn only to a request whose system prompt contains this
+    /// text, whatever its position in the script (for calls whose timing
+    /// varies, such as a background compaction summary). Requests that no
+    /// such turn matches take the first turn without `match_system`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_system: Option<String>,
 }
 
 impl FakeTurn {
@@ -449,10 +455,20 @@ impl Provider for FakeProvider {
         let model = request.model.clone();
         let (turn, call) = {
             let mut shared = self.lock();
+            let system = request.system.as_deref().unwrap_or_default();
+            let pick = shared
+                .turns
+                .iter()
+                .position(|t| {
+                    t.match_system
+                        .as_deref()
+                        .is_some_and(|m| system.contains(m))
+                })
+                .or_else(|| shared.turns.iter().position(|t| t.match_system.is_none()));
             shared.requests.push(request);
             shared.calls += 1;
             let call = shared.calls;
-            let Some(turn) = shared.turns.pop_front() else {
+            let Some(turn) = pick.and_then(|i| shared.turns.remove(i)) else {
                 return Err(ProviderError::Other(format!(
                     "fake provider script exhausted at call {call}"
                 )));
@@ -635,6 +651,29 @@ mod tests {
         // MessageStart immediately after the delay, then 5 more events
         // (3 deltas, BlockStop, MessageStop) 100ms apart.
         assert_eq!(start.elapsed(), Duration::from_millis(1500));
+    }
+
+    #[tokio::test]
+    async fn match_system_turns_serve_matching_requests_in_any_position() {
+        let p = FakeProvider::from_yaml(
+            "responses:\n  - content: [ { text: one } ]\n  - match_system: handoff notes\n    content: [ { text: summary } ]\n  - content: [ { text: two } ]\n",
+        )
+        .unwrap();
+        let ask = |system: &str| ChatRequest {
+            system: Some(system.to_owned()),
+            ..ChatRequest::new("m")
+        };
+        let cancel = CancellationToken::new();
+        let one = p.complete(ask("agent"), cancel.clone()).await.unwrap();
+        assert_eq!(one.message.text(), "one");
+        let two = p.complete(ask("agent"), cancel.clone()).await.unwrap();
+        assert_eq!(two.message.text(), "two");
+        let summary = p
+            .complete(ask("You write handoff notes"), cancel.clone())
+            .await
+            .unwrap();
+        assert_eq!(summary.message.text(), "summary");
+        assert_eq!(p.remaining(), 0);
     }
 
     #[tokio::test(start_paused = true)]

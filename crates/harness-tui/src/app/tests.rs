@@ -561,7 +561,17 @@ fn goal_bar_shows_in_both_views_and_is_reachable_by_mouse_and_keyboard() {
     let mut narrow = Ui::sized(AppConfig::default(), 70, 20);
     narrow.feed(&demo_run());
     assert!(!narrow.text().contains("┌ Goal"), "{}", narrow.text());
-    let status = narrow.text().lines().rev().nth(1).unwrap_or("").to_owned();
+    // The status line sits above the footer; it wraps onto a second row
+    // when its segments do not fit on one.
+    let text = narrow.text();
+    let status = text
+        .lines()
+        .rev()
+        .skip(1)
+        .take(2)
+        .find(|l| l.contains('☰'))
+        .unwrap_or("")
+        .to_owned();
     assert!(status.contains("☰"), "{}", narrow.text());
     assert!(status.contains("1/2 Fix parse_header"), "{}", narrow.text());
 }

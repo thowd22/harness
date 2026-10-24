@@ -35,9 +35,10 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 
-use crate::chat::text::{truncate, truncate_line, width};
+use crate::chat::text::{sanitize, truncate, truncate_line, width, wrap_text};
 use crate::fuzzy::{Fuzzy, query};
 use crate::interaction::HitMap;
+use crate::item_detail::{ItemDetail, hard_end, hard_wrap};
 use crate::theme::{Theme, Token};
 
 /// Title of the dialog.
@@ -106,7 +107,15 @@ impl SessionRow {
 pub enum SessionAction {
     /// The session at this position in the filtered list: resume it.
     Row(usize),
+    /// Scroll the selected session's full text by this many rows (▲/▼).
+    Detail(i32),
+    /// Open or close the selected session's full text (`→ full text`).
+    ToggleDetail,
 }
+
+/// Element id prefix of the selected session's full text (see
+/// [`crate::item_detail`]).
+pub const DETAIL_PREFIX: &str = "sessions";
 
 /// The result of an input event.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,6 +144,7 @@ pub struct SessionPicker {
     scroll: usize,
     page: usize,
     fuzzy: Fuzzy,
+    detail: ItemDetail,
 }
 
 impl SessionPicker {
@@ -156,6 +166,7 @@ impl SessionPicker {
             scroll: 0,
             page: 1,
             fuzzy: Fuzzy::new(),
+            detail: ItemDetail::new(),
         };
         p.refilter();
         p.selected = p
@@ -253,8 +264,14 @@ impl SessionPicker {
         }
         let plain = key.modifiers.difference(KeyModifiers::SHIFT).is_empty();
         let page = self.page.max(1) as isize;
+        let shift = key.modifiers == KeyModifiers::SHIFT;
         match key.code {
             KeyCode::Esc => return SessionOutcome::Close,
+            // Shift+Up/Down scroll the selected session's full text.
+            KeyCode::Up if shift => self.detail.scroll(-1),
+            KeyCode::Down if shift => self.detail.scroll(1),
+            // Right opens (and closes) the selected session's full text.
+            KeyCode::Right if plain => self.detail.toggle(),
             KeyCode::Enter => return self.choose(),
             KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => self.move_by(-1),
             KeyCode::Down | KeyCode::Tab => self.move_by(1),
@@ -286,6 +303,14 @@ impl SessionPicker {
                 self.choose()
             }
             SessionAction::Row(_) => SessionOutcome::Ignored,
+            SessionAction::Detail(n) => {
+                self.detail.scroll(n);
+                SessionOutcome::Changed
+            }
+            SessionAction::ToggleDetail => {
+                self.detail.toggle();
+                SessionOutcome::Changed
+            }
         }
     }
 
@@ -303,7 +328,14 @@ impl SessionPicker {
             area.width
         };
         let w = MAX_WIDTH.min(cap).max(MIN_WIDTH.min(area.width));
-        let wanted = 2 + 2 + (self.rows.len().max(1) * ROWS_PER_SESSION) as u16 + 1;
+        let full = self.full_text(w.saturating_sub(4) as usize, &Theme::default());
+        let more = if self.detail.is_open() {
+            ItemDetail::wanted(&full, w.saturating_sub(4)) as u16
+        } else {
+            0
+        };
+        let wanted =
+            (2 + 2 + (self.rows.len().max(1) * ROWS_PER_SESSION) as u16 + 1).saturating_add(more);
         let tall = ((u32::from(area.height) * u32::from(HEIGHT_PERCENT) + 50) / 100) as u16;
         let h = wanted.min(tall.max(7)).min(area.height);
         Rect::new(
@@ -312,6 +344,36 @@ impl SessionPicker {
             w,
             h,
         )
+    }
+
+    /// The selected session in full (name, details, description) when its
+    /// two rows at `w` cells cut any of it; else nothing.
+    fn full_text(&self, w: usize, theme: &Theme) -> Vec<Line<'static>> {
+        let Some(row) = self.selected() else {
+            return Vec::new();
+        };
+        let (name, details) = name_parts(row, w);
+        let desc = row_description(row);
+        let cut = name != sanitize(&row.name)
+            || details != sanitize(&row.details())
+            || width(&desc) > w.saturating_sub(5);
+        if !cut {
+            return Vec::new();
+        }
+        vec![
+            Line::from(Span::styled(
+                sanitize(&row.name),
+                theme.fg(Token::Fg).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                sanitize(&row.details()),
+                theme.fg(Token::Muted),
+            )),
+            Line::from(Span::styled(
+                desc,
+                theme.fg(Token::Muted).add_modifier(Modifier::ITALIC),
+            )),
+        ]
     }
 
     fn name_line(
@@ -342,15 +404,7 @@ impl SessionPicker {
             Span::styled(" ", base),
         ];
         let used = 3;
-        let details = row.details();
-        // The name keeps at least half of the row; the details give way.
-        let name_room = w.saturating_sub(used);
-        let details_room = name_room.saturating_sub(width(&row.name).min(name_room / 2) + 2);
-        let details = truncate(&details, details_room);
-        let name = truncate(
-            &row.name,
-            name_room.saturating_sub(width(&details) + 2).max(1),
-        );
+        let (name, details) = name_parts(row, w);
         let gap = w.saturating_sub(used + width(&name) + width(&details));
         let mut spans = prefix;
         spans.push(Span::styled(name, name_style));
@@ -371,11 +425,7 @@ impl SessionPicker {
         } else {
             Style::new()
         };
-        let text = if row.description.is_empty() {
-            "(no messages yet)".to_owned()
-        } else {
-            row.description.clone()
-        };
+        let text = row_description(row);
         let body = truncate(&text, w.saturating_sub(5));
         let fill = w.saturating_sub(5 + width(&body));
         Line::from(vec![
@@ -435,32 +485,82 @@ impl SessionPicker {
             self.rows.len(),
             if self.rows.len() == 1 { "" } else { "s" }
         );
-        line_at(
-            frame,
-            inner.y,
-            Line::from(vec![
-                Span::styled("› ", theme.fg(Token::Accent)),
-                Span::styled(self.query.clone(), theme.fg(Token::Fg)),
-                Span::styled(count, theme.fg(Token::Muted)),
-            ]),
-        );
-        let cx = inner.x + (2 + width(&self.query)).min(w.saturating_sub(1)) as u16;
-        frame.set_cursor_position(Position::new(cx, inner.y));
+        // The query wraps (by character, so the cursor follows the text).
+        let query = vec![
+            Span::styled("› ", theme.fg(Token::Accent)),
+            Span::styled(sanitize(&self.query), theme.fg(Token::Fg)),
+        ];
+        let (crow, ccol) = hard_end(&query, w);
+        let mut head_spans = query;
+        head_spans.push(Span::styled(count, theme.fg(Token::Muted)));
+        let head = hard_wrap(head_spans, w);
+        let head_h = head
+            .len()
+            .min((inner.height as usize).saturating_sub(2).max(1));
+        let first = (crow + 1).saturating_sub(head_h);
+        for (i, l) in head.into_iter().skip(first).take(head_h).enumerate() {
+            line_at(frame, inner.y + i as u16, l);
+        }
+        let cy = inner.y + (crow - first).min(head_h - 1) as u16;
+        frame.set_cursor_position(Position::new(
+            inner.x + ccol.min(w.saturating_sub(1)) as u16,
+            cy,
+        ));
+        let head_h = head_h as u16;
 
-        let hint_rows = u16::from(inner.height >= 4);
-        if hint_rows == 1 {
+        // Key hints wrap at the bottom while the list keeps a row.
+        let hints = wrap_text(HINTS, w);
+        let hint_rows = if inner.height >= head_h + 3 {
+            (hints.len() as u16).min(inner.height - head_h - 2)
+        } else {
+            0
+        };
+        for (i, h) in hints.into_iter().take(hint_rows as usize).enumerate() {
             line_at(
                 frame,
-                inner.bottom() - 1,
-                Line::from(Span::styled(HINTS, theme.fg(Token::Muted))),
+                inner.bottom() - hint_rows + i as u16,
+                Line::from(Span::styled(h, theme.fg(Token::Muted))),
             );
         }
-        let list = Rect::new(
+        let mut list = Rect::new(
             inner.x,
-            inner.y + 1,
+            inner.y + head_h,
             inner.width,
-            inner.height.saturating_sub(1 + hint_rows),
+            inner.height.saturating_sub(head_h + hint_rows),
         );
+        let full = self.full_text(w, theme);
+        if let Some(&i) = self.visible.get(self.selected) {
+            self.detail.select(i);
+        }
+        let detail_h = self.detail.rows_for(&full, list.width, list.height);
+        list.height -= detail_h;
+        self.detail.render_hint(
+            frame,
+            Rect::new(
+                rect.x + 1,
+                rect.bottom() - 1,
+                rect.width.saturating_sub(2),
+                1,
+            ),
+            !full.is_empty(),
+            theme,
+            hits,
+            DETAIL_PREFIX,
+            wrap(SessionAction::ToggleDetail),
+        );
+        if detail_h > 0 {
+            let r = Rect::new(list.x, list.bottom(), list.width, detail_h);
+            self.detail.render(
+                frame,
+                r,
+                full,
+                theme,
+                hits,
+                DETAIL_PREFIX,
+                wrap(SessionAction::Detail(-1)),
+                wrap(SessionAction::Detail(1)),
+            );
+        }
         let per = (list.height as usize / ROWS_PER_SESSION).max(usize::from(list.height > 0));
         self.page = per.max(1);
         if list.height == 0 {
@@ -471,13 +571,19 @@ impl SessionPicker {
             let msg = if self.rows.is_empty() {
                 "no saved sessions yet".to_owned()
             } else {
-                format!("no sessions match `{}`", self.query)
+                format!("no sessions match `{}`", sanitize(&self.query))
             };
-            line_at(
-                frame,
-                list.y,
-                Line::from(Span::styled(msg, theme.fg(Token::Muted))),
-            );
+            for (i, l) in wrap_text(&msg, w)
+                .into_iter()
+                .take(list.height as usize)
+                .enumerate()
+            {
+                line_at(
+                    frame,
+                    list.y + i as u16,
+                    Line::from(Span::styled(l, theme.fg(Token::Muted))),
+                );
+            }
             return;
         }
         if self.selected < self.scroll {
@@ -502,6 +608,26 @@ impl SessionPicker {
                 wrap(SessionAction::Row(pos)),
             );
         }
+    }
+}
+
+/// A session's name and details as its first row at `w` cells shows them:
+/// the name keeps at least half of the row; the details give way.
+fn name_parts(row: &SessionRow, w: usize) -> (String, String) {
+    let name = sanitize(&row.name);
+    let name_room = w.saturating_sub(3);
+    let details_room = name_room.saturating_sub(width(&name).min(name_room / 2) + 2);
+    let details = truncate(&sanitize(&row.details()), details_room);
+    let name = truncate(&name, name_room.saturating_sub(width(&details) + 2).max(1));
+    (name, details)
+}
+
+/// A session's description, or a note when it has none.
+fn row_description(row: &SessionRow) -> String {
+    if row.description.is_empty() {
+        "(no messages yet)".to_owned()
+    } else {
+        sanitize(&row.description).replace('\n', " ")
     }
 }
 
@@ -576,6 +702,63 @@ pub(crate) mod tests {
             text.push('\n');
         }
         (text, hits)
+    }
+
+    /// The first cell of `needle` in a [`render`] text.
+    fn at(text: &str, needle: &str) -> (u16, u16) {
+        text.lines()
+            .enumerate()
+            .find_map(|(y, l)| {
+                let i = l.find(needle)?;
+                Some((l[..i].chars().count() as u16, y as u16))
+            })
+            .unwrap_or_else(|| panic!("{needle:?} not in:\n{text}"))
+    }
+
+    fn click(hits: &HitMap<SessionAction>, (x, y): (u16, u16)) -> SessionAction {
+        hits.hit(x, y).expect("clickable").action
+    }
+
+    /// A cut session offers `→ full text`; Right or a click on it shows
+    /// its name, details and description wrapped, Shift+Down or ▼
+    /// scrolls, Right or `← hide full text` closes.
+    #[test]
+    fn cut_sessions_open_their_full_text_by_keyboard_and_mouse() {
+        let mut rows = sample();
+        rows[1].description = "a long description of the work ".repeat(6) + "tail_end";
+        let mut p = SessionPicker::new(rows);
+        let (text, hits) = render(&mut p, 60, 20);
+        assert!(text.contains("→ full text"), "{text}");
+        assert!(!text.contains("tail_end"), "{text}");
+        assert_eq!(p.handle_key(&key(KeyCode::Right)), SessionOutcome::Changed);
+        let (text, _) = render(&mut p, 60, 20);
+        assert!(text.contains("─ full text"), "{text}");
+        assert!(text.contains("← hide full text"), "{text}");
+        p.handle_key(&key(KeyCode::Right));
+        let (text, hits2) = render(&mut p, 60, 20);
+        assert!(!text.contains("─ full text"), "{text}");
+        drop(hits);
+        // Mouse.
+        let a = click(&hits2, at(&text, "→ full text"));
+        assert_eq!(a, SessionAction::ToggleDetail);
+        p.activate(a);
+        let (text, hits) = render(&mut p, 60, 20);
+        assert!(text.contains("shift+↑↓ 1-"), "{text}");
+        let a = click(&hits, at(&text, "▼"));
+        assert_eq!(a, SessionAction::Detail(1));
+        p.activate(a);
+        let (text, _) = render(&mut p, 60, 20);
+        assert!(text.contains("shift+↑↓ 2-"), "{text}");
+        p.handle_key(&KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+        let (text, _) = render(&mut p, 60, 20);
+        assert!(text.contains("shift+↑↓ 3-"), "{text}");
+        p.handle_key(&KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
+        let (text, hits) = render(&mut p, 60, 20);
+        assert!(text.contains("shift+↑↓ 2-"), "{text}");
+        let (x, y) = at(&text, "← hide full text");
+        p.activate(click(&hits, (x + 2, y)));
+        let (text, _) = render(&mut p, 60, 20);
+        assert!(!text.contains("─ full text"), "{text}");
     }
 
     #[test]

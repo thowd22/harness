@@ -148,6 +148,11 @@ is older than `[general] model_list_ttl` (default `24h`) or came from a
 different `base_url`. If a refresh fails, for example offline, the cached
 list stays in use and the error is kept for display.
 
+Session start uses the same cache: the OpenRouter tool-support check reads
+`openrouter.json` instead of downloading the catalog when the list is
+fresh, and writes it when it does download (see
+[providers-openrouter.md](providers-openrouter.md)).
+
 ```ini
 [general]
 model_list_ttl = 6h

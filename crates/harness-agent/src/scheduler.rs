@@ -399,6 +399,32 @@ impl Provider for ScheduledProvider {
         self.inner.capabilities(model)
     }
 
+    async fn prewarm(&self) {
+        // Not a model call: no scheduler slot.
+        self.inner.prewarm().await;
+    }
+
+    fn can_prewarm_cache(&self, request: &ChatRequest) -> bool {
+        self.inner.can_prewarm_cache(request)
+    }
+
+    async fn prewarm_cache(
+        &self,
+        request: ChatRequest,
+        cancel: CancellationToken,
+    ) -> Result<harness_providers::model::Usage, ProviderError> {
+        // A real (if non-generating) call: it takes a call slot and waits
+        // out rate-limit pauses like any other.
+        let Ok(_permit) = self
+            .scheduler
+            .acquire_call(self.inner.name(), &cancel)
+            .await
+        else {
+            return Err(ProviderError::Cancelled);
+        };
+        self.inner.prewarm_cache(request, cancel).await
+    }
+
     async fn stream(
         &self,
         request: ChatRequest,

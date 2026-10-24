@@ -8,6 +8,7 @@
 | `harness wf help NAME` | a workflow's inputs and steps | 0, 1 unknown |
 | `harness wf run NAME [OPTIONS] [ARGS]` | a workflow, headless ([workflows.md](workflows.md)) | 0 succeeded, 1 failed, 2 usage, 130 cancelled |
 | `harness eval run SUITE` / `eval compare BASE CUR` | eval suites and baselines ([evals.md](evals.md)) | 0, 1 regression or error, 2 usage |
+| `harness bench --fake` / `bench --model REF` | latency benchmark of a scripted coding task: per-call TTFB/TTFT, tokens/s, tool time, harness overhead ([performance.md](performance.md)) | 0, 1 error, 2 usage |
 | `harness login <anthropic\|openai\|openrouter> [--api-key-cmd CMD\|--api-key-env VAR]` | check an API key with the provider and save it to harness.ini (mode 0600) ([providers.md](providers.md#logging-in)) | 0, 1 rejected or failed, 2 usage |
 | `harness login openai --chatgpt` | Sign in with ChatGPT in the browser; tokens go to `<data_dir>/auth` (0600) and `auth = chatgpt` is set ([providers-openai.md](providers-openai.md)) | 0, 1 denied or failed, 2 usage |
 | `harness logout <provider> [--yes]` | remove the provider's `api_key`, `api_key_cmd`, `api_key_env` and `auth` after confirmation; for openai also delete the ChatGPT tokens | 0, 1 cancelled, 2 usage |

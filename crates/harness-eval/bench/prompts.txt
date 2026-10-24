@@ -1,0 +1,3 @@
+The test suite fails (run it with `python3 -m unittest discover -s tests`). Find and fix the bug in the library code; the tests are correct. Run the tests to confirm.
+---
+Add a `low_stock(threshold)` method to `Stock` that returns the SKUs whose quantity is below the threshold, sorted, and a unit test for it in tests/test_stock.py. Run the tests.

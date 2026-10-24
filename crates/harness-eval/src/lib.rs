@@ -4,6 +4,7 @@
 //! and `docs/evals.md` for the user guide.
 
 pub mod baseline;
+pub mod bench;
 pub mod cli;
 pub mod defaults;
 pub mod doctor;

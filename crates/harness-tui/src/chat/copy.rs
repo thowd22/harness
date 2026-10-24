@@ -6,8 +6,11 @@
 //! The `select` key (`ctrl+t`) or "Select text" starts keyboard selection:
 //!
 //! ```text
-//! SELECT  ↑↓ move · space mark · y copy · esc done   3 lines   [copy] [done]
+//! SELECT  [copy] [mark] [done]  3 lines  ↑↓ move · space mark · y copy · esc done
 //! ```
+//!
+//! On a narrow screen the bar wraps onto more rows ([`bar_height`]), so
+//! every button and the key hint stay on screen.
 //!
 //! Up/Down (or `k`/`j`), PgUp/PgDn and Home/End (`g`/`G`) move the cursor,
 //! Space or `v` sets the mark, `y` or Enter copies the range and leaves,
@@ -15,7 +18,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::text::{Line, Span};
+use ratatui::text::Span;
 use ratatui::widgets::Paragraph;
 
 use super::text::width;
@@ -106,7 +109,99 @@ pub enum SelectAction {
     Done,
 }
 
-/// Draws the selection bar into `area` (one row) and registers its
+/// The key hint of the selection bar.
+pub const BAR_HINT: &str = "↑↓ move · space mark · y copy · esc done";
+
+/// A piece of the selection bar: text, style and the button it is.
+type BarItem = (
+    String,
+    ratatui::style::Style,
+    Option<(&'static str, SelectAction)>,
+);
+
+/// The bar's pieces: (text, style, button), laid out left to right.
+fn bar_items(theme: &Theme, lines: usize, marked: bool) -> Vec<BarItem> {
+    let muted = theme.fg(Token::Muted);
+    vec![
+        (
+            " SELECT ".to_owned(),
+            theme.fg_on(Token::Bg, Token::Accent),
+            None,
+        ),
+        (
+            "[copy]".to_owned(),
+            theme.fg(Token::Accent),
+            Some((SELECT_COPY_ID, SelectAction::Copy)),
+        ),
+        (
+            if marked { "[unmark]" } else { "[mark]" }.to_owned(),
+            theme.fg(Token::Accent),
+            Some((SELECT_MARK_ID, SelectAction::Mark)),
+        ),
+        (
+            "[done]".to_owned(),
+            theme.fg(Token::Accent),
+            Some((SELECT_DONE_ID, SelectAction::Done)),
+        ),
+        (
+            format!("{lines} line{}", if lines == 1 { "" } else { "s" }),
+            theme.fg(Token::Number),
+            None,
+        ),
+        (BAR_HINT.to_owned(), muted, None),
+    ]
+}
+
+/// Places the pieces on rows of `width`: `(row, x, text)` per piece; a
+/// piece wider than a row wraps on rows of its own.
+fn bar_layout(texts: &[String], width: usize) -> Vec<Vec<(usize, usize, String)>> {
+    let width = width.max(1);
+    let mut out = Vec::new();
+    let (mut row, mut used) = (0usize, 0usize);
+    for t in texts {
+        let w = super::text::width(t);
+        if w > width {
+            if used > 0 {
+                row += 1;
+            }
+            let parts: Vec<(usize, usize, String)> = super::text::wrap_text(t, width)
+                .into_iter()
+                .enumerate()
+                .map(|(i, p)| (row + i, 0, p))
+                .collect();
+            row += parts.len();
+            used = 0;
+            out.push(parts);
+            continue;
+        }
+        if used > 0 && used + 2 + w > width {
+            row += 1;
+            used = 0;
+        }
+        let x = if used > 0 { used + 2 } else { 0 };
+        out.push(vec![(row, x, t.clone())]);
+        used = x + w;
+    }
+    out
+}
+
+/// Rows the selection bar needs at `width` (enough for any line count up
+/// to a million and the `[unmark]` label).
+pub fn bar_height(width: u16) -> u16 {
+    let theme = Theme::default();
+    let texts: Vec<String> = bar_items(&theme, 999_999, true)
+        .into_iter()
+        .map(|(t, _, _)| t)
+        .collect();
+    bar_layout(&texts, width as usize)
+        .iter()
+        .flatten()
+        .map(|(r, _, _)| r + 1)
+        .max()
+        .unwrap_or(1) as u16
+}
+
+/// Draws the selection bar into `area` ([`bar_height`] rows) and registers its
 /// buttons. `lines` is the number of selected lines, `marked` whether a
 /// mark is set.
 pub fn render_bar<A: Clone>(
@@ -118,39 +213,30 @@ pub fn render_bar<A: Clone>(
     hits: &mut HitMap<A>,
     wrap: &dyn Fn(SelectAction) -> A,
 ) {
-    let muted = theme.fg(Token::Muted);
-    let mut spans = vec![
-        Span::styled(" SELECT ", theme.fg_on(Token::Bg, Token::Accent)),
-        Span::styled("  ↑↓ move · space mark · y copy · esc done  ", muted),
-        Span::styled(
-            format!("{lines} line{}", if lines == 1 { "" } else { "s" }),
-            theme.fg(Token::Number),
-        ),
-        Span::raw("  "),
-    ];
-    let mut x = area.x + spans.iter().map(|s| width(&s.content) as u16).sum::<u16>();
-    let buttons = [
-        (SELECT_COPY_ID, "[copy]", SelectAction::Copy),
-        (
-            SELECT_MARK_ID,
-            if marked { "[unmark]" } else { "[mark]" },
-            SelectAction::Mark,
-        ),
-        (SELECT_DONE_ID, "[done]", SelectAction::Done),
-    ];
-    for (id, label, action) in buttons {
-        let w = width(label) as u16;
-        let eid = ElementId::from(id);
-        let mut st = theme.fg(Token::Accent);
-        if hits.is_focused(&eid) {
-            st = st.patch(theme.focused());
+    frame.render_widget(Paragraph::new("").style(theme.base()), area);
+    let items = bar_items(theme, lines, marked);
+    let texts: Vec<String> = items.iter().map(|(t, _, _)| t.clone()).collect();
+    let layout = bar_layout(&texts, area.width as usize);
+    for ((_, style, button), parts) in items.into_iter().zip(layout) {
+        let mut style = style;
+        if let Some((id, _)) = button
+            && hits.is_focused(&ElementId::from(id))
+        {
+            style = style.patch(theme.focused());
         }
-        spans.push(Span::styled(label, st));
-        spans.push(Span::raw(" "));
-        if x + w <= area.right() {
-            hits.register_button(eid, Rect::new(x, area.y, w, 1), wrap(action));
+        let mut rect: Option<Rect> = None;
+        for (row, x, text) in parts {
+            let (x, y) = (area.x + x as u16, area.y + row as u16);
+            if y >= area.bottom() || x >= area.right() {
+                continue;
+            }
+            let w = (width(&text) as u16).min(area.right() - x);
+            let r = Rect::new(x, y, w, 1);
+            frame.render_widget(Paragraph::new(Span::styled(text, style)), r);
+            rect = Some(rect.map_or(r, |a| a.union(r)));
         }
-        x = x.saturating_add(w + 1);
+        if let (Some((id, action)), Some(r)) = (button, rect) {
+            hits.register_button(ElementId::from(id), r, wrap(action));
+        }
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)).style(theme.base()), area);
 }

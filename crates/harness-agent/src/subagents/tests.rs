@@ -782,3 +782,80 @@ async fn children_label_mcp_results_untrusted_with_the_runtime_labeler() {
     assert!(result.contains("trust=\"untrusted\""), "{result}");
     assert!(result.contains("origin=\"mcp server\""), "{result}");
 }
+
+/// Three parallel spawns with and without `stagger_subagents`: the same
+/// requests reach the provider and the children return the same answers.
+#[tokio::test]
+async fn staggered_fan_out_keeps_requests_and_answers() {
+    async fn fan_out(gate: Option<crate::stagger::FanOut>) -> (Vec<String>, Vec<String>) {
+        let dir = tempfile::tempdir().unwrap();
+        let child = FakeProvider::with_turns([
+            FakeTurn::text("first"),
+            FakeTurn::text("second"),
+            FakeTurn::text("third"),
+        ]);
+        let mut rt = SubagentRuntime::new(
+            recorder(dir.path()).await,
+            Arc::new(TestBuilder::default().with(researcher(), child.clone())),
+            SubagentLimits::default(),
+        );
+        if let Some(g) = gate {
+            rt = rt.with_fan_out(g);
+        }
+        let cancel = CancellationToken::new();
+        let mut conv = Conversation::new(None);
+        conv.push_user("go");
+        let out = run_parent(
+            &rt,
+            vec![
+                FakeTurn {
+                    content: vec![
+                        spawn_turn("a", "researcher", "one", &[]),
+                        spawn_turn("b", "researcher", "two", &[]),
+                        spawn_turn("c", "researcher", "three", &[]),
+                    ],
+                    ..FakeTurn::default()
+                },
+                FakeTurn::text("done"),
+            ],
+            &mut conv,
+            &cancel,
+        )
+        .await;
+        assert_eq!(out.stop, StopReason::EndTurn);
+        let mut answers: Vec<String> = conv
+            .messages
+            .iter()
+            .flat_map(|m| m.content.iter())
+            .filter_map(|b| match b {
+                harness_providers::model::ContentBlock::ToolResult { content, .. } => Some(
+                    content
+                        .iter()
+                        .map(|p| match p {
+                            harness_providers::model::ToolResultPart::Text { text } => {
+                                text.lines().last().unwrap_or_default().to_owned()
+                            }
+                            _ => String::new(),
+                        })
+                        .collect::<String>(),
+                ),
+                _ => None,
+            })
+            .collect();
+        answers.sort();
+        let mut requests: Vec<String> = child
+            .requests()
+            .iter()
+            .map(|r| serde_json::to_string(r).unwrap())
+            .collect();
+        requests.sort();
+        (answers, requests)
+    }
+    let plain = fan_out(None).await;
+    let staggered = fan_out(Some(crate::stagger::FanOut::new(false))).await;
+    assert_eq!(plain.1.len(), 3);
+    assert_eq!(staggered, plain);
+    // Fake providers have no cache pre-warm: with it on nothing changes.
+    let warmed = fan_out(Some(crate::stagger::FanOut::new(true))).await;
+    assert_eq!(warmed, plain);
+}

@@ -17,9 +17,41 @@ Every file an agent creates, modifies or deletes is recorded per node:
 - **File tools** (`write`, `edit`) report each change directly, with
   before/after hashes and a unified diff.
 - **bash** changes are found by snapshotting the worktree before and after
-  each command and comparing them. Files ignored by `.gitignore` and the
-  `.git` directory are not watched; hidden files are. Small text files keep
+  each command and comparing them. Files ignored by `.gitignore` (including
+  the `.gitignore` files above the workspace up to its nearest repository
+  root, but never above it, and `.git/info/exclude`) and the `.git`
+  directory are not watched, as in `git status`; hidden files are. Files
+  your git tracks are always watched, even when an ignore rule matches
+  them (force-added files). A `.gitignore` outside the repository (a stray
+  one in a parent directory) does not hide anything, and when the
+  enclosing repository ignores the workspace directory itself (a project
+  or a config directory under a dotfiles home whose `.gitignore` is `*`),
+  only the workspace's own `.gitignore` files apply. Small text files keep
   their content in the snapshot, so bash edits get a diff too.
+
+### Generated files
+
+Running a test suite or a build writes files nobody edited. Bash changes to
+well-known build and test output are recorded as **generated**
+(`"generated": true` on the `file_changed` event), even in a project without
+a `.gitignore`:
+
+`__pycache__/`, `*.pyc`, `*.pyo`, `.pytest_cache/`, `.mypy_cache/`,
+`.ruff_cache/`, `.tox/`, `.nox/`, `.coverage`, `.coverage.*`,
+`coverage.xml`, `htmlcov/`, `.nyc_output/`, `node_modules/`, `target/`,
+`.DS_Store` (`harness_hygiene::artifacts::BUILTIN_ARTIFACTS`).
+
+Generated files stay visible: node detail lists them as
+`+ calc/__pycache__/m.pyc (bash, generated)` and `/diff` lists them after
+the real changes, labelled `generated`. They do not count as changes: a
+turn that only wrote generated files ends without the `unverified` notice,
+does not trigger `verify_when = on_changes` verification (see
+[done-gating](done-gating.md)) and does not raise the node's "files
+changed" count. Gitignored files never become changes at all. Source files
+changed by bash (`sed -i`, a formatter), files your git tracks even when
+they match the list (a source directory named `target/`, a committed
+`coverage.xml` or `node_modules/`), and every change made by `write` or
+`edit`, even inside such a directory, still count.
 
 Each entry is written to the run's event log as a `file_changed` event on the
 node that made it, so it can be replayed later and appears in node detail
@@ -38,8 +70,9 @@ pointed at your worktree; your own repository is never touched:
   were (git runs with an explicit `--git-dir`, no inherited `GIT_*`
   variables and no global or system config);
 - the project's `.git` directory is never part of a snapshot;
-- files ignored by `.gitignore` are neither snapshotted nor touched by a
-  restore.
+- files ignored by `.gitignore`, and the generated files listed under
+  [Generated files](#generated-files) that your git does not track, are
+  neither snapshotted nor touched by a restore.
 
 `/undo` restores the worktree to how it was before the most recent agent
 turn. Repeating `/undo` walks further back. Any node's checkpoints can be

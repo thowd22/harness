@@ -50,12 +50,13 @@ pub use copy::{CopyTarget, Selection};
 
 use super::markdown::{MarkdownCache, code_blocks};
 use super::text::{
-    cache_pct, fmt_cost, fmt_ms, fmt_tokens, right_align, sanitize, truncate_line, wrap_line,
+    cache_pct, fmt_cost, fmt_ms, fmt_tokens, right_align, sanitize, wrap_line, wrap_line_with,
+    wrap_right,
 };
 use super::timefmt::TimeFormat;
 use crate::cards::{
-    ApprovalNote, CardCtx, CardGroup, CardStatus, ToolCard, arg_summary, copy_button_id,
-    payload_json, payload_text,
+    ApprovalNote, CardCtx, CardGroup, CardStatus, ToolCard, arg_summary, card_bottom, card_row,
+    card_top, copy_button_id, payload_json, payload_text,
 };
 use crate::clipboard::COPY_LABEL;
 use crate::indicators::{Spinner, node_glyph};
@@ -882,8 +883,17 @@ impl Transcript {
                     ts,
                 );
             }
-            EventKind::FileChanged { path, change, diff } => {
-                self.turn_changes += 1;
+            EventKind::FileChanged {
+                path,
+                change,
+                diff,
+                generated,
+            } => {
+                // Generated artifacts (`__pycache__/`, ...) are no change
+                // to verify.
+                if !generated {
+                    self.turn_changes += 1;
+                }
                 let diff = diff.as_ref().map(payload_text);
                 self.file_changed(path, *change, diff);
             }
@@ -1360,16 +1370,6 @@ pub fn row_ord(entry: usize, line: usize) -> u64 {
     ((entry as u64) << 32) | (line as u64 & 0xffff_ffff)
 }
 
-fn header(
-    left: Vec<Span<'static>>,
-    ts: OffsetDateTime,
-    width: usize,
-    settings: &ViewSettings,
-    f: &Frame<'_>,
-) -> Line<'static> {
-    header_right(left, header_parts(ts, settings, f, None), width).0
-}
-
 /// The right part of a header: an optional copy button (`button` is its
 /// element id) and the timestamp.
 fn header_parts(
@@ -1459,9 +1459,12 @@ fn layout(
                     Span::styled(sanitize(&l.replace('\t', "    ")), theme.fg(Token::Fg)),
                 ]);
                 if first {
-                    let wrapped = wrap_line(
+                    // The first row leaves room for the copy button and
+                    // time; the rest of the message uses the full width.
+                    let wrapped = wrap_line_with(
                         body,
-                        width.saturating_sub(rw + 1).max(10),
+                        width.saturating_sub(rw + 1).max(3),
+                        width,
                         std::slice::from_ref(&bar),
                     );
                     let mut it = wrapped.into_iter();
@@ -1544,7 +1547,7 @@ fn layout(
                 lines.extend(md);
             }
             if let Some(m) = &t.meta {
-                lines.push(truncate_line(m.line(theme), width));
+                lines.extend(wrap_line(m.line(theme), width, &[]));
             }
         }
         EntryKind::Tools { group, .. } => {
@@ -1592,14 +1595,22 @@ fn layout(
                 format!("{icon} {}", sanitize(&n.text)),
                 theme.fg(token),
             )];
-            lines.push(header(left, ts, width, settings, f));
+            // Long notices and details wrap (indented), never cut.
+            lines.extend(wrap_right(
+                Line::from(left),
+                header_parts(ts, settings, f, None),
+                width,
+                Span::raw(" "),
+                &[Span::raw("  ")],
+            ));
             for d in &n.detail {
-                lines.push(truncate_line(
+                lines.extend(wrap_line(
                     Line::from(Span::styled(
                         format!("  {}", sanitize(d)),
                         theme.fg(Token::Muted),
                     )),
                     width,
+                    &[Span::raw("  ")],
                 ));
             }
         }
@@ -1625,40 +1636,33 @@ fn layout(
             } else {
                 theme.fg(Token::Border)
             };
-            let mut left = vec![
-                Span::styled("╭ ", border),
+            let head = vec![
                 Span::styled(format!("{glyph} "), theme.fg(token)),
                 Span::styled(
-                    s.name.clone(),
+                    sanitize(&s.name),
                     theme.fg(Token::Agent).add_modifier(Modifier::BOLD),
                 ),
             ];
+            let mut tail = Vec::new();
             if let Some(a) = &s.agent {
-                left.push(Span::styled(format!(" ({a})"), theme.fg(Token::Agent)));
+                tail.push(Span::styled(format!(" ({a})"), theme.fg(Token::Agent)));
             }
             if let Some(m) = &s.model {
-                left.push(Span::styled(format!(" · {m}"), theme.fg(Token::Muted)));
+                tail.push(Span::styled(format!(" · {m}"), theme.fg(Token::Muted)));
             }
             if let Some(h) = &s.host {
-                left.push(Span::styled(format!(" · ⧉ {h}"), theme.fg(Token::Running)));
+                tail.push(Span::styled(format!(" · ⧉ {h}"), theme.fg(Token::Running)));
             }
-            left.push(Span::styled(" ", border));
             let end = s.finished.unwrap_or(f.now);
             let secs = (end - ts).whole_milliseconds().max(0) as u64;
             let right = vec![
-                Span::styled(" ", border),
                 Span::styled(fmt_ms(secs), theme.fg(Token::Number)),
                 Span::styled(" · ", theme.fg(Token::Muted)),
                 Span::styled(fmt_cost(Some(s.cost)), theme.fg(Token::Number)),
-                Span::styled(" ╮", border),
             ];
-            let w = width.max(12);
-            lines.push(right_align(
-                Line::from(left),
-                right,
-                w,
-                Span::styled("─", border),
-            ));
+            // Long names, models and hosts wrap inside the box.
+            let w = width.max(5);
+            lines.extend(card_top(head, tail, right, w, border));
             let action_icon = if s.status.is_terminal() {
                 ' '
             } else {
@@ -1676,33 +1680,24 @@ fn layout(
                 if s.status == NodeStatus::Succeeded && !summary.is_empty() {
                     let mut v: Vec<String> = summary.iter().take(3).map(|l| sanitize(l)).collect();
                     if summary.len() > 3 {
-                        v.push(format!("… {} more lines", summary.len() - 3));
+                        v.push(format!(
+                            "… {} more lines · Enter to open the agent",
+                            summary.len() - 3
+                        ));
                     }
                     v
                 } else {
                     vec![format!("{action_icon} {}", sanitize(&s.last_action))]
                 };
             for text in body_lines {
-                let body = Line::from(vec![
-                    Span::styled("│ ", border),
-                    Span::styled(text, theme.fg(Token::Fg)),
-                ]);
-                lines.push(right_align(
-                    body,
-                    vec![Span::styled(" │", border)],
-                    w,
-                    Span::raw(" "),
-                ));
+                let body = Line::from(Span::styled(text, theme.fg(Token::Fg)));
+                lines.extend(card_row(body, &[], w, border));
             }
-            lines.push(Line::from(vec![
-                Span::styled("╰", border),
-                Span::styled("─".repeat(w - 2), border),
-                Span::styled("╯", border),
-            ]));
+            lines.push(card_bottom(w, border));
             hits.push(Hit {
                 id: subagent_id(&s.node),
                 start: 0,
-                len: 3,
+                len: lines.len(),
                 action: TranscriptAction::OpenNode(s.node.clone()),
                 col: 0,
                 w: 0,
@@ -1939,6 +1934,7 @@ mod tests {
                 path: "/work/src/new.rs".into(),
                 change: FileChangeKind::Created,
                 diff: None,
+                generated: false,
             },
         ));
         let l = render_all(&mut t, &theme, 70, 10);
@@ -2395,6 +2391,7 @@ mod tests {
                     path: "a.rs".into(),
                     change: FileChangeKind::Modified,
                     diff: None,
+                    generated: false,
                 },
             )
         };
@@ -2434,6 +2431,46 @@ mod tests {
         );
         // Nothing changed and nothing verified: nothing to report.
         assert!(run(vec![]).is_empty());
+    }
+
+    #[test]
+    fn generated_artifacts_do_not_make_a_turn_unverified() {
+        let changed = |seq, path: &str, generated| {
+            ev(
+                seq,
+                Some("n"),
+                EventKind::FileChanged {
+                    path: path.into(),
+                    change: FileChangeKind::Created,
+                    diff: None,
+                    generated,
+                },
+            )
+        };
+        let run = |events: Vec<RunEvent>| {
+            let mut t = Transcript::new(ViewSettings::default());
+            t.apply(&agent_started(0, "n"));
+            for e in &events {
+                t.apply(e);
+            }
+            t.apply(&node_done(99, "n"));
+            notices(&t)
+        };
+        // Only bytecode from a test run: nothing to report.
+        let n = run(vec![
+            changed(1, "calc/__pycache__/a.pyc", true),
+            changed(2, ".pytest_cache/v/x", true),
+        ]);
+        assert!(n.is_empty(), "{n:?}");
+        // A real change next to them is counted alone.
+        let n = run(vec![
+            changed(1, "calc/__pycache__/a.pyc", true),
+            changed(2, "calc/__init__.py", false),
+        ]);
+        assert_eq!(
+            n.last().unwrap(),
+            "unverified: 1 file change and no verify command ran"
+        );
     }
 
     #[test]

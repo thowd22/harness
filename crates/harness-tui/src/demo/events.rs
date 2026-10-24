@@ -382,6 +382,21 @@ impl EventBuilder {
                 path: path.to_owned(),
                 change,
                 diff: diff.map(Payload::text),
+                generated: false,
+            },
+        )
+    }
+
+    /// `file_changed` for a generated build or test artifact.
+    pub fn generated_file(&mut self, node: &str, path: &str, change: FileChangeKind) -> &mut Self {
+        self.push(
+            Some(node),
+            None,
+            EventKind::FileChanged {
+                path: path.to_owned(),
+                change,
+                diff: None,
+                generated: true,
             },
         )
     }

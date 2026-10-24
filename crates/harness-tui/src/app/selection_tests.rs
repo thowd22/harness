@@ -445,9 +445,20 @@ fn dragging_past_the_top_of_the_chat_scrolls_and_extends_the_selection() {
         "extended past the first screen: {lines:?}"
     );
     // Every row between the top and the start, in order, none missing.
-    let first: usize = lines[0].trim_start_matches("row ").parse().unwrap_or(1);
+    // The selection starts at the pointer's column, so when the view
+    // stops on a text row (not the gap between two) that row is copied
+    // from its middle.
+    let first: usize = lines[0]
+        .rsplit(' ')
+        .next()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(1);
     let want: Vec<String> = (first..=40).map(|i| format!("row {i:02}")).collect();
-    assert_eq!(lines, want, "top row was {top:?}");
+    assert!(
+        want[0].ends_with(lines[0]),
+        "top row was {top:?}: {lines:?}"
+    );
+    assert_eq!(lines[1..], want[1..], "top row was {top:?}");
 }
 
 #[test]
@@ -637,4 +648,93 @@ fn a_mouse_selection_is_copied_again_with_the_copy_key() {
     ui.send(type_text("x"));
     assert!(ui.app.selection().selection().is_none());
     assert_eq!(ui.app.draft(), "x");
+}
+
+/// The column of the nearest `│` left of `(x, y)` on screen.
+fn border_left_of(ui: &Ui, (x, y): (u16, u16)) -> u16 {
+    let buf = ui.term.backend().buffer();
+    (0..x)
+        .rev()
+        .find(|&bx| buf[(bx, y)].symbol() == "│")
+        .unwrap_or_else(|| panic!("no border left of ({x}, {y}):\n{}", ui.text()))
+}
+
+#[test]
+fn copying_a_truncated_tool_card_header_leaves_out_its_rule() {
+    let mut ui = Ui::sized(44, 20);
+    let mut b = EventBuilder::new();
+    b.start(NodeSpec::step("main").agent("coder"));
+    b.tool_call(
+        "main",
+        "b1",
+        "bash",
+        json!({"command": "printf 'line-the-first line-the-second line-the-third'"}),
+    );
+    b.tool_result("main", "b1", true, "out", 7);
+    ui.feed(b.events());
+    let (_, y) = ui.find("╭ ✔ bash");
+    let row: String = ui.text().lines().nth(usize::from(y)).unwrap().to_owned();
+    // TASK-160: a header too long for the border is no longer cut; the
+    // command wraps onto the rows below it, inside the box.
+    assert!(!row.contains('…'), "the title is not cut: {row}");
+    ui.drag((0, y), (43, y + 1));
+    let text = ui.copied();
+    for chrome in ["─", "╭", "╮", "│", "✔"] {
+        assert!(!text.contains(chrome), "{chrome} in {text:?}");
+    }
+    assert!(text.starts_with("bash"), "{text:?}");
+    assert!(text.contains("7ms"), "{text:?}");
+    assert!(text.contains("$ printf"), "{text:?}");
+}
+
+#[test]
+fn a_press_on_a_panel_or_picker_border_selects_from_the_nearest_text() {
+    let mut ui = Ui::sized(60, 16);
+    let lines: Vec<String> = (0..5).map(|i| format!("entry {i:02}")).collect();
+    ui.core(CoreEvent::Panel {
+        title: "Servers".into(),
+        lines,
+        buttons: Vec::new(),
+    });
+    // The left border, then the right border dragging left.
+    let (x, y) = ui.find("entry 01");
+    let left = border_left_of(&ui, (x, y));
+    ui.drag((left, y), ui.end_of("entry 02"));
+    assert_eq!(ui.copied(), "entry 01\nentry 02");
+    // (Below the copy toast, which blocks presses on the rows it covers.)
+    let (x4, y4) = ui.find("entry 04");
+    let buf = ui.term.backend().buffer();
+    let right = (x4..60).find(|&bx| buf[(bx, y4)].symbol() == "│").unwrap();
+    ui.drag((right, y4), (x4, y4));
+    assert_eq!(ui.copied(), "entry 04");
+    // A click on the border still does nothing; the panel stays open.
+    ui.send(vec![click(left, y), release(left, y)]);
+    assert!(ui.copies().is_empty());
+    assert_eq!(ui.app.screen(), Some("panel"));
+    ui.send(keys("esc"));
+    assert_eq!(ui.app.screen(), None);
+
+    // The model picker: from its left border over a row, without picking.
+    ui = Ui::sized(120, 30);
+    ui.core(CoreEvent::ModelPicker {
+        catalog: crate::model_picker::tests::sample(true),
+        current: Some("anthropic/claude-sonnet-5-5".into()),
+    });
+    let name = "claude-haiku-5-5";
+    let at = ui.find(name);
+    let left = border_left_of(&ui, at);
+    ui.drag((left, at.1), ui.end_of(name));
+    let text = ui.copied();
+    assert!(text.ends_with(name), "{text:?}");
+    assert!(!text.contains('│'), "{text:?}");
+    assert!(ui.app.model_picker().is_some(), "the drag did not pick");
+    assert!(ui._requests.try_recv().is_err(), "no model switch");
+
+    // The chat card's border selects as before.
+    let mut ui = Ui::sized(60, 30);
+    ui.feed(&session());
+    let (x, y) = ui.find("second output line");
+    let left = border_left_of(&ui, (x, y));
+    ui.drag((left, y), ui.end_of("third"));
+    assert_eq!(ui.copied(), "second output line\nthird");
 }

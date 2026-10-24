@@ -150,7 +150,7 @@ impl ReadTool {
             ));
         }
         let data = self.ws.read(&path).await?;
-        self.tracker.record(&path, content_hash(&data));
+        ctx.record_read(&self.tracker, &path, content_hash(&data));
 
         if let Some(media_type) = sniff_image(&data) {
             return Ok(self.image(ctx, &args.path, media_type, data));
@@ -486,5 +486,19 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.kind, ToolErrorKind::NotFound);
+    }
+
+    #[tokio::test]
+    async fn staged_context_holds_back_the_read_record() {
+        let f = fixture(ToolsConfig::default());
+        f.ws.write(Path::new("a.txt"), b"one\n").await.unwrap();
+        let stage = Arc::new(crate::tracker::StagedReads::new());
+        let ctx = ToolContext::new("c").with_staged_reads(Some(stage.clone()));
+        f.tool.call(&ctx, json!({"path": "a.txt"})).await.unwrap();
+        let key = f.ws.resolve(Path::new("a.txt"));
+        assert_eq!(f.tracker.get(&key), None);
+        assert_eq!(stage.len(), 1);
+        stage.commit();
+        assert_eq!(f.tracker.get(&key), Some(content_hash(b"one\n")));
     }
 }

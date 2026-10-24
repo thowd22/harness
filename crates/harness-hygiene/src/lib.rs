@@ -3,6 +3,7 @@
 //! See `backlog/docs/doc-1 - Architecture-and-Problem-Map.md` for crate boundaries
 //! and `docs/hygiene.md` for user-facing behaviour.
 
+pub mod artifacts;
 pub mod checkpoints;
 pub mod events;
 pub mod ledger;

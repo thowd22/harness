@@ -55,7 +55,7 @@ use harness_policy::rules::Mode;
 use harness_providers::catalog::Catalog;
 use ratatui::backend::Backend;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::Modifier;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 use ratatui::{Frame, Terminal};
@@ -101,6 +101,8 @@ pub const INPUT_ID: &str = crate::input::INPUT_ID;
 pub const HELP_BUTTON_ID: &str = "footer.help";
 /// Palette entry id that moves keyboard focus into the goal bar.
 pub const FOCUS_GOALBAR_ID: &str = "goalbar.focus";
+/// Palette entry id that opens the full status line in a panel.
+pub const SHOW_STATUS_ID: &str = "app.status";
 /// Palette entry id that restores the selected map node's checkpoint.
 pub const RESTORE_CHECKPOINT_ID: &str = "map.restore_checkpoint";
 
@@ -157,6 +159,9 @@ pub enum AppCommand {
     ShowHelp,
     /// Show a view.
     SwitchView(View),
+    /// Open the full status line in a panel (the status line's `+N more`
+    /// button, the "Show status" palette entry).
+    ShowStatus,
     /// Quit.
     Quit,
 }
@@ -603,6 +608,12 @@ fn app_entries() -> Vec<PaletteEntry> {
             EntryKind::Builtin,
         )
         .with_key("r (map)"),
+        PaletteEntry::new(
+            SHOW_STATUS_ID,
+            "Show status",
+            "The full status line: directory, branch, model, usage and indicators",
+            EntryKind::Builtin,
+        ),
     ];
     v.extend(crate::detail::palette_entries());
     v
@@ -631,6 +642,8 @@ pub struct App {
     blobs: Option<BlobStore>,
     request_body: Option<RequestBody>,
     help_open: bool,
+    /// First row of the help overlay's list.
+    help_scroll: u16,
     mouse: bool,
     dirty: bool,
     quit: bool,
@@ -700,6 +713,7 @@ impl App {
             blobs: None,
             request_body: None,
             help_open: false,
+            help_scroll: 0,
             dirty: true,
             quit: false,
             spinner: 0,
@@ -1243,8 +1257,33 @@ impl App {
             AppCommand::SetMouse(on) => self.set_mouse(on),
             AppCommand::ShowHelp => self.activate(UiAction::ShowHelp),
             AppCommand::SwitchView(v) => self.activate(UiAction::SwitchView(v)),
+            AppCommand::ShowStatus => self.show_status(),
             AppCommand::Quit => self.do_quit(),
         }
+    }
+
+    /// Opens the full status line (directory, branch, model, usage, …) in
+    /// a panel: what the one-to-three-row status line could not show.
+    fn show_status(&mut self) {
+        let mut lines = self.chat.status_details();
+        // The goal and tasks, which the collapsed goal bar shows only as
+        // progress.
+        if let Some(g) = &self.goals.goal {
+            lines.push(format!("Goal: {g}"));
+        }
+        if self.goals.has_tasks() {
+            lines.push(format!(
+                "Tasks ({}/{} done):",
+                self.goals.done(),
+                self.goals.total()
+            ));
+            let spinner = crate::indicators::Spinner::new(false);
+            for t in &self.goals.tasks {
+                lines.push(format!("  {} {}", t.status.glyph(&spinner).0, t.title));
+            }
+        }
+        let panel = Panel::new("Status", &lines, self.cfg.theme.clone());
+        self.screen = Some(Screen::Panel(Box::new(panel)));
     }
 
     fn set_mouse(&mut self, on: bool) {
@@ -1270,6 +1309,7 @@ impl App {
             }
             UiAction::ShowHelp => {
                 self.help_open = true;
+                self.help_scroll = 0;
                 self.interaction.set_focus(crate::keys::HELP_CLOSE_ID);
             }
             UiAction::CloseHelp => {
@@ -1298,8 +1338,19 @@ impl App {
                     self.interaction.clear_focus();
                 }
             }
+            Dispatch::Scroll { pane, lines }
+                if self.help_open && pane.0 == crate::keys::HELP_PANE =>
+            {
+                self.scroll_help(lines);
+            }
             Dispatch::Scroll { .. } | Dispatch::Focus(_) => self.dirty = true,
         }
+    }
+
+    fn scroll_help(&mut self, lines: i32) {
+        let next = (i32::from(self.help_scroll) + lines).clamp(0, i32::from(u16::MAX));
+        self.help_scroll = next as u16;
+        self.dirty = true;
     }
 
     /// Opens node detail for `node` (and selects it on the map).
@@ -1355,6 +1406,10 @@ impl App {
         if inv.id == crate::chat::copy::ids::SELECT {
             // Only reaches the app while the chat is covered.
             self.start_key_selection();
+            return;
+        }
+        if inv.id == SHOW_STATUS_ID {
+            self.show_status();
             return;
         }
         if inv.id == FOCUS_GOALBAR_ID {
@@ -1470,6 +1525,10 @@ impl App {
             Event::Mouse(mouse) => match m.interaction.handle_mouse(mouse) {
                 Some(Dispatch::Activate(a)) => m.browser.activate(a),
                 Some(Dispatch::Back) => m.browser.activate(BrowserAction::Close),
+                Some(Dispatch::Scroll { lines, .. }) => {
+                    m.browser.scroll_detail(lines);
+                    BrowserOutcome::Changed
+                }
                 _ => BrowserOutcome::Ignored,
             },
             _ => BrowserOutcome::Ignored,
@@ -1487,6 +1546,7 @@ impl App {
             Event::Mouse(mouse) => match l.interaction.handle_mouse(mouse) {
                 Some(Dispatch::Activate(a)) => l.modal.activate(a),
                 Some(Dispatch::Back) => l.modal.activate(LoginAction::Back),
+                Some(Dispatch::Scroll { lines, .. }) => l.modal.scroll(lines),
                 _ => LoginOutcome::Ignored,
             },
             _ => LoginOutcome::Ignored,
@@ -1663,6 +1723,9 @@ impl App {
             return;
         }
         if self.help_open {
+            if let Some(lines) = crate::keys::help_scroll(k) {
+                return self.scroll_help(lines);
+            }
             if let Some(d) = self.interaction.handle_key(k) {
                 self.dispatch(d);
             }
@@ -1959,8 +2022,10 @@ impl App {
         let now = Instant::now();
         let wall = OffsetDateTime::now_utc();
 
+        // The footer wraps onto more rows when its items do not fit.
+        let footer_h = self.footer_height(area.width).min(area.height / 3).max(1);
         let [body, footer] =
-            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
+            Layout::vertical([Constraint::Min(1), Constraint::Length(footer_h)]).areas(area);
         self.footer = footer;
         let (main, pane) = self.goalbar.split(body, &self.goals);
         self.goal_pane = pane;
@@ -2042,12 +2107,10 @@ impl App {
             self.chat.render_toast_overlay(frame, at);
         }
         if self.help_open {
-            HelpOverlay::new(&self.cfg.keymap, &theme).render(
-                frame,
-                area,
-                &mut hits,
-                UiAction::CloseHelp,
-            );
+            let max = HelpOverlay::new(&self.cfg.keymap, &theme)
+                .scrolled(self.help_scroll)
+                .render(frame, area, &mut hits, UiAction::CloseHelp);
+            self.help_scroll = self.help_scroll.min(max);
         }
         if self.interaction.end_frame(hits) {
             self.dirty = true;
@@ -2058,52 +2121,68 @@ impl App {
             .end_frame(regions, frame.buffer_mut(), style, style);
     }
 
-    fn render_footer(
-        &self,
-        frame: &mut Frame<'_>,
-        area: Rect,
-        theme: &Theme,
-        hits: &mut HitMap<UiAction>,
-    ) {
+    /// The footer's items: view tabs, the open screen, the run state, the
+    /// mouse state and the `keys` button (last). `focused` says whether an
+    /// element has the keyboard focus. In keyboard selection mode it is the
+    /// selection bar instead:
+    /// `SELECT [copy] [done] ←↑↓→ move · shift extend · … · esc done`.
+    fn footer_items(&self, theme: &Theme, focused: &dyn Fn(&ElementId) -> bool) -> Vec<FooterItem> {
+        let mut items = Vec::new();
         if self.select.keyboard() {
-            return render_select_bar(frame, area, theme, hits);
+            items.push(FooterItem::text(
+                " SELECT ",
+                theme.fg_on(Token::Bg, Token::Accent),
+            ));
+            for (id, label, action) in [
+                (SELECT_COPY_ID, "[copy]", UiAction::SelectCopy),
+                (SELECT_DONE_ID, "[done]", UiAction::SelectDone),
+            ] {
+                let eid = ElementId::from(id);
+                let mut st = theme.fg(Token::Accent);
+                if focused(&eid) {
+                    st = st.patch(theme.focused());
+                }
+                items.push(FooterItem::button(format!(" {label}"), 1, st, eid, action));
+            }
+            let hints = [
+                "←↑↓→ move",
+                "shift extend",
+                "tab next pane",
+                "enter copy",
+                "esc done",
+            ];
+            for (i, h) in hints.iter().enumerate() {
+                let sep = if i == 0 { "  " } else { " · " };
+                items.push(FooterItem::text(
+                    format!("{sep}{h}"),
+                    theme.fg(Token::Muted),
+                ));
+            }
+            return items;
         }
-        let mut x = area.x;
-        let mut spans = Vec::new();
         for v in [View::Chat, View::Map] {
-            let label = format!(" {} ", v.name());
-            let w = label.chars().count() as u16;
             let id = ElementId(format!("footer.view.{}", v.name()));
             let mut style = if v == self.view && self.screen.is_none() {
                 theme.fg(Token::Accent).add_modifier(Modifier::BOLD)
             } else {
                 theme.fg(Token::Muted)
             };
-            if hits.is_focused(&id) {
+            if focused(&id) {
                 style = style.patch(theme.focused());
             }
-            hits.register(
+            items.push(FooterItem::button(
+                format!(" {} ", v.name()),
+                0,
+                style,
                 id,
-                Rect {
-                    x,
-                    y: area.y,
-                    width: w.min(area.right().saturating_sub(x)),
-                    height: 1,
-                },
                 UiAction::SwitchView(v),
-            );
-            spans.push(Span::styled(label, style));
-            x = x.saturating_add(w);
+            ));
         }
         if let Some(s) = self.screen() {
-            spans.push(Span::styled(format!(" › {s}"), theme.fg(Token::Accent)));
+            items.push(FooterItem::text(format!(" › {s}"), theme.fg(Token::Accent)));
         }
-        spans.push(Span::styled(" │ ", theme.fg(Token::Border)));
-        if self.is_running() {
-            spans.push(Span::styled(
-                format!("{} running", self.spinner_char()),
-                theme.fg(Token::Running),
-            ));
+        let state = if self.is_running() {
+            (format!("{} running", self.spinner_char()), Token::Running)
         } else if self.run.event_count > 0 {
             let (icon, token) = match self.run.status {
                 RunStatus::Succeeded => ("✔", Token::Ok),
@@ -2115,81 +2194,150 @@ impl App {
                 RunStatus::Running => "ready".to_owned(),
                 s => format!("{s:?}").to_lowercase(),
             };
-            spans.push(Span::styled(format!("{icon} {label}"), theme.fg(token)));
+            (format!("{icon} {label}"), token)
         } else {
-            spans.push(Span::styled("idle", theme.fg(Token::Muted)));
-        }
+            ("idle".to_owned(), Token::Muted)
+        };
+        items.push(FooterItem {
+            spans: vec![
+                Span::styled(" │ ", theme.fg(Token::Border)),
+                Span::styled(state.0, theme.fg(state.1)),
+            ],
+            button: None,
+        });
         if !self.mouse {
-            spans.push(Span::styled(" │ mouse off", theme.fg(Token::Warn)));
+            items.push(FooterItem::text(" │ mouse off", theme.fg(Token::Warn)));
         }
-        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+        let id = ElementId::from(HELP_BUTTON_ID);
+        let style = if focused(&id) {
+            theme.focused().patch(theme.fg(Token::Accent))
+        } else {
+            theme.fg(Token::Accent)
+        };
+        items.push(FooterItem::button(
+            " keys ",
+            0,
+            style,
+            id,
+            UiAction::ShowHelp,
+        ));
+        items
+    }
 
-        let label = " keys ";
-        let w = label.len() as u16;
-        if area.width > w {
-            let rect = Rect {
-                x: area.right() - w,
-                y: area.y,
-                width: w,
-                height: 1,
-            };
-            let id = ElementId::from(HELP_BUTTON_ID);
-            let style = if hits.is_focused(&id) {
-                theme.focused().patch(theme.fg(Token::Accent))
-            } else {
-                theme.fg(Token::Accent)
-            };
-            frame.render_widget(Paragraph::new(Span::styled(label, style)), rect);
-            hits.register(id, rect, UiAction::ShowHelp);
+    /// Rows the footer needs at `width` (it wraps instead of cutting).
+    fn footer_height(&self, width: u16) -> u16 {
+        let items = self.footer_items(&self.cfg.theme, &|_| false);
+        pack_footer(&items, width, !self.select.keyboard())
+            .len()
+            .max(1) as u16
+    }
+
+    fn render_footer(
+        &self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        theme: &Theme,
+        hits: &mut HitMap<UiAction>,
+    ) {
+        let items = self.footer_items(theme, &|id| hits.is_focused(id));
+        let rows = pack_footer(&items, area.width, !self.select.keyboard());
+        for (r, row) in rows.iter().enumerate().take(usize::from(area.height)) {
+            let y = area.y + r as u16;
+            for &(x, i) in row {
+                let item = &items[i];
+                let rect = Rect::new(area.x + x, y, item.width(), 1).intersection(area);
+                if rect.is_empty() {
+                    continue;
+                }
+                frame.render_widget(Paragraph::new(Line::from(item.spans.clone())), rect);
+                if let Some((id, action, skip)) = &item.button {
+                    let b = Rect {
+                        x: rect.x + skip,
+                        width: rect.width.saturating_sub(*skip),
+                        ..rect
+                    };
+                    if !b.is_empty() {
+                        hits.register(id.clone(), b, action.clone());
+                    }
+                }
+            }
         }
     }
+}
+
+/// One piece of the footer: text, maybe a button (its id, action and the
+/// leading cells that are not part of it).
+struct FooterItem {
+    spans: Vec<Span<'static>>,
+    button: Option<(ElementId, UiAction, u16)>,
+}
+
+impl FooterItem {
+    fn text(text: impl Into<String>, style: Style) -> FooterItem {
+        FooterItem {
+            spans: vec![Span::styled(text.into(), style)],
+            button: None,
+        }
+    }
+
+    fn button(
+        text: impl Into<String>,
+        skip: u16,
+        style: Style,
+        id: ElementId,
+        action: UiAction,
+    ) -> FooterItem {
+        let text: String = text.into();
+        let (lead, label) = text.split_at(usize::from(skip));
+        FooterItem {
+            spans: vec![
+                Span::raw(lead.to_owned()),
+                Span::styled(label.to_owned(), style),
+            ],
+            button: Some((id, action, skip)),
+        }
+    }
+
+    fn width(&self) -> u16 {
+        self.spans
+            .iter()
+            .map(|s| crate::chat::text::width(&s.content) as u16)
+            .sum()
+    }
+}
+
+/// Places footer items on rows of `width`: in order, moving to the next row
+/// when one does not fit (nothing is cut). With `last_right`, the last item
+/// (the `keys` button) is right-aligned on the last row. Returns each row's
+/// `(column, item index)` pairs.
+fn pack_footer(items: &[FooterItem], width: u16, last_right: bool) -> Vec<Vec<(u16, usize)>> {
+    let mut rows: Vec<Vec<(u16, usize)>> = vec![Vec::new()];
+    let mut x = 0u16;
+    let n = items.len();
+    for (i, item) in items.iter().enumerate() {
+        let w = item.width();
+        let right = last_right && i + 1 == n;
+        // The right-aligned button keeps a gap from the text before it.
+        let need = if right && x > 0 { w + 1 } else { w };
+        if x > 0 && x.saturating_add(need) > width {
+            rows.push(Vec::new());
+            x = 0;
+        }
+        let at = if right {
+            width.saturating_sub(w).max(x)
+        } else {
+            x
+        };
+        rows.last_mut().expect("a row").push((at, i));
+        x = at.saturating_add(w);
+    }
+    rows
 }
 
 /// Element id of the keyboard selection bar's copy button.
 pub const SELECT_COPY_ID: &str = "footer.select.copy";
 /// Element id of the keyboard selection bar's done button.
 pub const SELECT_DONE_ID: &str = "footer.select.done";
-
-/// The footer in keyboard selection mode:
-/// `SELECT [copy] [done] ←↑↓→ move · shift extend · … · esc done`.
-fn render_select_bar(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    theme: &Theme,
-    hits: &mut HitMap<UiAction>,
-) {
-    let mut spans = vec![
-        Span::styled(" SELECT ", theme.fg_on(Token::Bg, Token::Accent)),
-        Span::raw(" "),
-    ];
-    let mut x = area.x
-        + spans
-            .iter()
-            .map(|s| crate::chat::text::width(&s.content) as u16)
-            .sum::<u16>();
-    for (id, label, action) in [
-        (SELECT_COPY_ID, "[copy]", UiAction::SelectCopy),
-        (SELECT_DONE_ID, "[done]", UiAction::SelectDone),
-    ] {
-        let w = crate::chat::text::width(label) as u16;
-        let eid = ElementId::from(id);
-        let mut st = theme.fg(Token::Accent);
-        if hits.is_focused(&eid) {
-            st = st.patch(theme.focused());
-        }
-        spans.push(Span::styled(label, st));
-        spans.push(Span::raw(" "));
-        if x + w <= area.right() {
-            hits.register(eid, Rect::new(x, area.y, w, 1), action);
-        }
-        x = x.saturating_add(w + 1);
-    }
-    spans.push(Span::styled(
-        " ←↑↓→ move · shift extend · tab next pane · enter copy · esc done",
-        theme.fg(Token::Muted),
-    ));
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
-}
 
 /// Raw-mode and screen control, abstracted so the loop can be tested.
 pub trait TerminalControl {

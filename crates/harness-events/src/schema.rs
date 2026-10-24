@@ -555,6 +555,11 @@ pub enum EventKind {
         /// Unified diff, if available.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         diff: Option<Payload>,
+        /// A generated build or test artifact (`__pycache__/`, `target/`,
+        /// ...) written by a bash command: shown as generated, but not
+        /// counted as a change to verify.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        generated: bool,
     },
     /// A verify command started.
     VerifyStarted {
@@ -897,6 +902,13 @@ mod tests {
                 path: "src/x.rs".into(),
                 change: FileChangeKind::Modified,
                 diff: None,
+                generated: false,
+            },
+            EventKind::FileChanged {
+                path: "a/__pycache__/m.pyc".into(),
+                change: FileChangeKind::Created,
+                diff: None,
+                generated: true,
             },
             EventKind::VerifyStarted {
                 command: "cargo test".into(),
@@ -1038,6 +1050,30 @@ mod tests {
         );
         let json = serde_json::to_string(&old).unwrap();
         assert!(!json.contains("action"), "{json}");
+    }
+
+    #[test]
+    fn file_changed_generated_is_optional_on_the_wire() {
+        let old: EventKind =
+            serde_json::from_str(r#"{"type":"file_changed","path":"a.rs","change":"modified"}"#)
+                .unwrap();
+        assert!(matches!(
+            old,
+            EventKind::FileChanged {
+                generated: false,
+                ..
+            }
+        ));
+        let json = serde_json::to_string(&old).unwrap();
+        assert!(!json.contains("generated"), "{json}");
+        let generated = EventKind::FileChanged {
+            path: "__pycache__/m.pyc".into(),
+            change: FileChangeKind::Created,
+            diff: None,
+            generated: true,
+        };
+        let json = serde_json::to_string(&generated).unwrap();
+        assert!(json.contains(r#""generated":true"#), "{json}");
     }
 
     #[test]

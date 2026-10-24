@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
 
@@ -47,6 +47,54 @@ impl ReadTracker {
     }
 }
 
+/// Read records held back from the session's [`ReadTracker`].
+///
+/// A speculative tool call (started before the model's message ended) must
+/// not change what write and edit believe the model has seen until its
+/// result is actually given to the model. Such a call runs with a
+/// [`crate::tool::ToolContext`] carrying a `StagedReads`; read records go
+/// here instead, and [`StagedReads::commit`] applies them when the result is
+/// used. Dropping it without committing discards them.
+#[derive(Debug, Default)]
+pub struct StagedReads {
+    pending: Mutex<Vec<(Arc<ReadTracker>, PathBuf, String)>>,
+}
+
+impl StagedReads {
+    /// An empty stage.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Hold back the record `path` -> `hash` destined for `tracker`.
+    pub fn record(&self, tracker: &Arc<ReadTracker>, path: &Path, hash: String) {
+        self.lock()
+            .push((tracker.clone(), path.to_path_buf(), hash));
+    }
+
+    /// Number of held-back records.
+    pub fn len(&self) -> usize {
+        self.lock().len()
+    }
+
+    /// True when nothing is held back.
+    pub fn is_empty(&self) -> bool {
+        self.lock().is_empty()
+    }
+
+    /// Apply every held-back record to its tracker, in record order, and
+    /// empty the stage.
+    pub fn commit(&self) {
+        for (tracker, path, hash) in std::mem::take(&mut *self.lock()) {
+            tracker.record(&path, hash);
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<(Arc<ReadTracker>, PathBuf, String)>> {
+        self.pending.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -68,5 +116,24 @@ mod tests {
         assert_eq!(t.get(p).as_deref(), Some("h"));
         t.forget(p);
         assert_eq!(t.get(p), None);
+    }
+
+    #[test]
+    fn staged_reads_apply_only_on_commit() {
+        let t = Arc::new(ReadTracker::new());
+        let stage = StagedReads::new();
+        let p = Path::new("/a");
+        stage.record(&t, p, "h1".into());
+        stage.record(&t, p, "h2".into());
+        assert_eq!(stage.len(), 2);
+        assert_eq!(t.get(p), None);
+        stage.commit();
+        assert!(stage.is_empty());
+        assert_eq!(t.get(p).as_deref(), Some("h2"));
+
+        let dropped = StagedReads::new();
+        dropped.record(&t, Path::new("/b"), "x".into());
+        drop(dropped);
+        assert_eq!(t.get(Path::new("/b")), None);
     }
 }

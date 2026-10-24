@@ -14,6 +14,14 @@
 //! provider talks to `https://api.anthropic.com` directly (see
 //! [`GzipRequests`] and [`gzip_enabled`]). Each response carries a
 //! [`Notice::RequestBody`] block with the raw and wire size.
+//!
+//! Request options from `[provider.anthropic]` (see docs/providers-anthropic.md):
+//! `thinking_display` ([`request::ThinkingDisplay`]; `updates` adds the
+//! [`request::THINKING_UPDATES_BETA`] beta), `cache_ttl`
+//! ([`request::CacheTtl`]) and `cache_ttl_auto_1h`
+//! ([`AnthropicConfig::long_wait`]: one-hour breakpoints while the
+//! [`LongWait`] hint is active). [`Provider::prewarm_cache`] sends the
+//! [`request::build_prewarm_body`] call.
 
 pub mod request;
 pub mod stream;
@@ -28,14 +36,15 @@ use tokio_util::sync::CancellationToken;
 
 use crate::http::compression::{self, DEFAULT_GZIP_LEVEL};
 use crate::http::{GzipLatch, HttpClient, HttpConfig, RequestCompression};
-use crate::model::{Capabilities, ChatRequest};
+use crate::model::{Capabilities, ChatRequest, Usage};
 use crate::openai::notice::{Notice, REQUEST_BODY_INDEX};
 use crate::provider::{EventStream, Provider, ProviderError, StreamEvent};
 use crate::registry::{ModelRef, Registry, ThinkingStyle};
 use crate::retry::{Attempt, retry_stream};
 use crate::sse::sse_stream;
 
-pub use request::{CacheMode, ModelProfile, RequestOptions};
+pub use crate::cache_hint::LongWait;
+pub use request::{CacheMode, CacheTtl, ModelProfile, RequestOptions, ThinkingDisplay};
 
 /// Provider name used in `harness.ini` and model references.
 pub const NAME: &str = "anthropic";
@@ -88,6 +97,10 @@ pub struct AnthropicConfig {
     /// Switch that a rejected encoding trips; the process-wide one by
     /// default.
     pub gzip_latch: GzipLatch,
+    /// `cache_ttl_auto_1h`: while this hint is active, every breakpoint
+    /// gets the one-hour lifetime regardless of `request.cache_ttl`.
+    /// `None` (the default) never upgrades.
+    pub long_wait: Option<LongWait>,
 }
 
 impl Default for AnthropicConfig {
@@ -107,6 +120,7 @@ impl AnthropicConfig {
             gzip: GzipRequests::Auto,
             gzip_level: DEFAULT_GZIP_LEVEL,
             gzip_latch: GzipLatch::process(),
+            long_wait: None,
         }
     }
 
@@ -165,6 +179,7 @@ pub fn gzip_enabled(config: &AnthropicConfig, env: &dyn Fn(&str) -> Option<Strin
 pub struct AnthropicProvider {
     client: HttpClient,
     options: RequestOptions,
+    long_wait: Option<LongWait>,
     registry: Arc<Registry>,
 }
 
@@ -205,13 +220,20 @@ impl AnthropicProvider {
             let (k, v) = header(name, value, sensitive)?;
             http.default_headers.insert(k, v);
         }
-        if !config.betas.is_empty() {
-            let (k, v) = header("anthropic-beta", &config.betas.join(","), false)?;
+        let mut betas = config.betas.clone();
+        if config.request.thinking_display == ThinkingDisplay::Updates
+            && !betas.iter().any(|b| b == request::THINKING_UPDATES_BETA)
+        {
+            betas.push(request::THINKING_UPDATES_BETA.to_owned());
+        }
+        if !betas.is_empty() {
+            let (k, v) = header("anthropic-beta", &betas.join(","), false)?;
             http.default_headers.insert(k, v);
         }
         Ok(Self {
             client: HttpClient::new(http)?,
             options: config.request,
+            long_wait: config.long_wait,
             registry: Arc::new(Registry::builtin()),
         })
     }
@@ -243,9 +265,25 @@ impl AnthropicProvider {
         }
     }
 
+    /// The request options for the next call: the configured ones, with
+    /// one-hour breakpoints while the [`LongWait`] hint is active.
+    pub fn options(&self) -> RequestOptions {
+        let mut o = self.options;
+        if self.long_wait.as_ref().is_some_and(LongWait::active) {
+            o.cache_ttl = CacheTtl::OneHour;
+        }
+        o
+    }
+
     /// The JSON body that [`Provider::stream`] would send for `request`.
     pub fn build_body(&self, request: &ChatRequest) -> Result<Value, ProviderError> {
-        request::build_body(request, &self.profile(&request.model), &self.options)
+        request::build_body(request, &self.profile(&request.model), &self.options())
+    }
+
+    /// The cache pre-warm body for `request` (see
+    /// [`request::build_prewarm_body`]); `None` when it cannot help.
+    pub fn prewarm_body(&self, request: &ChatRequest) -> Result<Option<Value>, ProviderError> {
+        request::build_prewarm_body(request, &self.profile(&request.model), &self.options())
     }
 
     /// The body [`AnthropicProvider::count_tokens`] sends: the messages body
@@ -317,6 +355,19 @@ where
     })
 }
 
+/// The usage of a non-streaming Messages response.
+fn prewarm_usage(response: &Value) -> Usage {
+    let u = &response["usage"];
+    let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
+    Usage {
+        input_tokens: n("input_tokens"),
+        output_tokens: n("output_tokens"),
+        cache_read_tokens: n("cache_read_input_tokens"),
+        cache_write_tokens: n("cache_creation_input_tokens"),
+        reasoning_tokens: 0,
+    }
+}
+
 #[async_trait]
 impl Provider for AnthropicProvider {
     fn name(&self) -> &str {
@@ -327,8 +378,35 @@ impl Provider for AnthropicProvider {
         self.build_body(request).ok()
     }
 
+    async fn prewarm(&self) {
+        if let Err(e) = self.client.warm("/v1/models").await {
+            tracing::debug!(error = %e, "anthropic connection pre-warm failed");
+        }
+    }
+
     fn capabilities(&self, model: &str) -> Capabilities {
         self.registry.capabilities(NAME, model)
+    }
+
+    fn can_prewarm_cache(&self, request: &ChatRequest) -> bool {
+        matches!(self.prewarm_body(request), Ok(Some(_)))
+    }
+
+    async fn prewarm_cache(
+        &self,
+        request: ChatRequest,
+        cancel: CancellationToken,
+    ) -> Result<Usage, ProviderError> {
+        let body = self.prewarm_body(&request)?.ok_or_else(|| {
+            ProviderError::InvalidRequest(
+                "cache pre-warm needs prompt caching and adaptive (or no) thinking".into(),
+            )
+        })?;
+        let v = self
+            .client
+            .post_json(MESSAGES_PATH, &HeaderMap::new(), &body, &cancel, |_| {})
+            .await?;
+        Ok(prewarm_usage(&v))
     }
 
     async fn stream(
@@ -466,6 +544,82 @@ mod tests {
         assert_eq!(c.min_bytes, 4096);
         assert_eq!(c.paths, [MESSAGES_PATH, COUNT_TOKENS_PATH]);
         assert_eq!(c.latch, GzipLatch::process());
+    }
+
+    #[test]
+    fn updates_display_adds_its_beta_once() {
+        let mut cfg = AnthropicConfig::new().with_base_url("http://localhost:1");
+        cfg.request.thinking_display = ThinkingDisplay::Updates;
+        let p = AnthropicProvider::new("k", cfg.clone()).unwrap();
+        assert_eq!(
+            p.http_config().default_headers["anthropic-beta"],
+            request::THINKING_UPDATES_BETA
+        );
+        cfg.betas = vec!["a-1".into(), request::THINKING_UPDATES_BETA.into()];
+        let p = AnthropicProvider::new("k", cfg.clone()).unwrap();
+        assert_eq!(
+            p.http_config().default_headers["anthropic-beta"],
+            format!("a-1,{}", request::THINKING_UPDATES_BETA)
+        );
+        cfg.betas.clear();
+        cfg.request.thinking_display = ThinkingDisplay::Omitted;
+        let p = AnthropicProvider::new("k", cfg).unwrap();
+        assert!(
+            p.http_config()
+                .default_headers
+                .get("anthropic-beta")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn long_wait_upgrades_every_breakpoint_to_one_hour() {
+        let hint = LongWait::new();
+        let mut cfg = AnthropicConfig::new().with_base_url("http://localhost:1");
+        cfg.request.cache_ttl = CacheTtl::Mixed;
+        cfg.long_wait = Some(hint.clone());
+        let p = AnthropicProvider::new("k", cfg.clone()).unwrap();
+        assert_eq!(p.options().cache_ttl, CacheTtl::Mixed);
+        hint.set_jobs_running(true);
+        assert_eq!(p.options().cache_ttl, CacheTtl::OneHour);
+        let mut req = ChatRequest::new("claude-opus-5-5");
+        req.system = Some("s".into());
+        req.messages.push(crate::model::Message::user("hi"));
+        let body = p.build_body(&req).unwrap();
+        assert_eq!(
+            body["messages"][0]["content"][0]["cache_control"]["ttl"],
+            "1h"
+        );
+        hint.set_jobs_running(false);
+        let body = p.build_body(&req).unwrap();
+        assert!(
+            body["messages"][0]["content"][0]["cache_control"]
+                .get("ttl")
+                .is_none()
+        );
+        // Off by default: an active hint changes nothing.
+        cfg.long_wait = None;
+        hint.set_jobs_running(true);
+        let p = AnthropicProvider::new("k", cfg).unwrap();
+        assert_eq!(p.options().cache_ttl, CacheTtl::Mixed);
+    }
+
+    #[test]
+    fn prewarm_usage_reads_the_cache_counters() {
+        let u = prewarm_usage(
+            &serde_json::json!({"content": [], "stop_reason": "max_tokens",
+            "usage": {"input_tokens": 3, "output_tokens": 0,
+                      "cache_creation_input_tokens": 5000, "cache_read_input_tokens": 0}}),
+        );
+        assert_eq!(
+            (
+                u.input_tokens,
+                u.output_tokens,
+                u.cache_write_tokens,
+                u.cache_read_tokens
+            ),
+            (3, 0, 5000, 0)
+        );
     }
 
     #[test]

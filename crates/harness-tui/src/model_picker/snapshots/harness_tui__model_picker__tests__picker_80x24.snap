@@ -24,7 +24,7 @@ expression: snap
   │                                                                          │
   │                                                                          │
   │ ↑↓ PgUp PgDn Home End move · Enter switch · Esc close · type to filter   │
-  ╰──────────────────────────────────────────────────────────────────────────╯
+  ╰──────────────────────────────────────────────────────────── → full text ─╯
 
 --- styles ---
 1 2-77: fg=Rgb(189, 147, 249) bg=Rgb(40, 42, 54) mod=BOLD
@@ -279,4 +279,6 @@ expression: snap
 21 4-73: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
 21 74-76: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 21 77-77: fg=Rgb(189, 147, 249) bg=Rgb(40, 42, 54) mod=BOLD
-22 2-77: fg=Rgb(189, 147, 249) bg=Rgb(40, 42, 54) mod=BOLD
+22 2-62: fg=Rgb(189, 147, 249) bg=Rgb(40, 42, 54) mod=BOLD
+22 63-75: fg=Rgb(139, 233, 253) bg=Rgb(40, 42, 54) mod=BOLD
+22 76-77: fg=Rgb(189, 147, 249) bg=Rgb(40, 42, 54) mod=BOLD

@@ -4,7 +4,9 @@
 //! (`harness_hygiene::ledger`): a file list on the left with the change
 //! kind, `+N −M` counts, change sources and the hygiene classifications
 //! inline (`out of scope`, `temp/debug`, `whitespace-only`,
-//! `new untracked`), and the selected file's unified diff on the right with
+//! `new untracked`; generated build and test artifacts such as
+//! `__pycache__/*.pyc` are listed last, labelled `generated`), and the
+//! selected file's unified diff on the right with
 //! syntax colours. Each file has a `[revert]` button that restores it
 //! from a checkpoint through a [`FileReverter`]
 //! ([`CheckpointReverter`] wraps `harness_hygiene::report::revert_files`).
@@ -32,7 +34,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::cards::{DiffKind, diff_lines, parse_unified};
 use crate::chat::highlight::lang_for;
-use crate::chat::text::{truncate, truncate_line};
+use crate::chat::text::{line_width, sanitize, take_wrap_marker, wrap_line};
 use crate::interaction::{Dispatch, ElementId, HitMap, Interaction};
 use crate::theme::{Theme, Token};
 
@@ -82,6 +84,8 @@ pub struct DiffFile {
     pub categories: BTreeSet<Category>,
     /// Reverted in this view.
     pub reverted: bool,
+    /// A generated build or test artifact (`NetChange::generated`).
+    pub generated: bool,
 }
 
 impl DiffFile {
@@ -100,6 +104,7 @@ impl DiffFile {
                 .map(|f| f.categories.clone())
                 .unwrap_or_default(),
             reverted: false,
+            generated: c.generated,
         }
     }
 
@@ -173,6 +178,11 @@ pub struct DiffView {
     reverter: Option<Box<dyn FileReverter>>,
     message: Option<(String, bool)>,
     interaction: Interaction<DiffAction>,
+    /// First shown row of the file list, its area and its rows (the list
+    /// scrolls when the files do not fit).
+    list_scroll: usize,
+    list_rect: Rect,
+    list_rows: usize,
 }
 
 impl DiffView {
@@ -184,12 +194,16 @@ impl DiffView {
         report: Option<&HygieneReport>,
         theme: Theme,
     ) -> Self {
+        let mut files: Vec<DiffFile> = changes
+            .iter()
+            .map(|c| DiffFile::from_change(c, report))
+            .collect();
+        // Generated artifacts go after the real changes (stable, so each
+        // part keeps the ledger's order).
+        files.sort_by_key(|f| f.generated);
         DiffView {
             title: title.into(),
-            files: changes
-                .iter()
-                .map(|c| DiffFile::from_change(c, report))
-                .collect(),
+            files,
             selected: 0,
             scroll: 0,
             height: 0,
@@ -197,6 +211,9 @@ impl DiffView {
             reverter: None,
             message: None,
             interaction: Interaction::new(),
+            list_scroll: 0,
+            list_rect: Rect::default(),
+            list_rows: 0,
         }
     }
 
@@ -277,7 +294,9 @@ impl DiffView {
         })
     }
 
-    /// Handles input.
+    /// Handles input: Tab/Shift+Tab move focus, Up/Down step through the
+    /// files, PgUp/PgDn and the wheel scroll the diff (the wheel over the
+    /// file list scrolls the list), `r` reverts, `y` copies, Esc backs out.
     pub fn handle(&mut self, ev: &Event) -> Option<DiffOutput> {
         let d = match ev {
             Event::Key(k) if k.kind != KeyEventKind::Release => {
@@ -285,6 +304,17 @@ impl DiffView {
                 match k.code {
                     KeyCode::Char('r') if plain => return self.revert(self.selected),
                     KeyCode::Char('y') if plain => return self.copy(),
+                    // Up/Down step through the files, scrolling the list.
+                    KeyCode::Up | KeyCode::Down if plain && !self.files.is_empty() => {
+                        let i = if k.code == KeyCode::Up {
+                            self.selected.saturating_sub(1)
+                        } else {
+                            (self.selected + 1).min(self.files.len() - 1)
+                        };
+                        self.activate(DiffAction::Select(i));
+                        self.interaction.set_focus(file_id(i));
+                        return None;
+                    }
                     KeyCode::PageDown => {
                         self.scroll += self.height.max(1);
                         return None;
@@ -297,17 +327,33 @@ impl DiffView {
                 }
                 self.interaction.handle_key(k)
             }
-            Event::Mouse(m) => match m.kind {
-                MouseEventKind::ScrollUp => {
-                    self.scroll = self.scroll.saturating_sub(3);
-                    None
+            Event::Mouse(m) => {
+                let on_list = self
+                    .list_rect
+                    .contains(ratatui::layout::Position::new(m.column, m.row));
+                match m.kind {
+                    MouseEventKind::ScrollUp if on_list => {
+                        self.list_scroll = self.list_scroll.saturating_sub(3);
+                        None
+                    }
+                    MouseEventKind::ScrollDown if on_list => {
+                        let max = self
+                            .list_rows
+                            .saturating_sub(usize::from(self.list_rect.height));
+                        self.list_scroll = (self.list_scroll + 3).min(max);
+                        None
+                    }
+                    MouseEventKind::ScrollUp => {
+                        self.scroll = self.scroll.saturating_sub(3);
+                        None
+                    }
+                    MouseEventKind::ScrollDown => {
+                        self.scroll += 3;
+                        None
+                    }
+                    _ => self.interaction.handle_mouse(m),
                 }
-                MouseEventKind::ScrollDown => {
-                    self.scroll += 3;
-                    None
-                }
-                _ => self.interaction.handle_mouse(m),
-            },
+            }
             _ => None,
         }?;
         match d {
@@ -324,19 +370,19 @@ impl DiffView {
         }
     }
 
-    /// Renders the view.
+    /// Renders the view. The header, file rows and diff lines wrap; the
+    /// file list scrolls (wheel over it, or Tab/arrows to a file) and says
+    /// which files it shows when they do not all fit.
     pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect) {
         let t = self.theme.clone();
         let mut hits: HitMap<DiffAction> = self.interaction.begin_frame();
-        let [head, body] =
-            Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
         let (added, removed) = self
             .files
             .iter()
             .fold((0, 0), |(a, r), f| (a + f.added, r + f.removed));
         let mut hs = vec![
             Span::styled(
-                format!(" {} ", self.title),
+                format!(" {} ", sanitize(&self.title)),
                 t.fg(Token::Fg).add_modifier(Modifier::BOLD),
             ),
             Span::styled(format!("{} files ", self.files.len()), t.fg(Token::Muted)),
@@ -345,19 +391,33 @@ impl DiffView {
         ];
         if let Some((m, err)) = &self.message {
             hs.push(Span::styled(
-                format!("  {m}"),
+                format!("  {}", sanitize(m)),
                 t.fg(if *err { Token::Error } else { Token::Ok }),
             ));
         }
         let bw = crate::chat::text::width(COPY_LABEL) as u16;
-        let (head, button) = if head.width > bw + 20 {
-            let [h, b] =
-                Layout::horizontal([Constraint::Min(1), Constraint::Length(bw)]).areas(head);
-            (h, Some(b))
+        let with_button = area.width > bw + 20 && !self.files.is_empty();
+        let text_w = if with_button {
+            area.width - bw
         } else {
-            (head, None)
+            area.width
         };
-        frame.render_widget(Paragraph::new(Line::from(hs)), head);
+        let head_lines = wrap_line(
+            Line::from(hs),
+            usize::from(text_w).max(1),
+            &[Span::raw(" ")],
+        );
+        let head_h = (head_lines.len() as u16).min((area.height / 2).max(1));
+        let [head, body] =
+            Layout::vertical([Constraint::Length(head_h), Constraint::Min(1)]).areas(area);
+        frame.render_widget(
+            Paragraph::new(head_lines),
+            Rect {
+                width: text_w.min(head.width),
+                ..head
+            },
+        );
+        let button = with_button.then(|| Rect::new(head.right() - bw, head.y, bw, 1));
         let list_w = (body.width / 3).clamp(24, 48).min(body.width);
         let [list, diff] =
             Layout::horizontal([Constraint::Length(list_w), Constraint::Min(1)]).areas(body);
@@ -366,16 +426,16 @@ impl DiffView {
             .border_style(t.fg(Token::Border));
         let inner = block.inner(list);
         frame.render_widget(block, list);
-        let mut y = inner.y;
-        let mut lines = Vec::new();
+        self.list_rect = inner;
+        let iw = usize::from(inner.width).max(1);
+        let indent = [Span::raw("  ")];
+        // Every file's rows: path (wrapped), then sources, flags and the
+        // revert button (wrapped; the button on the last row when it fits).
+        let mut entries: Vec<(Vec<Line<'static>>, Option<u16>)> = Vec::new();
         for (i, f) in self.files.iter().enumerate() {
-            if y + 1 >= inner.y + inner.height {
-                break;
-            }
             let fid = file_id(i);
             let focused = hits.is_focused(&ElementId::from(fid.as_str()));
-            let sel = i == self.selected;
-            let style = if focused || sel {
+            let style = if focused || i == self.selected {
                 t.focused()
             } else {
                 Style::default()
@@ -390,63 +450,156 @@ impl DiffView {
             } else {
                 t.fg(Token::Path)
             };
-            lines.push(
-                truncate_line(
-                    Line::from(vec![
-                        Span::styled(format!("{sign} "), t.fg(tok)),
-                        Span::styled(f.path.clone(), path_style),
-                        Span::styled(format!(" +{}", f.added), t.fg(Token::DiffAdded)),
-                        Span::styled(format!(" −{}", f.removed), t.fg(Token::DiffRemoved)),
-                    ]),
-                    usize::from(inner.width),
-                )
-                .patch_style(style),
-            );
-            hits.register(
-                fid,
-                Rect::new(inner.x, y, inner.width, 1),
-                DiffAction::Select(i),
-            );
-            // Second row: sources, flags and the revert button.
+            let mut rows: Vec<Line<'static>> = wrap_line(
+                Line::from(vec![
+                    Span::styled(format!("{sign} "), t.fg(tok)),
+                    Span::styled(sanitize(&f.path), path_style),
+                    Span::styled(format!(" +{}", f.added), t.fg(Token::DiffAdded)),
+                    Span::styled(format!(" −{}", f.removed), t.fg(Token::DiffRemoved)),
+                ]),
+                iw,
+                &indent,
+            )
+            .into_iter()
+            .map(|l| l.patch_style(style))
+            .collect();
             let rid = revert_id(i);
             let label = if f.reverted { "reverted" } else { "[revert]" };
             let mut spans = vec![Span::styled(
-                format!("  {}", f.sources.join(", ")),
+                format!("  {}", sanitize(&f.sources.join(", "))),
                 t.fg(Token::Muted),
             )];
+            if f.generated {
+                spans.push(Span::styled(" · generated", t.fg(Token::Muted)));
+            }
             for flag in f.flags() {
                 spans.push(Span::styled(format!(" ⚑ {flag}"), t.fg(Token::Warn)));
             }
-            let used: usize = spans
-                .iter()
-                .map(|s| crate::chat::text::width(&s.content))
-                .sum();
-            let room = usize::from(inner.width).saturating_sub(10);
-            let mut row = truncate_line(Line::from(spans), room);
-            let pad = room.saturating_sub(used.min(room)) + 1;
-            row.spans.push(Span::raw(" ".repeat(pad)));
+            let mut info = wrap_line(Line::from(spans), iw, &indent);
             let bstyle = if hits.is_focused(&ElementId::from(rid.as_str())) {
                 t.focused()
             } else {
                 t.fg(Token::Error)
             };
-            let bx = inner.x + (room + 1) as u16;
-            row.spans.push(Span::styled(label, bstyle));
-            lines.push(row);
-            if !f.reverted && bx < inner.x + inner.width {
-                hits.register_button(
-                    rid,
-                    Rect::new(bx, y + 1, 8.min(inner.x + inner.width - bx), 1),
-                    DiffAction::Revert(i),
-                );
+            let lw = crate::chat::text::width(label);
+            let last = info.pop().unwrap_or_default();
+            let used = line_width(&last);
+            let button_col = if used + 2 + lw <= iw {
+                let col = iw - lw - 1;
+                let mut row = last;
+                row.spans.push(Span::raw(" ".repeat(col - used)));
+                row.spans.push(Span::styled(label, bstyle));
+                info.push(row);
+                col
+            } else {
+                info.push(last);
+                info.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(label, bstyle),
+                ]));
+                2
+            };
+            rows.extend(info);
+            entries.push((rows, (!f.reverted).then_some(button_col as u16)));
+        }
+        let h = usize::from(inner.height);
+        let tops: Vec<usize> = entries
+            .iter()
+            .scan(0usize, |acc, e| {
+                let top = *acc;
+                *acc += e.0.len();
+                Some(top)
+            })
+            .collect();
+        let total: usize = entries.iter().map(|e| e.0.len()).sum();
+        self.list_rows = total;
+        // The focused (or selected) file stays in view.
+        let focus_i = self
+            .interaction
+            .focused()
+            .and_then(|f| {
+                f.0.strip_prefix("diff.file.")
+                    .or_else(|| f.0.strip_prefix("diff.revert."))
+                    .and_then(|n| n.parse::<usize>().ok())
+            })
+            .filter(|i| *i < entries.len());
+        if let Some(i) = focus_i {
+            let (a, b) = (tops[i], tops[i] + entries[i].0.len());
+            if a < self.list_scroll {
+                self.list_scroll = a;
+            } else if b > self.list_scroll + h {
+                self.list_scroll = b.saturating_sub(h).min(a);
             }
-            y += 2;
+        }
+        // Room for the position line when the list scrolls.
+        let scrolls = total > h && h > 1;
+        let view_h = if scrolls { h - 1 } else { h };
+        self.list_scroll = self.list_scroll.min(total.saturating_sub(view_h));
+        let first = self.list_scroll;
+        let mut lines = Vec::new();
+        let mut shown = (usize::MAX, 0usize);
+        for (i, (rows, button)) in entries.into_iter().enumerate() {
+            let top = tops[i];
+            let (a, b) = (top.max(first), (top + rows.len()).min(first + view_h));
+            if a >= b {
+                continue;
+            }
+            shown = (shown.0.min(i), i + 1);
+            let y = inner.y + (a - first) as u16;
+            let n = rows.len();
+            // The path rows select the file; the button sits on the last row.
+            hits.register(
+                file_id(i),
+                Rect::new(inner.x, y, inner.width, (b - a) as u16),
+                DiffAction::Select(i),
+            );
+            if let Some(col) = button
+                && top + n > a
+                && top + n - 1 < b
+            {
+                let by = inner.y + (top + n - 1 - first) as u16;
+                let bx = inner.x + col;
+                if bx < inner.right() {
+                    hits.register_button(
+                        revert_id(i),
+                        Rect::new(bx, by, 8.min(inner.right() - bx), 1),
+                        DiffAction::Revert(i),
+                    );
+                }
+            }
+            lines.extend(rows.into_iter().skip(a - top).take(b - a));
         }
         if self.files.is_empty() {
             lines.push(Line::from(Span::styled("no changes", t.fg(Token::Muted))));
         }
         frame.render_widget(Paragraph::new(lines), inner);
-        if let Some(b) = button.filter(|_| !self.files.is_empty()) {
+        if scrolls {
+            // The longest hint that fits on the row: what is shown, then
+            // how to reach the rest.
+            let range = format!(
+                "{}-{}/{}",
+                shown.0.saturating_add(1).min(self.files.len()),
+                shown.1,
+                self.files.len()
+            );
+            let pos = [
+                format!("files {range} · ↑↓ or wheel"),
+                format!("{range} · ↑↓ wheel"),
+                format!("{range} ↑↓"),
+            ]
+            .into_iter()
+            .find(|p| crate::chat::text::width(p) <= iw)
+            .unwrap_or(range);
+            frame.render_widget(
+                Paragraph::new(wrap_line(
+                    Line::from(Span::styled(pos, t.fg(Token::Muted))),
+                    iw,
+                    &[],
+                )),
+                Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
+            );
+        }
+        if let Some(b) = button {
             let id = ElementId::from(COPY_ID);
             let mut st = t.fg(Token::Accent);
             if hits.is_focused(&id) {
@@ -455,21 +608,28 @@ impl DiffView {
             frame.render_widget(Paragraph::new(Span::styled(COPY_LABEL, st)), b);
             hits.register_button(id, b, DiffAction::Copy);
         }
-        // Diff of the selected file.
+        // Diff of the selected file, wrapped under its line-number gutter.
         hits.register_pane("diff", diff);
         self.height = usize::from(diff.height);
+        let dw = usize::from(diff.width.saturating_sub(1)).max(1);
         let mut dl = Vec::new();
         if let Some(f) = self.files.get(self.selected) {
             let rows = parse_unified(&f.diff);
             let lang = lang_for(&f.path);
             if rows.is_empty() {
-                dl.push(Line::from(Span::styled(
-                    truncate("no diff recorded for this file", usize::from(diff.width)),
-                    t.fg(Token::Muted),
-                )));
+                let text = if f.generated {
+                    "generated build or test artifact: not counted as a change, no diff recorded"
+                } else {
+                    "no diff recorded for this file"
+                };
+                dl.extend(wrap_line(
+                    Line::from(Span::styled(text, t.fg(Token::Muted))),
+                    dw,
+                    &[],
+                ));
             }
             for l in diff_lines(&rows, lang, &t) {
-                dl.push(truncate_line(l, usize::from(diff.width.saturating_sub(1))));
+                dl.extend(wrap_diff_line(l, dw, t.fg(Token::Muted)));
             }
         }
         self.scroll = self.scroll.min(dl.len().saturating_sub(self.height));
@@ -497,6 +657,46 @@ impl DiffView {
         );
         self.interaction.end_frame(hits);
     }
+}
+
+/// Width of the gutter [`diff_lines`] puts before the text: `nnnn │` and
+/// the sign.
+const DIFF_GUTTER: usize = 7;
+
+/// Wraps a diff line from [`diff_lines`] to `width`: continuation rows get
+/// a blank gutter (`     │ `), after the soft-wrap marker.
+pub fn wrap_diff_line(line: Line<'static>, width: usize, gutter: Style) -> Vec<Line<'static>> {
+    if width <= DIFF_GUTTER + 1 {
+        return wrap_line(line, width, &[]);
+    }
+    let mut spans = line.spans.into_iter();
+    let head: Vec<Span<'static>> = spans.by_ref().take(2).collect();
+    let head_w: usize = head
+        .iter()
+        .map(|s| crate::chat::text::width(&s.content))
+        .sum();
+    if head_w != DIFF_GUTTER {
+        // A hunk separator or other row without a gutter.
+        let mut all = head;
+        all.extend(spans);
+        return wrap_line(Line::from(all), width, &[]);
+    }
+    let body = Line::from(spans.collect::<Vec<_>>());
+    wrap_line(body, width - DIFF_GUTTER, &[])
+        .into_iter()
+        .enumerate()
+        .map(|(k, mut l)| {
+            let marker = take_wrap_marker(&mut l);
+            let mut out: Vec<Span<'static>> = marker.into_iter().collect();
+            if k == 0 {
+                out.extend(head.iter().cloned());
+            } else {
+                out.push(Span::styled("     │ ", gutter));
+            }
+            out.extend(l.spans);
+            Line::from(out).style(l.style)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -571,6 +771,94 @@ mod tests {
         node.handle(&key("shift+tab"));
         node.handle(&key("shift+tab"));
         assert_eq!(node.selected(), 0);
+    }
+
+    /// Many files: the list scrolls by wheel over it and follows keyboard
+    /// focus, and says which files it shows; long paths and diff lines
+    /// wrap instead of being cut.
+    #[test]
+    fn a_long_file_list_scrolls_by_wheel_and_focus_and_lines_wrap() {
+        let mut b = EventBuilder::new();
+        b.start(NodeSpec::step("fix"));
+        let long = "x".repeat(150) + "_end";
+        for i in 0..10 {
+            b.file_changed(
+                "fix",
+                &format!("src/module_dir/file{i}.rs"),
+                FileChangeKind::Modified,
+                Some(&format!(
+                    "--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\n+{long}{i}\n"
+                )),
+            );
+        }
+        let ev = b.into_events();
+        let mut v = DiffView::from_events("/w", &ev, None, None, Theme::default());
+        let term = draw(&mut v);
+        let text = buffer_text(term.backend().buffer());
+        assert!(text.contains("files 1-"), "position line: {text}");
+        assert!(text.contains("_end0"), "the diff line wraps: {text}");
+        assert!(!text.contains('…'), "{text}");
+        assert!(!text.contains("file9.rs"), "{text}");
+        // Mouse: the wheel over the list scrolls it.
+        for _ in 0..10 {
+            v.handle(&crate::interaction::testing::wheel_down(2, 5));
+        }
+        let text = buffer_text(draw(&mut v).backend().buffer());
+        assert!(text.contains("file9.rs"), "{text}");
+        for _ in 0..10 {
+            v.handle(&crate::interaction::testing::wheel_up(2, 5));
+        }
+        let text = buffer_text(draw(&mut v).backend().buffer());
+        assert!(!text.contains("file9.rs"), "{text}");
+        // Keyboard: Down steps through the files; the focused one stays in
+        // view.
+        for _ in 0..9 {
+            v.handle(&key("down"));
+            draw(&mut v);
+        }
+        assert_eq!(v.selected(), 9);
+        let text = buffer_text(draw(&mut v).backend().buffer());
+        assert!(text.contains("file9.rs"), "{text}");
+    }
+
+    #[test]
+    fn generated_artifacts_are_listed_last_and_labelled() {
+        let mut b = EventBuilder::new();
+        b.start(NodeSpec::step("fix"));
+        b.generated_file(
+            "fix",
+            "calc/__pycache__/m.cpython-312.pyc",
+            FileChangeKind::Created,
+        );
+        b.file_changed("fix", "src/parse.rs", FileChangeKind::Modified, Some(DIFF));
+        let ev = b.into_events();
+        let mut v = DiffView::from_events("/w", &ev, None, None, Theme::default());
+        let got: Vec<(&str, bool)> = v
+            .files()
+            .iter()
+            .map(|f| (f.path.as_str(), f.generated))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("src/parse.rs", false),
+                ("calc/__pycache__/m.cpython-312.pyc", true)
+            ]
+        );
+        let term = draw(&mut v);
+        let text = buffer_text(term.backend().buffer());
+        assert!(text.contains("recorded · generated"), "{text}");
+        // Selecting it by click explains why there is no diff.
+        let (x, y) = find_text(term.backend().buffer(), "calc/__pycache__").unwrap();
+        v.handle(&click(x, y));
+        assert_eq!(v.selected(), 1);
+        let text = buffer_text(draw(&mut v).backend().buffer());
+        assert!(text.contains("generated build or test artifact"), "{text}");
+        // Keyboard: back to the real change.
+        v.handle(&key("shift+tab"));
+        v.handle(&key("shift+tab"));
+        v.handle(&key("shift+tab"));
+        assert_eq!(v.selected(), 0);
     }
 
     #[test]

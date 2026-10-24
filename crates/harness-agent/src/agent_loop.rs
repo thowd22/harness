@@ -68,7 +68,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
-use crate::dispatch::{CallOutcome, Dispatcher, PreparedCall, prepare_calls};
+use crate::dispatch::{CallOutcome, Dispatcher, EarlyCalls, PreparedCall, prepare_calls};
 use crate::robustness::{self, LoopDetector};
 
 /// Why a loop run ended. Each reason maps to a distinct node status / error
@@ -331,6 +331,12 @@ pub struct LoopConfig {
     /// Host the tools run on (`[remote.<name>]`), recorded in
     /// `node_started.host`; `None` is local.
     pub host: Option<String>,
+    /// Start the leading read-only tool calls of a reply as soon as each
+    /// one's arguments are complete in the stream, before the message ends
+    /// (`[experimental] early_tool_start`, see
+    /// [`Dispatcher::start_early`]). Results and events are unchanged.
+    /// Default false.
+    pub early_tool_start: bool,
 }
 
 /// When done-gating runs the [`Verifier`].
@@ -339,8 +345,10 @@ pub enum VerifyWhen {
     /// Every time the model ends its turn.
     #[default]
     Always,
-    /// Only when the run made a successful mutating tool call (anything
-    /// that is not read-only, including bash).
+    /// Only when the run changed files: a successful mutating tool call
+    /// (anything that is not read-only), except calls whose tool reported
+    /// that they changed nothing but generated artifacts
+    /// ([`CallOutcome::changed`](crate::dispatch::CallOutcome::changed)).
     OnChanges,
 }
 
@@ -396,6 +404,7 @@ impl LoopConfig {
             verify_when: VerifyWhen::Always,
             max_fix_attempts: 0,
             host: None,
+            early_tool_start: false,
         }
     }
 }
@@ -476,11 +485,13 @@ struct RunState {
     cost: f64,
     cost_unknown: bool,
     pending: Option<(Message, Vec<PreparedCall>)>,
+    /// Calls of the pending message started while it streamed.
+    early: EarlyCalls,
     stream: Option<(String, harness_providers::provider::EventStream, Instant)>,
     results: Vec<CallOutcome>,
     /// Messages carried by the request whose stream is open.
     sent_messages: usize,
-    /// A mutating tool call succeeded during this run.
+    /// The run changed files (see [`VerifyWhen::OnChanges`]).
     changed: bool,
 }
 
@@ -669,6 +680,7 @@ impl AgentLoop {
             cost: 0.0,
             cost_unknown: false,
             pending: None,
+            early: EarlyCalls::default(),
             stream: None,
             results: Vec::new(),
             sent_messages: 0,
@@ -1014,6 +1026,10 @@ impl AgentLoop {
             });
         };
         let mut builder = ResponseBuilder::new();
+        // Read-only calls started while the reply streams; dropping this
+        // (stream error, cancellation) cancels them.
+        let mut early = EarlyCalls::default();
+        let mut early_open = self.config.early_tool_start;
         loop {
             let next = tokio::select! {
                 ev = stream.next() => ev,
@@ -1066,8 +1082,28 @@ impl AgentLoop {
                     },
                 );
             }
+            let stopped = match &event {
+                StreamEvent::BlockStop { index } => Some(*index),
+                _ => None,
+            };
+            let discard = matches!(&event, StreamEvent::Retry(r) if r.discard_partial);
             if let Err(e) = builder.apply(event) {
                 return self.call_failed(st, &call_id, start, e);
+            }
+            if discard {
+                // The attempt's output is gone, and so are its calls.
+                early.clear();
+                early_open = self.config.early_tool_start;
+            }
+            if early_open
+                && let Some(index) = stopped
+                && let Some(block) = builder.tool_use(index)
+            {
+                // Only the leading run of startable calls: anything after a
+                // call that cannot start waits for the whole message.
+                early_open =
+                    self.dispatcher
+                        .start_early(Some(&st.node), &block, &mut early, cancel);
             }
         }
         let response = match builder.finish() {
@@ -1145,6 +1181,10 @@ impl AgentLoop {
             let _ = self.submit(conv, st, cancel);
             return TurnState::Done(StopReason::Budget { reason });
         }
+        if !early.is_empty() {
+            tracing::debug!(target: "harness::agent", calls = ?early.ids(), "tool calls started before the message ended");
+        }
+        st.early = early;
         st.pending = Some((message, calls));
         TurnState::Dispatch
     }
@@ -1243,9 +1283,10 @@ impl AgentLoop {
         }
         // Results are recorded in call order once the batch is done, after
         // loop detection and labeling.
+        let early = std::mem::take(&mut st.early);
         let outcomes = self
             .dispatcher
-            .run(Some(&st.node), &calls, cancel, &|_, _| {})
+            .run_with_early(Some(&st.node), &calls, cancel, &|_, _| {}, early)
             .await;
         let mut results = Vec::with_capacity(outcomes.len());
         for (call, outcome) in calls.iter().zip(outcomes) {
@@ -1271,12 +1312,17 @@ impl AgentLoop {
             } else if !outcome.is_error {
                 self.loops.observe(&call.tool, &call.raw_input, false);
             }
-            if !outcome.is_error
-                && matches!(
-                    call.plan,
-                    crate::dispatch::CallPlan::Run { read_only: false }
-                )
-            {
+            // A change-tracking tool (the ledger's bash) says whether it
+            // changed files that count; otherwise any successful mutating
+            // call is assumed to have changed something.
+            let changed = outcome.changed.unwrap_or(
+                !outcome.is_error
+                    && matches!(
+                        call.plan,
+                        crate::dispatch::CallPlan::Run { read_only: false }
+                    ),
+            );
+            if changed {
                 st.changed = true;
             }
             let outcome = self.finalize(outcome);

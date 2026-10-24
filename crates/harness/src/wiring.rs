@@ -123,6 +123,16 @@ fn api_key(cfg: &Config, name: &str) -> Result<harness_config::secrets::Secret, 
         })
 }
 
+/// The OpenRouter `session_id` of this process (`[provider.openrouter]
+/// session_id`, on by default): one id per harness process, so every
+/// request of the session (subagents and compaction included) routes to
+/// one upstream.
+fn openrouter_session_id() -> String {
+    static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ID.get_or_init(|| format!("harness-{}", harness_events::schema::RunId::new()))
+        .clone()
+}
+
 fn openrouter(cfg: &Config, key: &str) -> Result<OpenRouterProvider, String> {
     let pcfg = cfg
         .providers
@@ -138,16 +148,34 @@ fn openrouter(cfg: &Config, key: &str) -> Result<OpenRouterProvider, String> {
             use harness_providers::openrouter::CacheTtl;
             match t {
                 Ini::FiveMinutes => CacheTtl::FiveMinutes,
-                Ini::OneHour => CacheTtl::OneHour,
+                // `mixed` is refused in [provider.openrouter].
+                Ini::OneHour | Ini::Mixed => CacheTtl::OneHour,
+            }
+        }),
+        session_id: pcfg.session_id.unwrap_or(true).then(openrouter_session_id),
+        reasoning_exclude: pcfg.reasoning_exclude == Some(true),
+        service_tier: pcfg.service_tier.map(|t| {
+            use harness_config::ini::config::OpenRouterServiceTier as Ini;
+            use harness_providers::openrouter::ServiceTier;
+            match t {
+                Ini::Default => ServiceTier::Default,
+                Ini::Fast => ServiceTier::Fast,
             }
         }),
     };
-    OpenRouterProvider::with_key(key, pcfg.base_url.as_deref(), options)
-        .map_err(|e| format!("openrouter: {e}"))
+    // Session start checks the model against the cached `/models` list
+    // (shared with `/model`) instead of downloading 800 KB each time.
+    let cache = ModelListCache::new(DataDir::from_config(cfg).model_lists());
+    Ok(
+        OpenRouterProvider::with_key(key, pcfg.base_url.as_deref(), options)
+            .map_err(|e| format!("openrouter: {e}"))?
+            .with_model_cache(cache, cfg.general.model_list_ttl),
+    )
 }
 
-/// The Anthropic provider settings from `[provider.anthropic]`: base URL and
-/// request-body gzip (`gzip_requests`, `gzip_level`).
+/// The Anthropic provider settings from `[provider.anthropic]`: base URL,
+/// request-body gzip (`gzip_requests`, `gzip_level`), `thinking_display`,
+/// `cache_ttl` and `cache_ttl_auto_1h`.
 pub fn anthropic_config(cfg: &Config) -> AnthropicConfig {
     use harness_config::ini::config::GzipRequests as Ini;
     use harness_providers::anthropic::GzipRequests;
@@ -164,6 +192,27 @@ pub fn anthropic_config(cfg: &Config) -> AnthropicConfig {
     };
     if let Some(level) = p.gzip_level {
         conf.gzip_level = level;
+    }
+    {
+        use harness_config::ini::config::{CacheTtl as Ttl, ThinkingDisplay as Disp};
+        use harness_providers::anthropic::{CacheTtl, ThinkingDisplay};
+        if let Some(d) = p.thinking_display {
+            conf.request.thinking_display = match d {
+                Disp::Summarized => ThinkingDisplay::Summarized,
+                Disp::Omitted => ThinkingDisplay::Omitted,
+                Disp::Updates => ThinkingDisplay::Updates,
+            };
+        }
+        if let Some(t) = p.cache_ttl {
+            conf.request.cache_ttl = match t {
+                Ttl::FiveMinutes => CacheTtl::FiveMinutes,
+                Ttl::OneHour => CacheTtl::OneHour,
+                Ttl::Mixed => CacheTtl::Mixed,
+            };
+        }
+    }
+    if p.cache_ttl_auto_1h == Some(true) {
+        conf.long_wait = Some(harness_providers::cache_hint::LongWait::process());
     }
     conf
 }
@@ -275,6 +324,15 @@ pub fn openai_uses_chatgpt(cfg: &Config) -> bool {
         .is_some_and(|p| p.auth_mode() == AuthMode::ChatGpt)
 }
 
+/// True when `[provider.openai] prompt_cache_retention = 24h` opts in to
+/// extended prompt-cache retention (off by default).
+pub fn openai_extended_cache_retention(cfg: &Config) -> bool {
+    cfg.providers.get("openai").is_some_and(|p| {
+        p.prompt_cache_retention
+            == Some(harness_config::ini::config::OpenAiCacheRetention::TwentyFourHours)
+    })
+}
+
 /// The provider for `resolved`, with its key from `harness.ini`, without
 /// network checks.
 pub fn provider_sync(
@@ -298,9 +356,11 @@ pub fn provider_sync(
                 .map_err(err)?
                 .with_registry(registry.clone()),
         ),
-        harness_providers::openai::PROVIDER_NAME => {
-            Arc::new(OpenAiProvider::with_key(key.expose(), base.as_deref()).map_err(err)?)
-        }
+        harness_providers::openai::PROVIDER_NAME => Arc::new(
+            OpenAiProvider::with_key(key.expose(), base.as_deref())
+                .map_err(err)?
+                .with_extended_cache_retention(openai_extended_cache_retention(cfg)),
+        ),
         harness_providers::openrouter::PROVIDER_NAME => Arc::new(openrouter(cfg, key.expose())?),
         other => return Err(format!("unknown provider `{other}`")),
     })
@@ -471,6 +531,10 @@ pub fn model_catalog(cfg: &Config, registry: &Arc<Registry>) -> CatalogService {
 }
 
 #[cfg(test)]
+#[path = "wiring_pool_tests.rs"]
+mod pool_tests;
+
+#[cfg(test)]
 mod catalog_tests {
     use super::*;
 
@@ -554,6 +618,26 @@ mod anthropic_config_tests {
         assert_eq!(conf.http.base_url, "https://gw.example.com");
         assert_eq!(conf.gzip, GzipRequests::Off);
         assert_eq!(conf.gzip_level, 7);
+        assert_eq!(conf.request, Default::default(), "request options default");
+        assert_eq!(conf.long_wait, None);
+        let cfg = harness_config::ini::load_str(
+            "[provider.anthropic]\nthinking_display = updates\ncache_ttl = mixed\ncache_ttl_auto_1h = true\n",
+            None,
+        )
+        .unwrap();
+        let conf = anthropic_config(&cfg);
+        assert_eq!(
+            conf.request.thinking_display,
+            harness_providers::anthropic::ThinkingDisplay::Updates
+        );
+        assert_eq!(
+            conf.request.cache_ttl,
+            harness_providers::anthropic::CacheTtl::Mixed
+        );
+        assert_eq!(
+            conf.long_wait,
+            Some(harness_providers::cache_hint::LongWait::process())
+        );
         let conf = anthropic_config(&harness_config::ini::load_str("", None).unwrap());
         assert_eq!(conf.gzip, GzipRequests::Auto);
         assert_eq!(conf.gzip_level, 3);
@@ -614,6 +698,31 @@ mod chatgpt_tests {
         // The refusal is the provider error: no silent fallback to the key.
         assert!(chatgpt_provider(&c, false).is_err());
         assert!(chatgpt_provider(&c, true).unwrap().uses_chatgpt());
+    }
+
+    #[test]
+    fn openai_extended_cache_retention_is_opt_in() {
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = Arc::new(Registry::builtin());
+        let resolved = registry.resolve("openai/gpt-5").unwrap();
+        let req = harness_providers::model::ChatRequest::new("gpt-5.5");
+        let default = cfg("", tmp.path());
+        assert!(!openai_extended_cache_retention(&default));
+        let body = provider_sync(&default, &registry, &resolved)
+            .unwrap()
+            .request_body(&req)
+            .unwrap();
+        assert!(body.get("prompt_cache_retention").is_none(), "{body}");
+        assert!(body["prompt_cache_key"].is_string());
+        let explicit = cfg("prompt_cache_retention = default\n", tmp.path());
+        assert!(!openai_extended_cache_retention(&explicit));
+        let opted = cfg("prompt_cache_retention = 24h\n", tmp.path());
+        assert!(openai_extended_cache_retention(&opted));
+        let body = provider_sync(&opted, &registry, &resolved)
+            .unwrap()
+            .request_body(&req)
+            .unwrap();
+        assert_eq!(body["prompt_cache_retention"], "24h");
     }
 
     #[test]
@@ -728,5 +837,47 @@ mod openrouter_tests {
             let p = openrouter(&cfg, "test-key").unwrap();
             assert_eq!(p.options().cache_ttl, want, "{ini}");
         }
+    }
+
+    #[test]
+    fn openrouter_session_id_is_on_by_default_and_stable_per_process() {
+        let cfg =
+            harness_config::ini::load_str("[provider.openrouter]\nsession_id = false\n", None)
+                .unwrap();
+        assert_eq!(openrouter(&cfg, "k").unwrap().options().session_id, None);
+        let cfg = harness_config::ini::load_str("", None).unwrap();
+        let a = openrouter(&cfg, "k").unwrap().options().session_id.clone();
+        let b = openrouter(&cfg, "k").unwrap().options().session_id.clone();
+        assert!(
+            a.as_deref()
+                .is_some_and(|id| id.starts_with("harness-") && id.len() <= 256)
+        );
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn openrouter_reasoning_exclude_is_off_unless_set() {
+        let cfg = harness_config::ini::load_str("", None).unwrap();
+        assert!(!openrouter(&cfg, "k").unwrap().options().reasoning_exclude);
+        let cfg = harness_config::ini::load_str(
+            "[provider.openrouter]\nreasoning_exclude = true\n",
+            None,
+        )
+        .unwrap();
+        assert!(openrouter(&cfg, "k").unwrap().options().reasoning_exclude);
+    }
+
+    #[test]
+    fn openrouter_service_tier_is_unset_unless_set() {
+        use harness_providers::openrouter::ServiceTier;
+        let cfg = harness_config::ini::load_str("", None).unwrap();
+        assert_eq!(openrouter(&cfg, "k").unwrap().options().service_tier, None);
+        let cfg =
+            harness_config::ini::load_str("[provider.openrouter]\nservice_tier = fast\n", None)
+                .unwrap();
+        assert_eq!(
+            openrouter(&cfg, "k").unwrap().options().service_tier,
+            Some(ServiceTier::Fast)
+        );
     }
 }

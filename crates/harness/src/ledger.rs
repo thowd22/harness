@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use harness_agent::dispatch::AgentTool;
 use harness_hygiene::ledger::Ledger;
-use harness_tools::tool::{ToolContext, ToolError, ToolOutput};
+use harness_tools::tool::{ToolContext, ToolError, ToolEvent, ToolOutput};
 use serde_json::Value;
 
 use crate::memory::NodeHandle;
@@ -13,7 +13,10 @@ use crate::memory::NodeHandle;
 /// Wraps the `bash` tool: the worktree is compared before and after each
 /// command and every file the command created, modified or deleted is
 /// recorded by the [`Ledger`] as a `file_changed` event on the current node
-/// (edits by write/edit are recorded by the tools themselves).
+/// (edits by write/edit are recorded by the tools themselves). The call
+/// then reports [`ToolEvent::WorktreeChanges`], so a command that only
+/// wrote generated artifacts (`__pycache__/`, ...) does not count as a
+/// change for `verify_when = on_changes`.
 pub struct LedgerBash {
     inner: Arc<dyn AgentTool>,
     ledger: Arc<Ledger>,
@@ -71,8 +74,18 @@ impl AgentTool for LedgerBash {
                 ledger.end_command(watch, node.as_ref(), &command)
             })
             .await;
-            if let Ok(Err(e)) = done {
-                tracing::warn!(target: "harness::ledger", error = %e, "worktree snapshot failed");
+            match done {
+                Ok(Ok(entries)) => {
+                    let generated = entries.iter().filter(|e| e.generated).count();
+                    ctx.emit(ToolEvent::WorktreeChanges {
+                        files: entries.len() - generated,
+                        generated,
+                    });
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(target: "harness::ledger", error = %e, "worktree snapshot failed");
+                }
+                Err(_) => {}
             }
         }
         out

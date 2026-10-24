@@ -9,6 +9,9 @@ api_key_env = ANTHROPIC_API_KEY      ; or api_key / api_key_cmd
 ; base_url = https://api.anthropic.com
 ; gzip_requests = auto                ; or off
 ; gzip_level = 3                      ; 1 (fastest) to 9 (smallest)
+; thinking_display = summarized       ; summarized | omitted | updates
+; cache_ttl = 5m                      ; 5m | 1h | mixed
+; cache_ttl_auto_1h = false           ; 1h while a long wait is expected
 ```
 
 The key is sent only in a sensitive `x-api-key` header. It never appears in
@@ -121,13 +124,23 @@ comes from the model table:
 
 | Model style | Sent |
 |---|---|
-| Adaptive (current Claude models) | `thinking: {type: adaptive, display: summarized}` plus `output_config.effort`. If only a budget is set, it is converted to an effort level: up to 4,096 tokens is low, up to 16,384 is medium, anything higher is high. |
+| Adaptive (current Claude models) | `thinking: {type: adaptive, display: <thinking_display>}` (default `summarized`) plus `output_config.effort`. If only a budget is set, it is converted to an effort level: up to 4,096 tokens is low, up to 16,384 is medium, anything higher is high. |
 | Budget (Claude Haiku 4.5) | `thinking: {type: enabled, budget_tokens}`. If only an effort level is set, it is converted to a budget: low 2,048, medium 8,192, high 24,576 tokens. The budget is at least 1,024, and `max_tokens` is raised above it. |
 
 Notes:
 
 - `display: summarized` is what lets reasoning stream live. The API's
   default is to omit it.
+- `thinking_display` changes only what comes back, never how the model
+  thinks or what it costs. `omitted` returns empty thinking blocks
+  (signature only; they are still sent back unchanged) and can bring the
+  first visible token forward; `updates` returns only the model's short
+  between-tool progress notes and adds the beta header
+  `thinking-display-updates-2026-08-18`. The default stays `summarized`
+  everywhere (TUI, headless, evals, subagents): no Anthropic-direct
+  measurement showed a speed gain worth hiding the reasoning yet, and
+  OpenRouter, the only live route measured, has no display setting (its
+  closest equivalent is `[provider.openrouter] reasoning_exclude`).
 - With no `ThinkingConfig`, the `thinking` field is left out and the model
   uses its default. Claude Opus 5.5 and Fable models always think.
 - A Claude model that is not in the table gets adaptive thinking and
@@ -157,6 +170,45 @@ the history), and the history.
 Thinking and opaque blocks never get a marker, because they must be sent
 unchanged. `RequestOptions { cache: CacheMode::Off, .. }` turns caching off.
 
+### Cache lifetime
+
+`cache_ttl` sets the lifetime of every breakpoint:
+
+| `cache_ttl` | Tools and system | Messages | Cache writes cost |
+|---|---|---|---|
+| `5m` (default) | 5 minutes | 5 minutes | 1.25x input |
+| `1h` | 1 hour | 1 hour | 2x input |
+| `mixed` | 1 hour | 5 minutes | 2x for the prefix, 1.25x for the tail |
+
+The API requires longer lifetimes to come before shorter ones, which the
+layout keeps. A lifetime counts from the start of the request that wrote
+or last read the entry, so `5m` stays warm as long as requests that share
+the prefix start less than five minutes apart; `1h` and `mixed` only pay
+off for longer pauses (a user who replies after 20 minutes, a long test
+run). The lifetime never moves a breakpoint or changes another byte.
+
+`cache_ttl_auto_1h = true` upgrades every breakpoint to `1h` while a long
+wait is expected: while a background job of the session runs, and for 30
+minutes after a start-to-start gap of 3 minutes or more between two
+requests of one agent run (a long tool round tends to repeat). The pause
+before a new user prompt does not count. The signal is
+`harness_providers::cache_hint::LongWait` (process-wide), fed by the
+`harness_agent::long_wait::LongWaitHook` request hook, which never
+changes a request.
+
+### Cache pre-warm
+
+With `[experimental] cache_prewarm = true`, `Provider::prewarm_cache`
+sends `request::build_prewarm_body`: the next request's body (same tools,
+system, thinking and effort, since thinking settings are part of the
+cached prompt) with `stream: false`, `max_tokens: 0` and a placeholder
+user message (`warmup`) without a breakpoint after the shared messages.
+The API runs prefill, writes the cache at the breakpoints and returns no
+content and no output tokens; the cache write is billed. A forced
+`tool_choice` (rejected with `max_tokens: 0`) is dropped, and budget-style
+thinking models (`thinking.type: enabled`, also rejected) are not
+pre-warmed. When it runs is described in docs/performance.md.
+
 ## Usage
 
 Usage is read from `message_start` and updated by `message_delta`:
@@ -177,6 +229,8 @@ against a local mock server. It covers:
 - a two-turn tool loop that checks thinking blocks are sent back exactly
 - a retry after an overload in the middle of a stream
 - error mapping
+- the cache pre-warm call before the real one (`stream: false`,
+  `max_tokens: 0`, the same tools, system and thinking)
 
 `tests/gzip_requests.rs` covers request compression against mock servers
 that capture the exact wire bytes. It checks byte identity after

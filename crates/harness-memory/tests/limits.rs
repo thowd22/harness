@@ -338,3 +338,60 @@ fn indexing_a_codebase_fits_the_overview_note() {
     assert_eq!(note(&d, &path).bullets().count(), MAX_OVERVIEW_BULLETS);
     assert!(Path::new(&d.root().join(format!("{path}.md"))).exists());
 }
+
+/// TASK-158: the end-of-session extractor screens proposals with the same
+/// per-path limits as the tool, so an overview bullet it proposes survives
+/// screening and is written; other paths keep the 400-character limit.
+#[test]
+fn extractor_overview_proposals_use_the_tool_limits() {
+    use harness_memory::extract::{Candidate, screen, write_proposals};
+    use harness_memory::tool::guard::limit_for_path;
+
+    for p in ["project/overview", &format!("projects/{KEY}/overview.md")] {
+        assert_eq!(limit_for_path(p), MAX_OVERVIEW_BULLET_CHARS, "{p}");
+    }
+    assert_eq!(limit_for_path("project/testing"), MAX_BULLET_CHARS);
+
+    let cand = |path: &str, text: String| Candidate {
+        path: path.into(),
+        text,
+        reason: "worth keeping".into(),
+    };
+    let r = Redactor::new(Vec::<String>::new());
+    let ex = screen(
+        vec![
+            cand(
+                "project/overview",
+                lesson("Overview", MAX_OVERVIEW_BULLET_CHARS),
+            ),
+            cand(
+                "project/overview",
+                lesson("Too long", MAX_OVERVIEW_BULLET_CHARS + 1),
+            ),
+            cand("project/testing", lesson("Gotcha", MAX_BULLET_CHARS)),
+            cand(
+                "project/testing",
+                lesson("Long gotcha", MAX_BULLET_CHARS + 1),
+            ),
+        ],
+        &r,
+        5,
+    );
+    assert_eq!(ex.proposals.len(), 2, "{:?}", ex.rejected);
+    assert_eq!(ex.rejected.len(), 2);
+    assert!(ex.rejected[0].1.message.contains("the limit is 1000"));
+    assert!(ex.rejected[1].1.message.contains("the limit is 400"));
+
+    let (_tmp, d) = drive();
+    let t = tool(&d);
+    for res in write_proposals(&t, &ex.proposals) {
+        res.unwrap();
+    }
+    let overview = note(&d, &format!("projects/{KEY}/overview"));
+    assert!(
+        overview
+            .bullets()
+            .any(|b| b.text.chars().count() == MAX_OVERVIEW_BULLET_CHARS),
+        "overview bullet missing"
+    );
+}

@@ -96,6 +96,9 @@ enum Auth {
 pub struct OpenAiProvider {
     client: HttpClient,
     auth: Auth,
+    /// `[provider.openai] prompt_cache_retention = 24h`: send
+    /// [`request::cache_retention_for`] on API-key requests.
+    extended_cache_retention: bool,
 }
 
 impl OpenAiProvider {
@@ -108,6 +111,7 @@ impl OpenAiProvider {
         Ok(Self {
             client: HttpClient::new(http)?,
             auth: Auth::ApiKey,
+            extended_cache_retention: false,
         })
     }
 
@@ -121,7 +125,19 @@ impl OpenAiProvider {
         Ok(Self {
             client: HttpClient::new(http)?,
             auth: Auth::ChatGpt(auth),
+            extended_cache_retention: false,
         })
+    }
+
+    /// Opts in to extended prompt-cache retention
+    /// (`[provider.openai] prompt_cache_retention = 24h`): API-key requests
+    /// for [`request::EXTENDED_RETENTION_MODELS`] then carry
+    /// `prompt_cache_retention: "24h"`. Off by default, so the
+    /// organisation's own default applies (Zero Data Retention
+    /// organisations keep in-memory caching). ChatGPT mode never sends it.
+    pub fn with_extended_cache_retention(mut self, on: bool) -> Self {
+        self.extended_cache_retention = on;
+        self
     }
 
     /// True when this provider uses Sign in with ChatGPT.
@@ -143,6 +159,8 @@ impl OpenAiProvider {
         let mut body = request::build_body(request, is_reasoning_model(&request.model))?;
         if self.uses_chatgpt() {
             request::for_chatgpt(&mut body);
+        } else if self.extended_cache_retention {
+            request::apply_cache_retention(&mut body, &request.model);
         }
         Ok(body)
     }
@@ -156,6 +174,12 @@ impl Provider for OpenAiProvider {
 
     fn request_body(&self, request: &ChatRequest) -> Option<serde_json::Value> {
         OpenAiProvider::request_body(self, request).ok()
+    }
+
+    async fn prewarm(&self) {
+        if let Err(e) = self.client.warm("models").await {
+            tracing::debug!(error = %e, "openai connection pre-warm failed");
+        }
     }
 
     fn capabilities(&self, model: &str) -> Capabilities {
@@ -535,5 +559,29 @@ mod tests {
         assert_eq!(p.name(), "openai");
         let body: Value = p.request_body(&ChatRequest::new("o3")).unwrap();
         assert_eq!(body["model"], json!("o3"));
+    }
+
+    #[test]
+    fn extended_cache_retention_is_opt_in_for_api_key_requests() {
+        let req = ChatRequest::new("gpt-5.5");
+        let default = OpenAiProvider::with_key("k", None).unwrap();
+        let body = default.request_body(&req).unwrap();
+        assert!(body["prompt_cache_key"].is_string());
+        assert!(
+            body.get("prompt_cache_retention").is_none(),
+            "off by default: the org's retention policy applies"
+        );
+        let opted = OpenAiProvider::with_key("k", None)
+            .unwrap()
+            .with_extended_cache_retention(true);
+        let body = opted.request_body(&req).unwrap();
+        assert_eq!(body["prompt_cache_retention"], json!("24h"));
+        assert_eq!(
+            body["prompt_cache_key"],
+            default.request_body(&req).unwrap()["prompt_cache_key"]
+        );
+        // Models without extended retention never get it.
+        let body = opted.request_body(&ChatRequest::new("gpt-4o")).unwrap();
+        assert!(body.get("prompt_cache_retention").is_none());
     }
 }

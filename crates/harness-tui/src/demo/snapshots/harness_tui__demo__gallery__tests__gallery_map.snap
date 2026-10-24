@@ -1,5 +1,6 @@
 ---
 source: crates/harness-tui/src/demo/gallery.rs
+assertion_line: 482
 expression: "snap(Page::Map)"
 ---
  ui-demo  chat   map   detail   goal bar   palette   approvals   diff   inspector   history
@@ -33,7 +34,7 @@ expression: "snap(Page::Map)"
 
 
 
-
+◐ Researcher · haiku · read src/net/mod.rs  (Enter: detail · Space: live)
 --- styles ---
 0 0-8: fg=Rgb(189, 147, 249) bg=Rgb(40, 42, 54) mod=BOLD
 0 9-14: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
@@ -218,4 +219,9 @@ expression: "snap(Page::Map)"
 28 0-119: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 29 0-119: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 30 0-119: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
-31 0-119: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
+31 0-1: fg=Rgb(139, 233, 253) bg=Rgb(40, 42, 54)
+31 2-11: fg=Rgb(189, 147, 249) bg=Rgb(40, 42, 54) mod=BOLD
+31 12-22: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
+31 23-41: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
+31 42-72: fg=Rgb(189, 147, 249) bg=Rgb(40, 42, 54)
+31 73-119: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)

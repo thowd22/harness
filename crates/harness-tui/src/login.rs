@@ -19,6 +19,11 @@
 //! as `•` characters. Every button is clickable and has a key (Enter /
 //! Esc), and a click outside the dialog backs out.
 //!
+//! Every text wraps inside the dialog. When the dialog is taller than the
+//! screen, it keeps the selected option or the field in view, PageUp /
+//! PageDown and the wheel scroll it, and the bottom border shows the
+//! position.
+//!
 //! The modal never touches the network or the file system: a submit
 //! returns [`LoginOutcome::Submit`] with the request, the core verifies and
 //! saves it, and reports back with [`LoginModal::finish`].
@@ -33,7 +38,7 @@ use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 
-use crate::chat::text::{truncate_line, width, wrap_line};
+use crate::chat::text::{sanitize, width, wrap_line, wrap_text};
 use crate::interaction::HitMap;
 use crate::theme::{Theme, Token};
 
@@ -113,6 +118,10 @@ pub enum LoginOutcome {
 #[derive(Debug)]
 pub struct LoginModal {
     flow: LoginFlow,
+    /// First body row after a manual scroll; `None` follows the selection.
+    top: Option<usize>,
+    /// First body row and largest first row of the last frame.
+    last: std::cell::Cell<(usize, usize)>,
 }
 
 impl LoginModal {
@@ -129,7 +138,19 @@ impl LoginModal {
                 format!("unknown provider `{p}`; use one of {}", known.join(", "))
             })?,
         };
-        Ok(Self { flow })
+        Ok(Self {
+            flow,
+            top: None,
+            last: std::cell::Cell::new((0, 0)),
+        })
+    }
+
+    /// Scrolls the dialog by `lines` rows (the wheel, PageUp/PageDown).
+    pub fn scroll(&mut self, lines: i32) -> LoginOutcome {
+        let (first, max) = self.last.get();
+        let base = self.top.unwrap_or(first) as i64;
+        self.top = Some((base + i64::from(lines)).clamp(0, max as i64) as usize);
+        LoginOutcome::Changed
     }
 
     /// The flow behind the modal.
@@ -150,6 +171,12 @@ impl LoginModal {
         if key.kind == KeyEventKind::Release {
             return LoginOutcome::Ignored;
         }
+        match key.code {
+            KeyCode::PageUp => return self.scroll(-5),
+            KeyCode::PageDown => return self.scroll(5),
+            _ => {}
+        }
+        self.top = None;
         let plain = key.modifiers.difference(KeyModifiers::SHIFT).is_empty();
         let menu = !self.flow.options().is_empty();
         let k = match key.code {
@@ -168,12 +195,14 @@ impl LoginModal {
 
     /// Pasted text goes into the field (line breaks dropped).
     pub fn paste(&mut self, text: &str) -> LoginOutcome {
+        self.top = None;
         let ev = self.flow.handle(LoginKey::Paste(text.to_owned()));
         self.outcome(ev)
     }
 
     /// Runs a clicked element's action.
     pub fn activate(&mut self, action: LoginAction) -> LoginOutcome {
+        self.top = None;
         let ev = match action {
             LoginAction::Option(i) => self.flow.click(i),
             LoginAction::Primary => self.flow.handle(LoginKey::Enter),
@@ -212,10 +241,14 @@ impl LoginModal {
                 &[],
             ));
         };
-        lines.push(Line::from(Span::styled(
-            self.flow.title(),
-            theme.fg(Token::Fg).add_modifier(Modifier::BOLD),
-        )));
+        lines.extend(wrap_line(
+            Line::from(Span::styled(
+                sanitize(&self.flow.title()),
+                theme.fg(Token::Fg).add_modifier(Modifier::BOLD),
+            )),
+            w,
+            &[],
+        ));
         lines.push(Line::default());
         for (i, o) in self.flow.options().into_iter().enumerate() {
             let selected = i == self.flow.selected();
@@ -224,21 +257,35 @@ impl LoginModal {
             } else {
                 theme.fg(Token::Fg)
             };
-            options.push(lines.len());
-            lines.push(Line::from(vec![
-                Span::styled(if selected { "▸ " } else { "  " }, theme.fg(Token::Accent)),
-                Span::styled(o.label, label_style),
-                Span::styled(format!("  {}", o.detail), theme.fg(Token::Muted)),
-            ]));
+            let rows = wrap_line(
+                Line::from(vec![
+                    Span::styled(if selected { "▸ " } else { "  " }, theme.fg(Token::Accent)),
+                    Span::styled(o.label, label_style),
+                    Span::styled(format!("  {}", o.detail), theme.fg(Token::Muted)),
+                ]),
+                w,
+                &[Span::raw("    ")],
+            );
+            options.push((lines.len(), rows.len()));
+            lines.extend(rows);
         }
         if let Some(text) = self.flow.field() {
             let prompt = self.flow.method().map_or("Value", |m| m.prompt());
-            field = Some((lines.len(), width(prompt) + 3 + width(&text)));
-            lines.push(Line::from(vec![
-                Span::styled(prompt.to_owned(), theme.fg(Token::Muted)),
-                Span::styled(" › ", theme.fg(Token::Accent)),
-                Span::styled(text, theme.fg(Token::Fg)),
-            ]));
+            let rows = wrap_line(
+                Line::from(vec![
+                    Span::styled(prompt.to_owned(), theme.fg(Token::Muted)),
+                    Span::styled(" › ", theme.fg(Token::Accent)),
+                    Span::styled(sanitize(&text), theme.fg(Token::Fg)),
+                ]),
+                w,
+                &[],
+            );
+            // The cursor goes after the text, on its last row.
+            let last = rows.last().map_or(0, |l| {
+                l.spans.iter().map(|s| width(&s.content)).sum::<usize>()
+            });
+            field = Some((lines.len() + rows.len() - 1, last));
+            lines.extend(rows);
         }
         if let Some(m) = self.flow.message() {
             lines.push(Line::default());
@@ -284,8 +331,29 @@ impl LoginModal {
             return;
         }
         let body = self.lines(theme, cw);
+        // Below the body: the buttons (wrapping when narrow) and the hint.
+        let (primary, back) = self.buttons();
+        let mut buttons = Vec::new();
+        let (mut bx, mut brow) = (0usize, 0usize);
+        for (id, label, action, token) in [
+            (PRIMARY_ID, primary, LoginAction::Primary, Token::Accent),
+            (BACK_ID, back, LoginAction::Back, Token::Muted),
+        ] {
+            let Some(label) = label else { continue };
+            let text = format!("[ {label} ]");
+            let tw = width(&text);
+            if bx > 0 && bx + tw > cw {
+                brow += 1;
+                bx = 0;
+            }
+            buttons.push((id, text, action, token, brow, bx));
+            bx += tw + 2;
+        }
+        let button_rows = if buttons.is_empty() { 0 } else { brow + 1 };
+        let hint = wrap_text(self.flow.hint(), cw);
+        let foot = (button_rows + hint.len()) as u16;
         // Title row is part of the body; add buttons, hint and borders.
-        let h = (body.lines.len() as u16 + 4).min(area.height);
+        let h = (body.lines.len() as u16 + foot + 2).min(area.height);
         if h < 3 {
             return;
         }
@@ -313,20 +381,30 @@ impl LoginModal {
         if inner.height < 2 {
             return;
         }
-        let rows = inner.height - 2; // buttons and hint at the bottom
-        for (row, line) in body.lines.into_iter().enumerate().take(rows as usize) {
-            let y = inner.y + row as u16;
-            frame.render_widget(
-                Paragraph::new(truncate_line(line, cw)),
-                Rect::new(inner.x, y, inner.width, 1),
-            );
-            if let Some(i) = body.options.iter().position(|&r| r == row) {
-                hits.register(
-                    format!("{OPTION_PREFIX}{i}"),
-                    Rect::new(inner.x, y, inner.width, 1),
-                    wrap(LoginAction::Option(i)),
-                );
-            }
+        let foot = foot.min(inner.height.saturating_sub(1));
+        let rows = (inner.height - foot) as usize;
+        hits.register_pane(
+            "login",
+            Rect {
+                height: rows as u16,
+                ..inner
+            },
+        );
+        // Keep the selected option, else the field, in view.
+        let total = body.lines.len();
+        let max = total.saturating_sub(rows);
+        let focus = body
+            .options
+            .get(self.flow.selected())
+            .map(|&(r, n)| r + n)
+            .or(body.field.map(|(r, _)| r + 1))
+            .unwrap_or(0);
+        let auto = focus.saturating_sub(rows).min(max);
+        let first = self.top.map_or(auto, |t| t.min(max));
+        self.last.set((first, max));
+        for (row, line) in body.lines.into_iter().enumerate().skip(first).take(rows) {
+            let y = inner.y + (row - first) as u16;
+            frame.render_widget(Paragraph::new(line), Rect::new(inner.x, y, inner.width, 1));
             if let Some((r, col)) = body.field
                 && r == row
             {
@@ -334,41 +412,64 @@ impl LoginModal {
                 frame.set_cursor_position(Position::new(cx, y));
             }
         }
-
-        // Buttons.
-        let by = inner.bottom() - 2;
-        let (primary, back) = self.buttons();
-        let mut x = inner.x;
-        for (id, label, action, token) in [
-            (PRIMARY_ID, primary, LoginAction::Primary, Token::Accent),
-            (BACK_ID, back, LoginAction::Back, Token::Muted),
-        ] {
-            let Some(label) = label else { continue };
-            let text = format!("[ {label} ]");
-            let bw = (width(&text) as u16).min(inner.right().saturating_sub(x));
-            if bw == 0 {
-                break;
+        for (i, &(r, n)) in body.options.iter().enumerate() {
+            let top = r.max(first);
+            let bottom = (r + n).min(first + rows);
+            if bottom > top {
+                hits.register(
+                    format!("{OPTION_PREFIX}{i}"),
+                    Rect::new(
+                        inner.x,
+                        inner.y + (top - first) as u16,
+                        inner.width,
+                        (bottom - top) as u16,
+                    ),
+                    wrap(LoginAction::Option(i)),
+                );
             }
-            let r = Rect::new(x, by, bw, 1);
+        }
+        if max > 0 {
+            let pos = format!(" {}-{}/{} ", first + 1, first + rows, total);
+            let pw = width(&pos) as u16;
+            if rect.width > pw + 2 {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(pos, theme.fg(Token::Muted))),
+                    Rect::new(rect.right() - pw - 1, rect.bottom() - 1, pw, 1),
+                );
+            }
+        }
+
+        // Buttons, then the hint.
+        let by = inner.y + rows as u16;
+        for (id, text, action, token, row, x) in buttons {
+            let y = by + row as u16;
+            let x = inner.x + x as u16;
+            if y >= inner.bottom() || x >= inner.right() {
+                continue;
+            }
+            let bw = (width(&text) as u16).min(inner.right() - x);
+            let r = Rect::new(x, y, bw, 1);
             frame.render_widget(Paragraph::new(Span::styled(text, theme.fg(token))), r);
             hits.register_button(id, r, wrap(action));
-            x = x.saturating_add(bw + 2);
         }
-        frame.render_widget(
-            Paragraph::new(truncate_line(
-                Line::from(Span::styled(self.flow.hint(), theme.fg(Token::Muted))),
-                cw,
-            )),
-            Rect::new(inner.x, by + 1, inner.width, 1),
-        );
+        for (i, t) in hint.into_iter().enumerate() {
+            let y = by + (button_rows + i) as u16;
+            if y >= inner.bottom() {
+                break;
+            }
+            frame.render_widget(
+                Paragraph::new(Span::styled(t, theme.fg(Token::Muted))),
+                Rect::new(inner.x, y, inner.width, 1),
+            );
+        }
     }
 }
 
 /// Rendered dialog text.
 struct Body {
     lines: Vec<Line<'static>>,
-    /// Line index of each option.
-    options: Vec<usize>,
+    /// First line and rows of each option.
+    options: Vec<(usize, usize)>,
     /// Line index and cursor column of the text field.
     field: Option<(usize, usize)>,
 }

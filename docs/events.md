@@ -42,6 +42,13 @@ Event types: `run_started`, `run_finished`, `node_started`, `node_running`,
 `policy_decision`, `remote_op`, `remote_connection`, `tasks`, `mcp_call`,
 `mcp_tools_changed` and `bash_job`).
 
+A `file_changed` event has `path`, `change` (`created`, `modified`,
+`deleted`), an optional unified `diff`, and `generated: true` when a bash
+command wrote a well-known build or test artifact (`__pycache__/*.pyc`,
+`target/`, ...; see [hygiene](hygiene.md#generated-files)). Generated
+changes are shown but not counted as changes to verify; the field is
+omitted when false.
+
 A `bash_job` event records a background bash job (`run_in_background`)
 starting and ending, as a full snapshot on the node of the turn that
 started it: `call_id` (the starting `bash` call), `job_id` (`j1`, ...),

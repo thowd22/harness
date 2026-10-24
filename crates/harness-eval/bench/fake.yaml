@@ -1,0 +1,67 @@
+# Fake replies for the bench scenario (`harness bench --fake`): two user
+# turns, ten model calls, parallel read-only batches, edits and test runs.
+# Deltas are 8 characters so event recording is exercised per delta.
+responses:
+  # Turn 1: fix the bug.
+  - chunk_size: 8
+    content:
+      - reasoning: { text: "The tests report a wrong total. Find the value code and the test first.", signature: sig-1 }
+      - text: "I'll look at the code and the failing test."
+      - tool_use: { name: glob, input: { pattern: "**/*.py" } }
+      - tool_use: { name: grep, input: { pattern: "def total_value_cents", path: inventory, "-n": true, output_mode: content } }
+    usage: { input_tokens: 3200, cache_write_tokens: 6000, output_tokens: 90 }
+  - chunk_size: 8
+    content:
+      - tool_use: { name: read, input: { path: inventory/stock.py } }
+      - tool_use: { name: read, input: { path: tests/test_stock.py } }
+    usage: { input_tokens: 400, cache_read_tokens: 9200, output_tokens: 60 }
+  - chunk_size: 8
+    content:
+      - text: "total_value_cents ignores the quantity; multiplying fixes it."
+      - tool_use:
+          name: edit
+          input:
+            path: inventory/stock.py
+            old_string: "total += self._items[sku].unit_price_cents\n"
+            new_string: "total += self._items[sku].unit_price_cents * qty\n"
+    usage: { input_tokens: 900, cache_read_tokens: 9600, output_tokens: 110 }
+  - chunk_size: 8
+    content:
+      - tool_use: { name: bash, input: { command: "python3 -m unittest discover -s tests 2>&1 | tail -3" } }
+    usage: { input_tokens: 150, cache_read_tokens: 10500, output_tokens: 40 }
+  - chunk_size: 8
+    content:
+      - text: "Fixed `Stock.total_value_cents` in inventory/stock.py: it summed unit prices without multiplying by the quantity, so every total was too low. The whole suite passes now (5 tests), including the report test that depended on the total."
+    usage: { input_tokens: 120, cache_read_tokens: 10650, output_tokens: 70 }
+  # Turn 2: add a feature with a test.
+  - chunk_size: 8
+    content:
+      - text: "Reading the current class before adding the method."
+      - tool_use: { name: read, input: { path: inventory/stock.py } }
+    usage: { input_tokens: 200, cache_read_tokens: 10800, output_tokens: 40 }
+  - chunk_size: 8
+    content:
+      - tool_use:
+          name: edit
+          input:
+            path: inventory/stock.py
+            old_string: "    def skus(self):\n        return sorted(self._qty)\n"
+            new_string: "    def skus(self):\n        return sorted(self._qty)\n\n    def low_stock(self, threshold):\n        return sorted(sku for sku, qty in self._qty.items() if qty < threshold)\n"
+    usage: { input_tokens: 500, cache_read_tokens: 11000, output_tokens: 120 }
+  - chunk_size: 8
+    content:
+      - tool_use:
+          name: edit
+          input:
+            path: tests/test_stock.py
+            old_string: "    def test_total_value(self):\n"
+            new_string: "    def test_low_stock(self):\n        self.assertEqual(sample().low_stock(4), [\"B2\"])\n\n    def test_total_value(self):\n"
+    usage: { input_tokens: 300, cache_read_tokens: 11500, output_tokens: 90 }
+  - chunk_size: 8
+    content:
+      - tool_use: { name: bash, input: { command: "python3 -m unittest discover -s tests 2>&1 | tail -3" } }
+    usage: { input_tokens: 150, cache_read_tokens: 11800, output_tokens: 40 }
+  - chunk_size: 8
+    content:
+      - text: "Added `Stock.low_stock(threshold)`, which returns the SKUs whose quantity is below the threshold, sorted, plus `test_low_stock` in tests/test_stock.py. All 6 tests pass."
+    usage: { input_tokens: 120, cache_read_tokens: 11950, output_tokens: 60 }

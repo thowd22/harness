@@ -215,3 +215,61 @@ fn works_outside_a_git_repository() {
     assert_eq!(read(work.path(), "a.txt").unwrap(), "1\n");
     assert!(!work.path().join(".git").exists());
 }
+
+#[test]
+fn builtin_artifacts_stay_out_of_checkpoints_without_a_gitignore() {
+    let work = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let root = work.path();
+    write(root, "calc.py", "x = 1\n");
+    let store = CheckpointStore::open(data.path(), root).unwrap();
+    let cp = store
+        .snapshot(CheckpointKind::Manual, None, None, "before tests")
+        .unwrap();
+    // A test run writes bytecode and caches; a formatter touches calc.py.
+    write(root, "__pycache__/calc.cpython-312.pyc", "pyc");
+    write(root, ".pytest_cache/v/cache/lastfailed", "{}");
+    write(root, "calc.py", "x = 2\n");
+    let changed: Vec<String> = store
+        .changed_since(cp.id)
+        .unwrap()
+        .into_iter()
+        .map(|c| c.path)
+        .collect();
+    assert_eq!(changed, vec!["calc.py".to_string()]);
+    // Restoring leaves the artifacts alone.
+    store.restore(cp.id).unwrap();
+    assert_eq!(read(root, "calc.py").unwrap(), "x = 1\n");
+    assert!(read(root, "__pycache__/calc.cpython-312.pyc").is_some());
+    // Reopening keeps (and does not duplicate) the exclude list.
+    let again = CheckpointStore::open(data.path(), root).unwrap();
+    let exclude = std::fs::read_to_string(again.git_dir().join("info/exclude")).unwrap();
+    assert_eq!(exclude.matches("__pycache__/").count(), 1, "{exclude}");
+}
+
+#[test]
+fn tracked_files_matching_the_artifact_list_are_checkpointed() {
+    let work = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let root = work.path();
+    user_git(root, &["init", "-q"]);
+    write(root, "infra/target/config.txt", "port = 1\n");
+    user_git(root, &["add", "."]);
+    user_git(root, &["commit", "-q", "-m", "init"]);
+    let store = CheckpointStore::open(data.path(), root).unwrap();
+    let cp = store
+        .snapshot(CheckpointKind::Manual, None, None, "before")
+        .unwrap();
+    write(root, "infra/target/config.txt", "port = 2\n");
+    write(root, "target/debug/app", "bin");
+    let changed: Vec<String> = store
+        .changed_since(cp.id)
+        .unwrap()
+        .into_iter()
+        .map(|c| c.path)
+        .collect();
+    assert_eq!(changed, vec!["infra/target/config.txt".to_string()]);
+    store.restore(cp.id).unwrap();
+    assert_eq!(read(root, "infra/target/config.txt").unwrap(), "port = 1\n");
+    assert!(read(root, "target/debug/app").is_some());
+}

@@ -31,12 +31,93 @@ pub fn effort_for(thinking: &ThinkingConfig) -> Option<&'static str> {
     })
 }
 
+/// Models that accept `prompt_cache_retention: "24h"` (extended prompt
+/// caching), per OpenAI's prompt caching guide. Dated snapshots of these
+/// ids (`gpt-4.1-2025-04-14`) match too. GPT-5.5 and GPT-5.5 Pro accept
+/// only `24h`; GPT-5.6 and later replace the parameter with explicit cache
+/// breakpoints and are not listed.
+pub const EXTENDED_RETENTION_MODELS: &[&str] = &[
+    "gpt-5.5",
+    "gpt-5.5-pro",
+    "gpt-5.4",
+    "gpt-5.2",
+    "gpt-5.1-codex-max",
+    "gpt-5.1",
+    "gpt-5.1-codex",
+    "gpt-5.1-codex-mini",
+    "gpt-5.1-chat-latest",
+    "gpt-5",
+    "gpt-5-codex",
+    "gpt-4.1",
+];
+
+/// The `prompt_cache_retention` value that opting in to extended retention
+/// sends for `model`: `"24h"` for [`EXTENDED_RETENTION_MODELS`] (and their
+/// dated snapshots), otherwise `None`. Bodies carry it only when the
+/// provider opted in ([`apply_cache_retention`]).
+pub fn cache_retention_for(model: &str) -> Option<&'static str> {
+    let base = strip_snapshot_date(model);
+    EXTENDED_RETENTION_MODELS.contains(&base).then_some("24h")
+}
+
+/// `gpt-4.1-2025-04-14` -> `gpt-4.1`; ids without a trailing
+/// `-YYYY-MM-DD` are returned unchanged.
+fn strip_snapshot_date(model: &str) -> &str {
+    let bytes = model.as_bytes();
+    if bytes.len() > 11 {
+        let tail = &bytes[bytes.len() - 11..];
+        let is_date = tail[0] == b'-'
+            && tail[5] == b'-'
+            && tail[8] == b'-'
+            && [1, 2, 3, 4, 6, 7, 9, 10]
+                .iter()
+                .all(|&i| tail[i].is_ascii_digit());
+        if is_date {
+            return &model[..model.len() - 11];
+        }
+    }
+    model
+}
+
+/// A stable `prompt_cache_key` for the cacheable prefix of `request`.
+///
+/// OpenAI routes requests with the same key and prefix to the same cache.
+/// The key is derived from what makes up the reusable prefix (the
+/// instructions and the tool definitions), so every turn of a session,
+/// its retries, and subagents that share the same instructions and tools
+/// map to one key, while a different prefix gets a different key. The
+/// conversation itself is not part of the key, and the key reveals nothing
+/// about the prompt (a truncated SHA-256).
+pub fn prompt_cache_key(request: &ChatRequest) -> String {
+    use aws_lc_rs::digest::{SHA256, digest};
+    let mut material = Vec::new();
+    material.extend_from_slice(request.system.as_deref().unwrap_or("").as_bytes());
+    for spec in &request.tools {
+        material.push(0);
+        material.extend_from_slice(spec.name.as_bytes());
+        material.push(0);
+        material.extend_from_slice(spec.description.as_bytes());
+        material.push(0);
+        material.extend_from_slice(spec.input_schema.to_string().as_bytes());
+    }
+    let hash = digest(&SHA256, &material);
+    let hex: String = hash.as_ref()[..12]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!("harness-{hex}")
+}
+
 /// Builds the JSON body for `POST /responses`.
 ///
 /// The call is always stateless (`store: false`). For reasoning models the
 /// body asks for reasoning summaries and for encrypted reasoning content,
 /// which the stream returns as opaque blocks that are sent back verbatim on
-/// the next turn.
+/// the next turn. Every body carries a [`prompt_cache_key`].
+/// `prompt_cache_retention` is never sent here, so the organisation's
+/// default retention applies (`24h` on the extended-caching models for
+/// organisations without Zero Data Retention, `in_memory` with ZDR);
+/// [`apply_cache_retention`] adds it when the user opted in.
 pub fn build_body(request: &ChatRequest, reasoning_model: bool) -> Result<Value, ProviderError> {
     let mut body = Map::new();
     body.insert("model".into(), json!(request.model));
@@ -74,10 +155,22 @@ pub fn build_body(request: &ChatRequest, reasoning_model: bool) -> Result<Value,
     } else if let Some(t) = request.temperature {
         body.insert("temperature".into(), json!(t));
     }
+    body.insert("prompt_cache_key".into(), json!(prompt_cache_key(request)));
     if !request.stop_sequences.is_empty() {
         tracing::debug!("stop sequences are not supported by the OpenAI Responses API; omitted");
     }
     Ok(Value::Object(body))
+}
+
+/// Adds `prompt_cache_retention` ([`cache_retention_for`] `model`) to
+/// `body` when the model supports extended retention. Used only when
+/// `[provider.openai] prompt_cache_retention = 24h` opts in: by default
+/// the field is left out so a Zero Data Retention organisation keeps its
+/// in-memory policy.
+pub fn apply_cache_retention(body: &mut Value, model: &str) {
+    if let (Some(map), Some(retention)) = (body.as_object_mut(), cache_retention_for(model)) {
+        map.insert("prompt_cache_retention".into(), json!(retention));
+    }
 }
 
 /// Adapts a body for Sign in with ChatGPT: `store: false` and streaming
@@ -380,6 +473,109 @@ mod tests {
         assert_eq!(body["stream"], json!(true));
         assert_eq!(body["instructions"], json!("be brief"));
         assert!(body["tools"].is_array());
+    }
+
+    #[test]
+    fn cache_retention_per_model() {
+        for m in [
+            "gpt-5.5",
+            "gpt-5.5-pro",
+            "gpt-5.4",
+            "gpt-5.2",
+            "gpt-5.1",
+            "gpt-5.1-codex-max",
+            "gpt-5",
+            "gpt-5-codex",
+            "gpt-4.1",
+            "gpt-4.1-2025-04-14",
+            "gpt-5.5-2026-04-23",
+        ] {
+            assert_eq!(cache_retention_for(m), Some("24h"), "{m}");
+        }
+        for m in [
+            "gpt-5.6",
+            "gpt-5.6-2026-09-01",
+            "gpt-5-mini",
+            "gpt-4.1-mini",
+            "gpt-4o",
+            "o4-mini",
+            "o3",
+            "gpt-5.3",
+            "",
+            "gpt-4.1-2025-04-1x",
+        ] {
+            assert_eq!(cache_retention_for(m), None, "{m}");
+        }
+    }
+
+    #[test]
+    fn every_body_has_a_cache_key_and_retention_only_when_opted_in() {
+        let mut r = sample();
+        let mut body = build_body(&r, true).unwrap();
+        let key = body["prompt_cache_key"].as_str().unwrap().to_owned();
+        assert!(key.starts_with("harness-") && key.len() == 8 + 24, "{key}");
+        assert!(body.get("prompt_cache_retention").is_none(), "o4-mini");
+        // Opting in adds nothing for a model without extended retention.
+        apply_cache_retention(&mut body, &r.model);
+        assert!(body.get("prompt_cache_retention").is_none(), "o4-mini");
+        r.model = "gpt-5.5".into();
+        let mut body = build_body(&r, true).unwrap();
+        // By default the org's own retention policy applies (ZDR orgs
+        // default to in_memory): the field is never sent.
+        assert!(body.get("prompt_cache_retention").is_none(), "default");
+        apply_cache_retention(&mut body, &r.model);
+        assert_eq!(body["prompt_cache_retention"], json!("24h"));
+        assert_eq!(
+            body["prompt_cache_key"],
+            json!(key),
+            "model is not part of the key"
+        );
+    }
+
+    #[test]
+    fn cache_key_is_stable_across_turns_and_changes_with_the_prefix() {
+        let base = sample();
+        let key = prompt_cache_key(&base);
+        // Later turns (more messages, other sampling settings) keep the key.
+        let mut later = base.clone();
+        later.messages.push(Message::user("next turn"));
+        later.max_tokens = Some(5);
+        later.thinking = None;
+        assert_eq!(prompt_cache_key(&later), key);
+        // A subagent with the same instructions and tools shares it.
+        let mut sub = ChatRequest::new("gpt-5.5");
+        sub.system = base.system.clone();
+        sub.tools = base.tools.clone();
+        sub.messages = vec![Message::user("a different task")];
+        assert_eq!(prompt_cache_key(&sub), key);
+        // Different instructions or tools give a different key.
+        let mut other = base.clone();
+        other.system = Some("be verbose".into());
+        assert_ne!(prompt_cache_key(&other), key);
+        let mut other = base.clone();
+        other.tools[0].description = "Read a file.".into();
+        assert_ne!(prompt_cache_key(&other), key);
+        let mut other = base.clone();
+        other.tools.clear();
+        assert_ne!(prompt_cache_key(&other), key);
+        // The key does not leak prompt text.
+        assert!(!key.contains("brief"));
+    }
+
+    #[test]
+    fn chatgpt_bodies_keep_the_cache_key_and_drop_retention() {
+        let mut r = sample();
+        r.model = "gpt-5.5".into();
+        let mut body = build_body(&r, true).unwrap();
+        let key = body["prompt_cache_key"].clone();
+        apply_cache_retention(&mut body, &r.model);
+        assert_eq!(body["prompt_cache_retention"], json!("24h"));
+        for_chatgpt(&mut body);
+        assert!(body.get("prompt_cache_retention").is_none());
+        assert_eq!(body["prompt_cache_key"], key);
+        for field in crate::chatgpt::UNSUPPORTED_REQUEST_FIELDS {
+            assert!(body.get(*field).is_none(), "{field} kept");
+        }
     }
 
     #[test]

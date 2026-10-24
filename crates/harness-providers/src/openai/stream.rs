@@ -311,6 +311,48 @@ mod tests {
     }
 
     #[test]
+    fn each_function_call_stops_at_its_output_item_done() {
+        let fc = |k: u64, id: &str, name: &str, args: &str| json!({"type": "function_call", "id": format!("fc{k}"), "call_id": id, "name": name, "arguments": args});
+        let events = [
+            json!({"type": "response.created", "response": {"id": "r"}}),
+            json!({"type": "response.output_item.added", "output_index": 0, "item": fc(0, "c0", "read", "")}),
+            json!({"type": "response.function_call_arguments.delta", "output_index": 0, "delta": "{\"path\":"}),
+            json!({"type": "response.function_call_arguments.delta", "output_index": 0, "delta": "\"a\"}"}),
+            json!({"type": "response.function_call_arguments.done", "output_index": 0, "arguments": "{\"path\":\"a\"}"}),
+            json!({"type": "response.output_item.done", "output_index": 0, "item": fc(0, "c0", "read", "{\"path\":\"a\"}")}),
+            json!({"type": "response.output_item.added", "output_index": 1, "item": fc(1, "c1", "grep", "")}),
+            json!({"type": "response.function_call_arguments.delta", "output_index": 1, "delta": "{}"}),
+            json!({"type": "response.output_item.done", "output_index": 1, "item": fc(1, "c1", "grep", "{}")}),
+            json!({"type": "response.completed", "response": {"id": "r", "usage": {}}}),
+        ];
+        let mut m = ResponsesMapper::default();
+        let steps: Vec<Vec<StreamEvent>> = events
+            .iter()
+            .map(|e| {
+                m.on_event(&SseEvent {
+                    event: e["type"].as_str().unwrap().into(),
+                    data: e.to_string(),
+                    id: None,
+                    retry: None,
+                })
+                .unwrap()
+            })
+            .collect();
+        assert_eq!(steps[5], vec![StreamEvent::BlockStop { index: 0 }]);
+        assert_eq!(steps[8], vec![StreamEvent::BlockStop { index: 2 }]);
+        let stops = steps
+            .iter()
+            .flatten()
+            .filter(|e| matches!(e, StreamEvent::BlockStop { .. }))
+            .count();
+        assert_eq!(stops, 2, "no other stops");
+        assert!(matches!(
+            steps[9].last(),
+            Some(StreamEvent::MessageStop { stop, .. }) if stop.kind == StopKind::ToolUse
+        ));
+    }
+
+    #[test]
     fn usage_splits_cached_and_reports_reasoning() {
         let u = usage(&json!({
             "input_tokens": 100,

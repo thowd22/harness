@@ -11,8 +11,11 @@ The app (`harness_tui::app::App`) composes the views:
 - **Chat** (`ChatView`) and **Map** (`MapView`), switched with Tab or the
   footer tabs. The **goal bar** (`GoalBar`) sits on the right of both when
   the run has tasks; on narrow terminals it collapses into a status-line
-  indicator. Click a task, or use the palette's "Focus goal bar", to reach
-  it from the keyboard.
+  indicator, which opens the goal and every task in the Status panel
+  (click it, or Shift+Tab to it and Enter). Click a task, or use the
+  palette's "Focus goal bar", to reach it from the keyboard. The pane wraps
+  long titles and scrolls (wheel, PgUp/PgDn, Home/End) when the tasks do
+  not fit.
 - **Screens** on top of either view: node detail (Enter or a click on a map
   node or subagent card), the diff review (`/diff`, or a node's "review
   diff"), the request inspector (a node's "inspect"), command panels
@@ -189,6 +192,65 @@ keyboard:
 text selection works (with capture on, harness selects text itself); the footer then shows `mouse off`. The palette's
 "toggle mouse" command switches capture at runtime.
 
+## Layout: everything fits, nothing is hidden
+
+Every view keeps its content on screen and inside its border at any
+terminal size, and nothing is cut off for lack of space:
+
+- **Text wraps.** Long words, paths, URLs, code lines, diff lines and
+  wide characters (CJK, emoji: two cells each) wrap inside their area;
+  words longer than a row are split. Continuation rows keep their gutter
+  (line numbers, bars) blank so the text lines up. Tabs are expanded to
+  4-column stops and control characters are replaced, so every cell is
+  measured as it is drawn.
+- **Nothing is drawn on or past a border.** Boxes (tool and subagent
+  cards, panels, pickers, dialogs, toasts) are never wider than their
+  area; a card header too long for its top border keeps the icon and name
+  there and wraps the rest inside the box.
+- **Rows grow before anything is dropped.** The status line, the footer,
+  the activity line and the keyboard selection bar wrap onto more rows
+  when their parts do not fit on one. Where space is genuinely too small,
+  the full value stays one action away and the screen says how: the
+  status line's `+N more` button (and the palette's **Show status**)
+  opens the full status; a collapsed card says `… N more lines · Enter to
+  expand`; a subagent card's summary says `Enter to open the agent`.
+- **Popups size to their content** within the screen and scroll when they
+  cannot fit, with a position indicator (`3-10/42`) in the bottom border;
+  the mouse wheel, Up/Down, PgUp/PgDn and Home/End scroll them.
+- **Tiny terminals never crash**: below a few columns or rows the views
+  draw what fits.
+
+Where a view keeps something short on purpose, this is how to see the rest:
+
+| view | shortened | how to see all of it |
+|---|---|---|
+| status line | segments that do not fit in three rows | `+N more` button (click, or Shift+Tab and Enter), or the palette's **Show status** |
+| goal progress on the status line (goal bar collapsed) | the goal and the other tasks | click the indicator (or Shift+Tab and Enter): the Status panel lists them |
+| MCP indicator | the server name | click it for `/mcp`; the Status panel lists every failed server |
+| tool card | bodies longer than `[ui] tool_preview_lines` | `… N more lines · Enter to expand` (click or Enter) |
+| subagent card | summaries over three lines | `Enter to open the agent` (click or Enter) |
+| palette, `/model`, `/resume` rows | one row per entry, cut with `…` so columns line up | `→ full text` on the bottom border: Right or a click shows the selected entry's full text below the list, Shift+↑↓ (or ▲ ▼) scrolls it, Right or `← hide full text` closes it |
+| slash completion | other commands' descriptions | the selected command shows in full; move with Up/Down |
+| toast | text over six rows | `… more in Notifications (palette)` |
+| approval card | previews over 12 lines | the `… N more lines` row: click it or press `e` |
+| map node box | name, agent, model, host | the info line under the graph for the selected node (`Enter: detail · Space: live`) |
+| live pane | earlier output | `… N earlier lines (Enter: node detail)` |
+| activity line | rows beyond a quarter of the screen | the tool card and status line show the same details |
+
+Everything else that does not fit scrolls: the chat, node detail, the diff
+file list and diff, the inspector and its context view, run history, the
+goal bar pane, panels, the notification history, approvals, the login
+dialog, the help overlay and the memory browser, each with the wheel and
+the arrow, page and Home/End keys, and a position indicator when it
+scrolls.
+
+The layout test matrix (`crates/harness-tui/src/layout_matrix.rs`) checks
+these rules for every view: it renders each one with long-content
+fixtures at 40x12, 60x20, 80x24, 120x40 and 250x60 (and 1x1 to 30x8 for
+panics), fails when content lands on or past a border, and fails when any
+fixture value is neither visible nor reachable through the view's
+documented action (scrolling, expanding, opening the detail).
+
 ## Copy and paste
 
 Mouse capture turns off the terminal's own text selection, so harness selects
@@ -209,6 +271,9 @@ node detail, the diff screen, panels (`/mcp`, `/cost`, ...) and pickers
   instead. Picker rows (`/model`, `/resume`) pick on the release too: a
   click picks the model or session, a drag copies the row's text and picks
   nothing.
+- **A drag that starts on a border** (a panel's, picker's or dialog's frame,
+  or a tool card's) selects from the nearest text cell inside it: a side
+  border from its row, a top or bottom border from its column.
 - **Dragging past the top or bottom edge** of a scrollable view (the chat,
   node detail, diff, panels, the map) scrolls it and keeps extending the
   selection, also while the pointer rests there.
@@ -219,7 +284,8 @@ node detail, the diff screen, panels (`/mcp`, `/cost`, ...) and pickers
   again; typing clears it.
 
 What is copied is the logical text: soft-wrapped lines are rejoined into
-one line, and borders, gutters (line numbers), message bars, status icons,
+one line, and borders (including a tool card header's rule before its
+duration and time), gutters (line numbers), message bars, status icons,
 button labels and the expand hints are left out. Text under an open
 overlay (the palette, help, a dialog) is not selected through it. Toasts
 are different: a selection cannot start on one, but text under a toast is

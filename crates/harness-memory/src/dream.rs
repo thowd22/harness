@@ -322,7 +322,7 @@ impl Dreamer {
         let mut skipped = Vec::new();
         // Lessons first, so they are deduplicated like everything else.
         for l in lessons {
-            match crate::tool::guard::validate(&l.text, &self.redactor) {
+            match crate::tool::guard::validate_for_path(&l.note, &l.text, &self.redactor) {
                 Ok(text) => {
                     let np = NotePath::parse(&l.note)?;
                     let note = after

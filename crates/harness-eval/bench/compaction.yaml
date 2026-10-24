@@ -1,0 +1,138 @@
+# Fake replies for `harness bench --fake --compaction`: the same two turns as
+# fake.yaml in a 20k-token window, with reported input climbing past 0.7
+# (before call 8) and 0.8 (before call 10) of it, so the session compacts once
+# (with the default keep_recent_turns = 6). Agent calls take 1.5 s and the
+# handoff summary 2.5 s, as a slow model would: in-line compaction makes
+# call 10 wait for the whole summary, while
+# `[context] background_compaction = true` starts it before call 8 and swaps
+# it in at call 10. The summary reply matches the compaction request by its
+# system prompt, so one script serves both settings.
+capabilities:
+  tools: true
+  parallel_tool_calls: true
+  thinking: true
+  caching: true
+  context_window: 20000
+  max_output_tokens: 8000
+responses:
+  - match_system: "You write handoff notes"
+    delay_ms: 2500
+    chunk_size: 64
+    content:
+      - text: "## Goal\nFix the stock total and add low_stock with a test.\n\n## Decisions\nMultiply unit price by quantity.\n\n## Current state\nThe code and tests were read; the fix is being made.\n\n## Files touched\n- inventory/stock.py\n- tests/test_stock.py\n\n## Next steps\nRun the tests.\n\n## Open questions\nnone"
+    usage: { input_tokens: 6000, output_tokens: 120 }
+  # Turn 1: fix the bug. Reported input crosses 0.7 (14000) after call 7
+  # and 0.8 (16000) after call 9.
+  - delay_ms: 1500
+    chunk_size: 8
+    content:
+      - text: "I'll look at the code first."
+      - tool_use: { name: read, input: { path: inventory/stock.py } }
+    usage: { input_tokens: 6000, output_tokens: 40 }
+  - delay_ms: 1500
+    chunk_size: 8
+    content:
+      - tool_use: { name: read, input: { path: tests/test_stock.py } }
+    usage: { input_tokens: 7000, output_tokens: 30 }
+  - delay_ms: 1500
+    chunk_size: 8
+    content:
+      - tool_use: { name: read, input: { path: inventory/report.py } }
+    usage: { input_tokens: 8000, output_tokens: 30 }
+  - delay_ms: 1500
+    chunk_size: 8
+    content:
+      - tool_use: { name: grep, input: { pattern: "def total_value_cents", path: inventory, "-n": true, output_mode: content } }
+    usage: { input_tokens: 9000, output_tokens: 40 }
+  - delay_ms: 1500
+    chunk_size: 8
+    content:
+      - tool_use: { name: read, input: { path: README.md } }
+    usage: { input_tokens: 10000, output_tokens: 30 }
+  - delay_ms: 1500
+    chunk_size: 8
+    content:
+      - tool_use: { name: read, input: { path: tests/test_report.py } }
+    usage: { input_tokens: 11000, output_tokens: 30 }
+  - delay_ms: 1500
+    chunk_size: 8
+    content:
+      - tool_use: { name: read, input: { path: inventory/__init__.py } }
+    usage: { input_tokens: 12000, output_tokens: 30 }
+  - delay_ms: 1500
+    chunk_size: 8
+    content:
+      - tool_use: { name: read, input: { path: inventory/stock.py } }
+    usage: { input_tokens: 14000, output_tokens: 30 }
+  - delay_ms: 1500
+    chunk_size: 8
+    content:
+      - tool_use: { name: read, input: { path: tests/test_stock.py } }
+    usage: { input_tokens: 15000, output_tokens: 30 }
+  - delay_ms: 1500
+    chunk_size: 8
+    content:
+      - tool_use: { name: read, input: { path: inventory/report.py } }
+    usage: { input_tokens: 16000, output_tokens: 30 }
+  - delay_ms: 1500
+    chunk_size: 8
+    content:
+      - text: "total_value_cents ignores the quantity; multiplying fixes it."
+      - tool_use:
+          name: edit
+          input:
+            path: inventory/stock.py
+            old_string: "total += self._items[sku].unit_price_cents\n"
+            new_string: "total += self._items[sku].unit_price_cents * qty\n"
+    usage: { input_tokens: 6000, output_tokens: 110 }
+  - delay_ms: 1500
+    chunk_size: 8
+    content:
+      - tool_use: { name: bash, input: { command: "python3 -m unittest discover -s tests 2>&1 | tail -3" } }
+    usage: { input_tokens: 6500, output_tokens: 40 }
+  - delay_ms: 1500
+    chunk_size: 8
+    content:
+      - text: "Fixed `Stock.total_value_cents` in inventory/stock.py: it summed unit prices without multiplying by the quantity. The whole suite passes now."
+    usage: { input_tokens: 7000, output_tokens: 60 }
+  # Turn 2: add a feature with a test.
+  - delay_ms: 1500
+    chunk_size: 8
+    content:
+      - tool_use: { name: read, input: { path: inventory/stock.py } }
+    usage: { input_tokens: 6500, output_tokens: 30 }
+  - delay_ms: 1500
+    chunk_size: 8
+    content:
+      - tool_use:
+          name: edit
+          input:
+            path: inventory/stock.py
+            old_string: "    def skus(self):\n        return sorted(self._qty)\n"
+            new_string: "    def skus(self):\n        return sorted(self._qty)\n\n    def low_stock(self, threshold):\n        return sorted(sku for sku, qty in self._qty.items() if qty < threshold)\n"
+    usage: { input_tokens: 7000, output_tokens: 120 }
+  - delay_ms: 1500
+    chunk_size: 8
+    content:
+      - tool_use: { name: read, input: { path: tests/test_stock.py } }
+    usage: { input_tokens: 7500, output_tokens: 30 }
+  - delay_ms: 1500
+    chunk_size: 8
+    content:
+      - tool_use:
+          name: edit
+          input:
+            path: tests/test_stock.py
+            old_string: "    def test_total_value(self):\n"
+            new_string: "    def test_low_stock(self):\n        self.assertEqual(sample().low_stock(4), [\"B2\"])\n\n    def test_total_value(self):\n"
+    usage: { input_tokens: 8000, output_tokens: 90 }
+  - delay_ms: 1500
+    chunk_size: 8
+    content:
+      - tool_use: { name: bash, input: { command: "python3 -m unittest discover -s tests 2>&1 | tail -3" } }
+    usage: { input_tokens: 8500, output_tokens: 40 }
+  - delay_ms: 1500
+    chunk_size: 8
+    content:
+      - text: "Added `Stock.low_stock(threshold)` with `test_low_stock`. All 6 tests pass."
+    usage: { input_tokens: 9000, output_tokens: 60 }

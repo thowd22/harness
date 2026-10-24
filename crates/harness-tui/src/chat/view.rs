@@ -46,6 +46,7 @@ use harness_policy::approvals::{ModeState, PromptEnvelope};
 use harness_policy::rules::{Action as PolicyAction, Mode};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::text::Span;
 use ratatui::widgets::{Block, Paragraph};
 use time::{OffsetDateTime, UtcOffset};
 
@@ -98,6 +99,8 @@ pub enum ChatAction {
     Mcp,
     /// The status line's background-jobs indicator: open `/jobs`.
     Jobs,
+    /// The status line's `+N more` button: open the full status.
+    StatusMore,
 }
 
 /// What the chat screen asks the app or core to do.
@@ -194,6 +197,10 @@ impl ChatConfig {
     }
 }
 
+/// Node (and agent) name of a background cache pre-warm call
+/// (`harness_agent::prewarm::PREWARM_NODE`, `[experimental] cache_prewarm`).
+pub const PREWARM_NODE: &str = "cache-prewarm";
+
 /// The composed chat screen.
 #[derive(Debug)]
 pub struct ChatView {
@@ -207,6 +214,8 @@ pub struct ChatView {
     approvals: ApprovalQueue,
     notify: Notifications,
     spinner: Spinner,
+    /// Rows the activity line took this turn (see `render`).
+    activity_rows: u16,
     title: TerminalTitle,
     interaction: Interaction<ChatAction>,
     mode: ModeState,
@@ -227,6 +236,9 @@ pub struct ChatView {
     /// A press on a card's body: the card and what a click does, run on
     /// the release when no drag (a text selection) happened in between.
     body_press: Option<(ElementId, ChatAction)>,
+    /// Background cache pre-warm nodes ([`PREWARM_NODE`]): shown in the map only,
+    /// never as a chat turn (see [`ChatView::apply_run_event`]).
+    prewarm_nodes: std::collections::HashSet<NodeId>,
 }
 
 impl ChatView {
@@ -246,6 +258,7 @@ impl ChatView {
             approvals: ApprovalQueue::new(),
             notify: Notifications::new(),
             spinner: Spinner::new(cfg.animations),
+            activity_rows: 0,
             title: TerminalTitle::new(cfg.terminal_title),
             interaction,
             mode: ModeState::new(cfg.mode),
@@ -257,6 +270,7 @@ impl ChatView {
             covered: false,
             overlay_toasts: Vec::new(),
             body_press: None,
+            prewarm_nodes: std::collections::HashSet::new(),
             cfg,
         }
     }
@@ -382,8 +396,31 @@ impl ChatView {
     }
 
     /// Folds a run event into every component.
+    ///
+    /// A cache pre-warm (`[experimental] cache_prewarm`) runs in the
+    /// background while the user types: its node adds no transcript entry,
+    /// does not move the activity line and raises no notification, so it
+    /// neither looks like a turn nor ends one. Its usage and cost still
+    /// reach the status line; the map shows the node.
     pub fn apply_run_event(&mut self, ev: &RunEvent, now: Instant) {
         self.wall = self.wall.max(ev.ts);
+        if let Some(node) = &ev.node_id {
+            if let harness_events::schema::EventKind::NodeStarted { name, agent, .. } = &ev.kind
+                && (name == PREWARM_NODE || agent.as_deref() == Some(PREWARM_NODE))
+            {
+                self.prewarm_nodes.insert(node.clone());
+            }
+            if self.prewarm_nodes.contains(node) {
+                if matches!(
+                    ev.kind,
+                    harness_events::schema::EventKind::ModelCallFinished { .. }
+                        | harness_events::schema::EventKind::Cost { .. }
+                ) {
+                    self.status.apply(ev);
+                }
+                return;
+            }
+        }
         if let harness_events::schema::EventKind::ToolOutput { text, .. } = &ev.kind {
             self.activity.tool_output(text.lines().count().max(1), now);
         }
@@ -731,6 +768,10 @@ impl ChatView {
             Dispatch::Scroll { pane, lines } => {
                 if pane == PaneId::from(CHAT_PANE) {
                     self.scroll(lines);
+                } else if pane == PaneId::from(crate::notify::HISTORY_PANE) {
+                    self.notify.scroll(lines);
+                } else if pane == PaneId::from(crate::approval::APPROVAL_PANE) {
+                    self.approvals.scroll(lines);
                 }
             }
             Dispatch::Back => {
@@ -787,6 +828,10 @@ impl ChatView {
             }
             ChatAction::Jobs => {
                 out.push(ChatOutput::Submit("/jobs".into()));
+                self.interaction.set_focus(INPUT_ID);
+            }
+            ChatAction::StatusMore => {
+                out.push(ChatOutput::Command(AppCommand::ShowStatus));
                 self.interaction.set_focus(INPUT_ID);
             }
             ChatAction::Select(a) => match a {
@@ -1012,20 +1057,61 @@ impl ChatView {
         }
     }
 
+    /// The full status line, one item per line (the `+N more` button and
+    /// the "Show status" palette entry open it in a panel).
+    pub fn status_details(&self) -> Vec<String> {
+        self.status.details(&self.cfg.theme, &self.spinner)
+    }
+
     /// Draws the chat screen into `area`.
     pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect, now: Instant) {
         let theme = self.cfg.theme.clone();
         self.width = area.width;
         frame.render_widget(Block::new().style(theme.base()), area);
         let width = area.width;
-        let activity_h = u16::from(self.activity.is_active());
+        // The activity line and the status line wrap onto more rows rather
+        // than cutting text; the status line takes at most a sixth of the
+        // screen (up to 3 rows) and offers `+N more` for the rest.
+        let activity_line = self.activity.is_active().then(|| {
+            let hint = self.cfg.keymap.describe(Action::Interrupt);
+            self.activity
+                .line(now, &self.spinner, self.cfg.stall_after, &theme, &hint)
+        });
+        let activity_lines = activity_line.clone().map_or_else(Vec::new, |line| {
+            crate::chat::text::wrap_line(line, width as usize, &[Span::raw("  ")])
+        });
+        // Timers change the line's length every frame. The height comes from
+        // the line with every number at a fixed width, and only grows during
+        // a turn, so the transcript above does not jump as time passes.
+        self.activity_rows = if activity_lines.is_empty() {
+            0
+        } else {
+            let probe = activity_line
+                .as_ref()
+                .map_or(0, |l| activity_probe_rows(l, width as usize));
+            self.activity_rows
+                .max(probe)
+                .max(activity_lines.len() as u16)
+        };
+        let activity_h = self
+            .activity_rows
+            .min(area.height / 4)
+            .max(u16::from(!activity_lines.is_empty()));
+        let status_rows = (area.height / 6).clamp(1, 3);
+        let status_layout = self.status.layout(
+            &theme,
+            &self.spinner,
+            width as usize,
+            usize::from(status_rows),
+        );
+        let status_h = status_layout.lines.len().max(1) as u16;
         let approval_h = self
             .approvals
             .current()
             .map_or(0, |p| p.height(width, &theme).min(area.height / 2));
         let selecting = self.transcript.selection().is_some();
         let input_h = if selecting {
-            1
+            copy_ui::bar_height(width)
         } else {
             self.input.height(width)
         };
@@ -1034,7 +1120,7 @@ impl ChatView {
             Constraint::Length(activity_h),
             Constraint::Length(approval_h),
             Constraint::Length(input_h),
-            Constraint::Length(1),
+            Constraint::Length(status_h),
         ])
         .areas(area);
 
@@ -1051,11 +1137,19 @@ impl ChatView {
         };
         let (lines, thits) = self.transcript.render(body, &f);
         if lines.is_empty() {
-            // Bottom-anchored like the transcript: the hint sits above the input.
-            let row = Rect::new(body.x, body.bottom().saturating_sub(1), body.width, 1);
+            // Bottom-anchored like the transcript: the hint sits above the
+            // input, wrapped on narrow screens.
+            let hint = crate::chat::text::wrap_line(
+                ratatui::text::Line::from(
+                    "Type a message and press Enter. Ctrl+P opens the command palette.",
+                ),
+                body.width as usize,
+                &[],
+            );
+            let h = (hint.len() as u16).min(body.height);
+            let row = Rect::new(body.x, body.bottom().saturating_sub(h), body.width, h);
             frame.render_widget(
-                Paragraph::new("Type a message and press Enter. Ctrl+P opens the command palette.")
-                    .style(theme.fg(crate::theme::Token::Muted)),
+                Paragraph::new(hint).style(theme.fg(crate::theme::Token::Muted)),
                 row.intersection(body),
             );
         } else {
@@ -1113,18 +1207,14 @@ impl ChatView {
         }
         // Activity line.
         if activity_h > 0 {
-            let hint = self.cfg.keymap.describe(Action::Interrupt);
-            let line = self
-                .activity
-                .line(now, &self.spinner, self.cfg.stall_after, &theme, &hint);
-            frame.render_widget(Paragraph::new(line), activity);
+            frame.render_widget(Paragraph::new(activity_lines), activity);
         }
         // Approvals.
         if let Some(p) = self.approvals.current() {
             p.render(frame, approvals, &theme, &mut hits, &ChatAction::Approval);
         }
         // Slash completion over the bottom of the transcript.
-        let ch = self.input.completion_height().min(body.height);
+        let ch = self.input.completion_height_at(body.width).min(body.height);
         if ch > 0 {
             let r = Rect::new(body.x, body.bottom() - ch, body.width, ch);
             self.input
@@ -1158,39 +1248,34 @@ impl ChatView {
                 &ChatAction::Input,
             );
         }
-        // Status, with the MCP and background-jobs indicators as buttons
-        // when they show.
-        let mut status_line = self.status.line(&theme, &self.spinner, width as usize);
-        let buttons = [
-            (
-                self.status.mcp_label(),
-                crate::status::MCP_INDICATOR_ID,
-                ChatAction::Mcp,
-            ),
-            (
-                self.status.jobs_label(),
-                crate::status::JOBS_INDICATOR_ID,
-                ChatAction::Jobs,
-            ),
-        ];
-        for (label, id, action) in buttons {
-            let Some(label) = label else { continue };
-            let mut x = 0usize;
-            for span in &mut status_line.spans {
-                let w = unicode_width::UnicodeWidthStr::width(span.content.as_ref());
-                if span.content == label {
-                    if focus.as_deref() == Some(id) {
+        // Status, with the MCP and background-jobs indicators and the
+        // `+N more` button as buttons when they show.
+        let mut status_lines = status_layout.lines;
+        for b in &status_layout.buttons {
+            let action = match b.id {
+                crate::status::MCP_INDICATOR_ID => ChatAction::Mcp,
+                crate::status::JOBS_INDICATOR_ID => ChatAction::Jobs,
+                _ => ChatAction::StatusMore,
+            };
+            if focus.as_deref() == Some(b.id)
+                && let Some(line) = status_lines.get_mut(usize::from(b.row))
+            {
+                // Highlight the button's spans on this row.
+                let mut x = 0u16;
+                for span in &mut line.spans {
+                    let w = unicode_width::UnicodeWidthStr::width(span.content.as_ref()) as u16;
+                    if x >= b.col && x + w <= b.col + b.width && w > 0 {
                         span.style = span.style.patch(theme.focused());
                     }
-                    let r =
-                        Rect::new(status.x + x as u16, status.y, w as u16, 1).intersection(status);
-                    hits.register(id, r, action);
-                    break;
+                    x += w;
                 }
-                x += w;
+            }
+            let r = Rect::new(status.x + b.col, status.y + b.row, b.width, 1).intersection(status);
+            if !r.is_empty() {
+                hits.register(b.id, r, action);
             }
         }
-        frame.render_widget(Paragraph::new(status_line), status);
+        frame.render_widget(Paragraph::new(status_lines), status);
         // Overlays.
         hits.push_layer();
         self.notify
@@ -1211,6 +1296,28 @@ impl ChatView {
             self.interaction.set_focus(INPUT_ID);
         }
     }
+}
+
+/// Rows the activity line needs with every run of digits four cells wide
+/// (`12.3s`, `2m05s`, `12.4k` keep their width), so ticking timers do not
+/// change its height.
+fn activity_probe_rows(line: &ratatui::text::Line<'static>, width: usize) -> u16 {
+    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    let mut probe = String::new();
+    let mut in_digits = false;
+    for c in text.chars() {
+        if c.is_ascii_digit() || (in_digits && c == '.') {
+            if !in_digits {
+                probe.push_str("0000");
+            }
+            in_digits = true;
+        } else {
+            in_digits = false;
+            probe.push(c);
+        }
+    }
+    crate::chat::text::wrap_line(ratatui::text::Line::from(probe), width, &[Span::raw("  ")]).len()
+        as u16
 }
 
 #[cfg(test)]
@@ -1584,6 +1691,137 @@ mod tests {
                 needs: vec![],
                 queued: false,
             },
+        );
+    }
+
+    /// The events of one background cache pre-warm (`cache-prewarm` node
+    /// under parent `p`, as the recorder writes them), from `seq` on.
+    fn prewarm_events(seq: u64) -> Vec<RunEvent> {
+        use harness_events::schema::Usage as EventUsage;
+        let kinds = vec![
+            EventKind::NodeStarted {
+                kind: NodeKind::Agent,
+                name: PREWARM_NODE.into(),
+                agent: Some(PREWARM_NODE.into()),
+                model: Some("sonnet".into()),
+                host: None,
+                needs: vec![],
+                queued: false,
+            },
+            EventKind::ModelCallStarted {
+                call_id: "call_warm".into(),
+                provider: "anthropic".into(),
+                model: "sonnet".into(),
+                request: Payload::Json(json!({"purpose": "cache-prewarm"})),
+            },
+            EventKind::ModelCallFinished {
+                call_id: "call_warm".into(),
+                usage: EventUsage {
+                    input: 1_900,
+                    cache_write: 1_900,
+                    ..EventUsage::default()
+                },
+                stop_reason: Some("max_tokens".into()),
+                response: None,
+                duration_ms: 400,
+            },
+            EventKind::Cost { usd: 0.25 },
+            EventKind::NodeFinished {
+                status: harness_events::schema::NodeStatus::Succeeded,
+                error: None,
+            },
+        ];
+        kinds
+            .into_iter()
+            .zip(seq..)
+            .map(|(kind, seq)| RunEvent {
+                seq,
+                ts: T0 + time::Duration::seconds(seq as i64),
+                run_id: RunId(uuid::Uuid::nil()),
+                node_id: Some(NodeId::from("warm")),
+                parent_node_id: Some(NodeId::from("p")),
+                kind,
+            })
+            .collect()
+    }
+
+    fn apply_all(ui: &mut Ui, events: &[RunEvent]) {
+        for e in events {
+            ui.view.apply_run_event(e, ui.now);
+            ui.draw();
+        }
+    }
+
+    #[test]
+    fn the_prewarm_node_name_matches_the_agent_crate() {
+        assert_eq!(PREWARM_NODE, harness_agent::prewarm::PREWARM_NODE);
+    }
+
+    #[test]
+    fn a_session_start_prewarm_is_not_a_turn() {
+        let mut ui = Ui::new();
+        let events = prewarm_events(1);
+        // Mid-call: no assistant turn, no activity.
+        apply_all(&mut ui, &events[..2]);
+        assert!(ui.view.transcript().entries().is_empty());
+        assert_eq!(ui.view.activity.phase(), &crate::indicators::Phase::Idle);
+        assert!(!ui.text().contains("waiting"), "{}", ui.text());
+        apply_all(&mut ui, &events[2..]);
+        assert!(ui.view.transcript().entries().is_empty());
+        assert_eq!(ui.view.activity.phase(), &crate::indicators::Phase::Idle);
+        assert_eq!(ui.view.activity.turn(), 0);
+        let t = ui.text();
+        assert!(
+            !t.contains("assistant") && !t.contains("ctrl+c to interrupt"),
+            "{t}"
+        );
+        assert!(ui.view.notify.history().next().is_none());
+        // Its spend is real: the status line counts it.
+        assert!(t.contains("$0.25"), "{t}");
+    }
+
+    #[test]
+    fn a_prewarm_finishing_during_a_turn_does_not_end_it() {
+        let mut ui = Ui::new();
+        let events = prewarm_events(10);
+        apply_all(&mut ui, &events[..2]);
+        // The user submits while the pre-warm is in flight.
+        ui.send(type_text("fix the parser"));
+        ui.send(vec![key("enter")]);
+        assert!(ui.view.activity.is_active());
+        apply_all(&mut ui, &events[2..]);
+        assert!(ui.view.activity.is_active(), "the turn is still sending");
+        // The real turn then runs as usual and is the only assistant entry.
+        start_main(&mut ui);
+        ui.event(
+            20,
+            Some("main"),
+            EventKind::ModelCallStarted {
+                call_id: "m".into(),
+                provider: "fake".into(),
+                model: "sonnet".into(),
+                request: Payload::text(""),
+            },
+        );
+        assert!(
+            ui.text().contains("waiting for first token"),
+            "{}",
+            ui.text()
+        );
+        let assistants = ui
+            .view
+            .transcript()
+            .entries()
+            .iter()
+            .filter(|e| matches!(e.kind, transcript::EntryKind::Assistant(_)))
+            .count();
+        assert_eq!(assistants, 1);
+        // A later pre-warm (after /compact) leaves the main agent alone too.
+        apply_all(&mut ui, &prewarm_events(30));
+        assert!(
+            ui.text().contains("waiting for first token"),
+            "{}",
+            ui.text()
         );
     }
 
@@ -2122,7 +2360,13 @@ mod tests {
         let mut ui = Ui::sized(60, 14);
         ui.fill(40);
         ui.send(vec![key("pageup"), key("pageup")]);
-        let top = ui.body_rows()[0].clone();
+        // The top text row (the row above it may be the gap between two
+        // messages, depending on how many rows the status line takes).
+        let top = ui
+            .body_rows()
+            .into_iter()
+            .find(|r| !r.trim().is_empty())
+            .unwrap_or_default();
         assert!(top.contains("message"), "{top}");
         let first = |ui: &Ui| {
             ui.body_rows()
@@ -2307,6 +2551,7 @@ mod tests {
                 path: "src/a.rs".into(),
                 change: FileChangeKind::Modified,
                 diff: Some(Payload::text(EDIT_DIFF)),
+                generated: false,
             },
         );
     }
@@ -2577,5 +2822,46 @@ mod tests {
             [ChatOutput::Run(inv)] => assert_eq!(inv.args, vec!["feature/ü-x ".to_owned()]),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn long_status_wraps_and_more_opens_the_full_status_by_click_and_keyboard() {
+        let long = "/private/var/folders/n6/hn37q6pj7sj_9dm0000gn/T/.tmpXyZ/project/status_end";
+        // Tall enough for three status rows: the path wraps, nothing is cut.
+        let mut ui = Ui::sized(60, 30);
+        ui.view.status_mut().cwd = long.into();
+        ui.draw();
+        assert!(
+            crate::layout_matrix::shows(&ui.text(), long),
+            "{}",
+            ui.text()
+        );
+        assert!(!ui.text().contains('…'), "{}", ui.text());
+        // Short: two status rows, the rest behind `+N more`.
+        let mut ui = Ui::sized(40, 12);
+        ui.view.status_mut().cwd = long.into();
+        ui.view.status_mut().set_mcp_failed(vec!["docs".into()]);
+        ui.draw();
+        let (x, y) = ui.find("more");
+        assert!(y >= 10, "on the status line: {}", ui.text());
+        let label_style = ui.term.backend().buffer()[(x, y)].style();
+        assert_eq!(
+            label_style.fg,
+            ui.view.cfg.theme.fg(crate::theme::Token::Link).fg
+        );
+        // Mouse.
+        ui.click_text("more");
+        assert_eq!(ui.take(), vec![ChatOutput::Command(AppCommand::ShowStatus)]);
+        // Keyboard: Shift+Tab from the input reaches the last status
+        // button; Enter activates it.
+        ui.send(vec![key("shift+tab")]);
+        assert_eq!(
+            ui.view.focused().map(|f| f.0.as_str()),
+            Some(crate::status::STATUS_MORE_ID)
+        );
+        ui.send(vec![key("enter")]);
+        assert_eq!(ui.take(), vec![ChatOutput::Command(AppCommand::ShowStatus)]);
+        let details = ui.view.status_details().join("\n");
+        assert!(details.contains(long), "{details}");
     }
 }

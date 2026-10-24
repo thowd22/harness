@@ -3,6 +3,7 @@
 //! See `backlog/docs/doc-1 - Architecture-and-Problem-Map.md` for crate boundaries.
 
 pub mod anthropic;
+pub mod cache_hint;
 pub mod catalog;
 pub mod chatgpt;
 pub mod fake;
@@ -17,3 +18,4 @@ pub mod provider;
 pub mod registry;
 pub mod retry;
 pub mod sse;
+pub mod timing;

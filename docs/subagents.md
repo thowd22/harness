@@ -85,6 +85,25 @@ workflow executor:
   retried after the pause, up to 8 times. Each wait appears as a
   `retrying in Ns (429 rate limited, attempt k/N)` notice.
 
+### Staggered fan-out (experimental)
+
+With `[experimental] stagger_subagents = true`, children's requests pass
+through `harness_agent::stagger::StaggeredProvider`. Siblings that start
+together (several `spawn_agent` calls in one reply, parallel workflow
+agent steps) and share a cached prefix (provider, model, thinking, system
+prompt and tools) do not all write that prefix to the prompt cache: the
+first request goes alone, the others wait until its response begins (at
+most 30 s, and never holding a scheduler call slot), then go and read the
+cache. If the first one fails before its response begins, a waiting one
+leads instead. A prefix stays warm for 4 minutes after its last request.
+With `[experimental] cache_prewarm = true` as well, the first sibling sends
+a `max_tokens: 0` pre-warm of the shared prefix (a `cache-prewarm` node
+under it, Anthropic only), releases the others when it returns and sends
+its own request with them. Its cost counts against the `[budget]` limits,
+and no pre-warm is sent while one is exhausted. Requests and answers are
+the same either way.
+See docs/performance.md.
+
 ## todo: the shared task list
 
 Agents whose `tools:` include `todo` get a small tool:

@@ -34,7 +34,7 @@ use harness_events::schema::{
 };
 use ratatui::text::{Line, Span};
 
-use crate::cards::arg_summary;
+use crate::cards::compact_summary;
 use crate::chat::text::{fmt_cost, fmt_ms, fmt_tokens, sanitize, truncate};
 use crate::theme::{Theme, Token};
 
@@ -534,8 +534,10 @@ impl Activity {
                 self.tool_call = Some(call_id.clone());
                 self.tool_timeout = None;
                 self.tool_live = None;
+                // Todo, memory and agent calls read as their compact
+                // summary (`2 tasks · 1 done …`), not their raw arguments.
                 let summary = crate::cards::payload_json(args)
-                    .map(|v| arg_summary(tool, &v))
+                    .map(|v| compact_summary(tool, &v, ""))
                     .map(|s| s.strip_prefix("$ ").map(str::to_owned).unwrap_or(s))
                     .unwrap_or_default();
                 let phase = Phase::RunningTool {

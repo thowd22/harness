@@ -105,7 +105,13 @@ fn bodies(name: &str) -> Value {
         .request_body(&openai_req)
         .unwrap();
     let (or_req, _) = request(&c, &agent, "anthropic/claude-sonnet-5-5");
-    let openrouter = OpenRouterProvider::with_key("test-key", None, OpenRouterOptions::default())
+    // The binary sends one `session_id` per process by default
+    // (`[provider.openrouter] session_id`); a fixed stand-in here.
+    let or_options = OpenRouterOptions {
+        session_id: Some("harness-SESSION".into()),
+        ..OpenRouterOptions::default()
+    };
+    let openrouter = OpenRouterProvider::with_key("test-key", None, or_options)
         .unwrap()
         .request_body(&or_req);
     json!({
@@ -178,6 +184,88 @@ fn researcher_requests() {
 #[test]
 fn reviewer_requests() {
     insta::assert_json_snapshot!("request_reviewer", bodies("reviewer"));
+}
+
+/// Where the cache breakpoints of an Anthropic body are, with their TTL.
+fn breakpoints(body: &Value) -> Vec<Value> {
+    let mut out = Vec::new();
+    let mut scan = |at: String, b: &Value| {
+        if let Some(cc) = b.get("cache_control") {
+            out.push(json!([at, cc.get("ttl").cloned().unwrap_or(json!("5m"))]));
+        }
+    };
+    for (i, t) in body["tools"].as_array().into_iter().flatten().enumerate() {
+        scan(format!("tools[{i}]"), t);
+    }
+    for (i, b) in body["system"].as_array().into_iter().flatten().enumerate() {
+        scan(format!("system[{i}]"), b);
+    }
+    for (m, msg) in body["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        for (i, b) in msg["content"].as_array().into_iter().flatten().enumerate() {
+            scan(format!("messages[{m}][{i}]"), b);
+        }
+    }
+    out
+}
+
+/// The opt-in request options (TASK-161.4) on the coder's first request:
+/// `[provider.anthropic] thinking_display = omitted`, `cache_ttl = mixed`,
+/// the `[experimental] cache_prewarm` body, and `[provider.openrouter]
+/// reasoning_exclude`, with `effort: medium` on the agent so thinking is
+/// requested. Only the parts the options change are kept; the full bodies
+/// are in the default snapshots above.
+#[test]
+fn coder_request_options() {
+    use harness_providers::anthropic::{CacheTtl, ThinkingDisplay};
+    let c = catalog();
+    let mut agent = c.agents.get("coder").unwrap().clone();
+    agent.effort = Some(Effort::Medium);
+    let (req, _) = request(&c, &agent, "claude-sonnet-5-5");
+    let mut conf = AnthropicConfig::new();
+    conf.request.thinking_display = ThinkingDisplay::Omitted;
+    conf.request.cache_ttl = CacheTtl::Mixed;
+    let p = AnthropicProvider::new("test-key", conf).unwrap();
+    let body = p.build_body(&req).unwrap();
+    let mut session_start = req.clone();
+    session_start.messages.clear();
+    let warm = p.prewarm_body(&session_start).unwrap().unwrap();
+    let (or_req, _) = request(&c, &agent, "anthropic/claude-sonnet-5-5");
+    let or = OpenRouterProvider::with_key(
+        "test-key",
+        None,
+        OpenRouterOptions {
+            reasoning_exclude: true,
+            service_tier: Some(harness_providers::openrouter::ServiceTier::Fast),
+            ..OpenRouterOptions::default()
+        },
+    )
+    .unwrap()
+    .request_body(&or_req);
+    insta::assert_json_snapshot!(
+        "request_options_coder",
+        json!({
+            "anthropic": {
+                "thinking": body["thinking"],
+                "output_config": body["output_config"],
+                "breakpoints": breakpoints(&body),
+            },
+            "anthropic_prewarm": {
+                "stream": warm["stream"],
+                "max_tokens": warm["max_tokens"],
+                "thinking": warm["thinking"],
+                "output_config": warm["output_config"],
+                "messages": warm["messages"],
+                "breakpoints": breakpoints(&warm),
+                "same_tools_and_system": warm["tools"] == body["tools"] && warm["system"] == body["system"],
+            },
+            "openrouter": {"reasoning": or["reasoning"], "service_tier": or["service_tier"]},
+        })
+    );
 }
 
 #[test]

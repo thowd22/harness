@@ -16,7 +16,7 @@
 //! Enter, asks the app to open the owning agent's node
 //! ([`GoalBarOutput::OpenNode`]).
 
-use crossterm::event::{Event, KeyEventKind};
+use crossterm::event::{Event, KeyCode, KeyEventKind, MouseEventKind};
 use harness_config::ini::config::{Config, GoalBar as GoalBarMode};
 use harness_events::reducer::RunState;
 use harness_events::schema::{EventKind, NodeId, NodeStatus, RunEvent};
@@ -28,7 +28,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use serde_json::Value;
 
 use crate::cards::payload_json;
-use crate::chat::text::{right_align, truncate};
+use crate::chat::text::{right_align, sanitize, wrap_line};
 use crate::indicators::{Spinner, node_glyph};
 use crate::interaction::{Dispatch, ElementId, HitMap, Interaction};
 use crate::palette::{EntryKind as PaletteKind, PaletteEntry};
@@ -254,6 +254,9 @@ pub enum GoalBarOutput {
     Back,
 }
 
+/// Scroll pane id of the goal bar's content.
+pub const GOALBAR_PANE: &str = "goalbar";
+
 /// Element id of a task row.
 pub fn task_id(i: usize) -> String {
     format!("goalbar.task.{i}")
@@ -278,6 +281,11 @@ pub struct GoalBar {
     spinner: Spinner,
     interaction: Interaction<usize>,
     owners: Vec<Option<NodeId>>,
+    /// First shown row of the pane's content.
+    scroll: usize,
+    /// Rows of content and of the pane in the last frame.
+    rows: usize,
+    view: usize,
 }
 
 impl GoalBar {
@@ -291,7 +299,21 @@ impl GoalBar {
             spinner: Spinner::new(animations),
             interaction: Interaction::new(),
             owners: Vec::new(),
+            scroll: 0,
+            rows: 0,
+            view: 0,
         }
+    }
+
+    /// First shown row of the pane (it scrolls when the goal and tasks
+    /// do not fit).
+    pub fn scroll_offset(&self) -> usize {
+        self.scroll
+    }
+
+    fn scroll_by(&mut self, d: i64) {
+        let max = self.rows.saturating_sub(self.view) as i64;
+        self.scroll = (self.scroll as i64 + d).clamp(0, max.max(0)) as usize;
     }
 
     /// A bar configured from `harness.ini`.
@@ -367,8 +389,9 @@ impl GoalBar {
             .iter()
             .find(|t| t.status == TaskStatus::InProgress)
         {
+            // The whole title: the status line wraps rather than cut it.
             spans.push(Span::styled(
-                format!(" {}", truncate(&cur.title, 24)),
+                format!(" {}", sanitize(&cur.title)),
                 t.fg(Token::Running),
             ));
         }
@@ -380,11 +403,56 @@ impl GoalBar {
         self.spinner.tick();
     }
 
-    /// Handles input: click a task, or Tab/arrows to it and Enter.
+    /// Handles input: click a task, or Tab/arrows to it and Enter. The
+    /// wheel, PgUp/PgDn and Home/End scroll a pane that does not fit.
     pub fn handle(&mut self, ev: &Event) -> Option<GoalBarOutput> {
+        let page = self.view.saturating_sub(1).max(1) as i64;
         let d = match ev {
-            Event::Key(k) if k.kind != KeyEventKind::Release => self.interaction.handle_key(k),
-            Event::Mouse(m) => self.interaction.handle_mouse(m),
+            Event::Key(k) if k.kind != KeyEventKind::Release => match k.code {
+                KeyCode::PageUp => {
+                    self.scroll_by(-page);
+                    return None;
+                }
+                KeyCode::PageDown => {
+                    self.scroll_by(page);
+                    return None;
+                }
+                KeyCode::Home => {
+                    self.scroll = 0;
+                    return None;
+                }
+                KeyCode::End => {
+                    self.scroll_by(self.rows as i64);
+                    return None;
+                }
+                // Up/Down step through every task, also those scrolled out
+                // of view (the pane scrolls to the focused one).
+                KeyCode::Up | KeyCode::Down if !self.owners.is_empty() => {
+                    let cur = self
+                        .interaction
+                        .focused()
+                        .and_then(|f| f.0.strip_prefix("goalbar.task.")?.parse::<usize>().ok());
+                    let next = match (cur, k.code) {
+                        (None, _) => 0,
+                        (Some(i), KeyCode::Up) => i.saturating_sub(1),
+                        (Some(i), _) => (i + 1).min(self.owners.len() - 1),
+                    };
+                    self.interaction.set_focus(task_id(next));
+                    return None;
+                }
+                _ => self.interaction.handle_key(k),
+            },
+            Event::Mouse(m) => match m.kind {
+                MouseEventKind::ScrollUp => {
+                    self.scroll_by(-i64::from(crate::interaction::WHEEL_LINES));
+                    return None;
+                }
+                MouseEventKind::ScrollDown => {
+                    self.scroll_by(i64::from(crate::interaction::WHEEL_LINES));
+                    return None;
+                }
+                _ => self.interaction.handle_mouse(m),
+            },
             _ => None,
         }?;
         match d {
@@ -418,14 +486,14 @@ impl GoalBar {
             ));
         let inner = block.inner(area);
         frame.render_widget(block, area);
-        let w = usize::from(inner.width);
+        let w = usize::from(inner.width).max(1);
         let mut lines: Vec<(Option<usize>, Line<'static>)> = Vec::new();
         let goal = goals.goal.clone().unwrap_or_else(|| "(no goal set)".into());
-        for l in
-            crate::chat::text::wrap_line(Line::from(Span::styled(goal, t.fg(Token::Fg))), w, &[])
-                .into_iter()
-                .take(3)
-        {
+        for l in wrap_line(
+            Line::from(Span::styled(sanitize(&goal), t.fg(Token::Fg))),
+            w,
+            &[],
+        ) {
             lines.push((None, l));
         }
         lines.push((
@@ -441,6 +509,8 @@ impl GoalBar {
             ),
         ));
         self.owners = goals.tasks.iter().map(|t| t.owner.clone()).collect();
+        let indent = [Span::raw("  ")];
+        let mut focused_rows = None;
         for (i, task) in goals.tasks.iter().enumerate() {
             let (glyph, token) = task.status.glyph(&self.spinner);
             let focused = hits.is_focused(&ElementId::from(task_id(i)));
@@ -459,14 +529,15 @@ impl GoalBar {
             } else {
                 t.fg(Token::Fg)
             };
-            lines.push((
-                Some(i),
-                Line::from(vec![
-                    Span::styled(format!("{glyph} "), t.fg(token)),
-                    Span::styled(truncate(&task.title, w.saturating_sub(2)), title_style),
-                ])
-                .patch_style(row_style),
-            ));
+            let first = lines.len();
+            // Titles and owners wrap under the glyph, so they show in full.
+            let title = Line::from(vec![
+                Span::styled(format!("{glyph} "), t.fg(token)),
+                Span::styled(sanitize(&task.title), title_style),
+            ]);
+            for l in wrap_line(title, w, &indent) {
+                lines.push((Some(i), l.patch_style(row_style)));
+            }
             if let Some(n) = task.owner.as_ref().and_then(|o| run.node(o)) {
                 let mut parts: Vec<Span<'static>> = Vec::new();
                 let who: Vec<String> = [
@@ -477,22 +548,39 @@ impl GoalBar {
                 .flatten()
                 .collect();
                 parts.push(Span::styled(
-                    format!("  {}", who.join(" · ")),
+                    format!("  {}", sanitize(&who.join(" · "))),
                     t.fg(Token::Muted),
                 ));
                 if let Some(h) = &n.host {
-                    parts.push(Span::styled(format!(" · ⧉{h}"), t.fg(Token::Running)));
+                    parts.push(Span::styled(
+                        format!(" · ⧉{}", sanitize(h)),
+                        t.fg(Token::Running),
+                    ));
                 }
-                lines.push((
-                    Some(i),
-                    crate::chat::text::truncate_line(Line::from(parts), w).patch_style(row_style),
-                ));
+                for l in wrap_line(Line::from(parts), w, &indent) {
+                    lines.push((Some(i), l.patch_style(row_style)));
+                }
+            }
+            if focused {
+                focused_rows = Some((first, lines.len()));
             }
         }
         let h = usize::from(inner.height);
+        self.rows = lines.len();
+        self.view = h;
+        // Keyboard focus moved to a task outside the view: scroll to it.
+        if let Some((a, b)) = focused_rows {
+            if a < self.scroll {
+                self.scroll = a;
+            } else if b > self.scroll + h {
+                self.scroll = b.saturating_sub(h).min(a);
+            }
+        }
+        self.scroll = self.scroll.min(self.rows.saturating_sub(h));
+        hits.register_pane(GOALBAR_PANE, inner);
         let mut out = Vec::new();
         let mut rows: Vec<(usize, u16)> = Vec::new();
-        for (row, (task, line)) in lines.into_iter().take(h).enumerate() {
+        for (row, (task, line)) in lines.into_iter().skip(self.scroll).take(h).enumerate() {
             if let Some(i) = task {
                 rows.push((i, row as u16));
             }
@@ -513,6 +601,22 @@ impl GoalBar {
                 i,
             );
             k += 1;
+        }
+        // Where the view is, on the bottom border, when it scrolls.
+        if self.rows > h && h > 0 {
+            let pos = format!(
+                " {}-{}/{} ",
+                self.scroll + 1,
+                (self.scroll + h).min(self.rows),
+                self.rows
+            );
+            let pw = crate::chat::text::width(&pos) as u16;
+            if area.width > pw + 2 {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(pos, t.fg(Token::Muted))),
+                    Rect::new(area.right() - pw - 1, area.bottom() - 1, pw, 1),
+                );
+            }
         }
         frame.render_widget(Paragraph::new(out), inner);
         self.interaction.end_frame(hits);
@@ -682,6 +786,65 @@ mod tests {
         assert_eq!(b.handle(&key("esc")), Some(GoalBarOutput::Back));
     }
 
+    /// A pane too short for the goal and tasks scrolls by wheel and keys,
+    /// shows where it is, and keyboard focus scrolls to the focused task;
+    /// long titles wrap instead of being cut.
+    #[test]
+    fn a_tall_board_scrolls_by_wheel_and_keys_and_long_titles_wrap() {
+        let mut b = EventBuilder::new();
+        b.start(NodeSpec::step("main").agent("implementer"));
+        let long = "Reproduce the parser failure with a long title that wraps_end";
+        let todos: Vec<Value> = (0..12)
+            .map(|i| json!({"id": i.to_string(), "content": format!("{long}_{i}"), "status": "pending"}))
+            .collect();
+        todo(&mut b, "main", "t1", Value::Array(todos));
+        let mut g = Goals::new();
+        for e in b.events() {
+            g.apply(e);
+        }
+        let run = RunState::from_events(b.events());
+        let mut bar = bar();
+        let (term, pane) = draw(&mut bar, &g, &run, 120);
+        let pane = pane.unwrap();
+        let text = buffer_text(term.backend().buffer());
+        assert!(text.contains("wraps_end_0"), "titles wrap: {text}");
+        assert!(!text.contains('…'), "{text}");
+        assert!(text.contains("/"), "position shown: {text}");
+        assert_eq!(bar.scroll_offset(), 0);
+        // Mouse: the wheel scrolls.
+        bar.handle(&crate::interaction::testing::wheel_down(
+            pane.x + 2,
+            pane.y + 2,
+        ));
+        assert_eq!(bar.scroll_offset(), 3);
+        bar.handle(&crate::interaction::testing::wheel_up(
+            pane.x + 2,
+            pane.y + 2,
+        ));
+        assert_eq!(bar.scroll_offset(), 0);
+        // Keyboard: End, Home, PgDn.
+        bar.handle(&key("end"));
+        let (term, _) = draw(&mut bar, &g, &run, 120);
+        assert!(bar.scroll_offset() > 0);
+        assert!(buffer_text(term.backend().buffer()).contains("wraps_end_11"));
+        bar.handle(&key("home"));
+        assert_eq!(bar.scroll_offset(), 0);
+        bar.handle(&key("pgdn"));
+        assert!(bar.scroll_offset() > 0);
+        bar.handle(&key("home"));
+        // Focus moving to the last task scrolls it into view.
+        bar.focus_first();
+        for _ in 0..11 {
+            bar.handle(&key("down"));
+            draw(&mut bar, &g, &run, 120);
+        }
+        let (term, _) = draw(&mut bar, &g, &run, 120);
+        assert!(
+            buffer_text(term.backend().buffer()).contains("wraps_end_11"),
+            "focused task in view"
+        );
+    }
+
     #[test]
     fn narrow_terminals_collapse_to_a_status_indicator_and_config_and_palette_control_it() {
         let (_, g, _) = run();
@@ -690,6 +853,22 @@ mod tests {
         let ind = b.indicator(&g, 80).unwrap();
         let text: String = ind.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text, "☰ 1/4 Fix parse_header");
+        // The in-progress title is never cut: the status line wraps it.
+        let mut lb = EventBuilder::new();
+        let long = "Fix the header parser so very long values after the colon are kept_end";
+        todo(
+            &mut lb,
+            "main",
+            "t1",
+            json!([{"id": "1", "content": long, "status": "in_progress"}]),
+        );
+        let mut lg = Goals::new();
+        for e in lb.events() {
+            lg.apply(e);
+        }
+        let ind = b.indicator(&lg, 80).unwrap();
+        let text: String = ind.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.ends_with("kept_end"), "{text}");
         assert!(b.indicator(&g, 120).is_none());
         // Width from the config.
         let mut cfg = Config::defaults();

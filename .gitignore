@@ -3,3 +3,4 @@
 *.pending-snap
 *.snap.new
 .DS_Store
+__pycache__/

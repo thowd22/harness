@@ -17,6 +17,12 @@
 //! requests. For a batch, `Y` approves all remaining once and `N` denies
 //! them; Esc denies everything still open. Every button is clickable.
 //!
+//! Nothing is cut: the subject, rule and buttons wrap inside the card. A
+//! long preview shows [`PREVIEW_LINES`] lines and a `… N more lines`
+//! button (`e` or a click shows all, again collapses). When the cards are
+//! taller than their area, a hint row says so and PageUp/PageDown,
+//! Home/End or the wheel scroll them.
+//!
 //! [`ApprovalQueue`] takes `harness_policy::approvals::PromptEnvelope`s from
 //! `ChannelUi`'s receiver and replies on the envelope once every request in
 //! the batch has an answer. [`IniConfirm`] is the separate confirmation
@@ -40,12 +46,16 @@ use tokio::sync::oneshot;
 
 use crate::cards::{diff_lines, parse_unified};
 use crate::chat::highlight;
-use crate::chat::text::{line_width, right_align, sanitize, truncate_line, width};
+use crate::chat::text::{
+    line_width, right_align, sanitize, take_wrap_marker, width, wrap_line, wrap_text,
+};
 use crate::interaction::{ElementId, HitMap};
 use crate::theme::{Theme, Token};
 
 /// Diff preview lines shown before `… N more lines`.
 pub const PREVIEW_LINES: usize = 12;
+/// Scroll pane id of the approval cards (the wheel scrolls them).
+pub const APPROVAL_PANE: &str = "approvals";
 
 /// Buttons of the approval cards.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +74,8 @@ pub enum ApprovalAction {
     AllDeny,
     /// Answer the ini rule confirmation.
     ConfirmIni(bool),
+    /// Show all (or collapse) request `n`'s preview.
+    Preview(usize),
 }
 
 /// Result of an approval event.
@@ -88,6 +100,12 @@ pub struct ApprovalPanel {
     prompt: ApprovalPrompt,
     answers: Vec<Option<ApprovalAnswer>>,
     focus: usize,
+    /// Previews shown in full.
+    expanded: Vec<bool>,
+    /// First row shown after a manual scroll; `None` follows the focus.
+    top: Option<usize>,
+    /// First row and largest first row of the last frame.
+    last: std::cell::Cell<(usize, usize)>,
 }
 
 fn deny(reason: &str) -> ApprovalAnswer {
@@ -104,7 +122,17 @@ impl ApprovalPanel {
             prompt,
             answers: vec![None; n],
             focus: 0,
+            expanded: vec![false; n],
+            top: None,
+            last: std::cell::Cell::new((0, 0)),
         }
+    }
+
+    /// Scrolls the cards by `lines` rows (the wheel, PageUp/PageDown).
+    pub fn scroll(&mut self, lines: i32) {
+        let (skip, max) = self.last.get();
+        let base = self.top.unwrap_or(skip) as i64;
+        self.top = Some((base + i64::from(lines)).clamp(0, max as i64) as usize);
     }
 
     /// The prompt.
@@ -170,6 +198,7 @@ impl ApprovalPanel {
         };
         *slot = Some(answer);
         self.focus = i;
+        self.top = None;
         self.done()
     }
 
@@ -199,6 +228,13 @@ impl ApprovalPanel {
             }
             ApprovalAction::AllDeny => self.answer_all(deny("denied by user")),
             ApprovalAction::ConfirmIni(_) => ApprovalOutcome::Ignored,
+            ApprovalAction::Preview(i) => match self.expanded.get_mut(i) {
+                Some(e) => {
+                    *e = !*e;
+                    ApprovalOutcome::Changed
+                }
+                None => ApprovalOutcome::Ignored,
+            },
         }
     }
 
@@ -219,13 +255,33 @@ impl ApprovalPanel {
             KeyCode::Char('n') => self.activate(ApprovalAction::Deny(i)),
             KeyCode::Char('Y') if n > 1 => self.activate(ApprovalAction::AllOnce),
             KeyCode::Char('N') if n > 1 => self.activate(ApprovalAction::AllDeny),
+            KeyCode::Char('e') => self.activate(ApprovalAction::Preview(i)),
             KeyCode::Esc => self.answer_all(deny("dismissed")),
             KeyCode::Up if n > 1 => {
                 self.focus = (self.focus + n - 1) % n;
+                self.top = None;
                 ApprovalOutcome::Changed
             }
             KeyCode::Down if n > 1 => {
                 self.focus = (self.focus + 1) % n;
+                self.top = None;
+                ApprovalOutcome::Changed
+            }
+            KeyCode::PageUp | KeyCode::PageDown => {
+                let page = 5;
+                self.scroll(if key.code == KeyCode::PageUp {
+                    -page
+                } else {
+                    page
+                });
+                ApprovalOutcome::Changed
+            }
+            KeyCode::Home => {
+                self.top = Some(0);
+                ApprovalOutcome::Changed
+            }
+            KeyCode::End => {
+                self.top = Some(self.last.get().1);
                 ApprovalOutcome::Changed
             }
             _ => ApprovalOutcome::Ignored,
@@ -243,37 +299,37 @@ impl ApprovalPanel {
         let mut buttons = Vec::new();
         let n = self.prompt.requests.len();
         if n > 1 {
-            let mut spans = vec![Span::styled(
-                format!("⏸ {n} approvals · {} open  ", self.open_count()),
-                theme.fg(Token::Approval).add_modifier(Modifier::BOLD),
-            )];
-            push_button(
-                &mut spans,
-                &mut buttons,
-                lines.len(),
-                "[Y] approve all once",
-                ApprovalAction::AllOnce,
-                Token::Ok,
-                theme,
-                focused_el,
-            );
-            spans.push(Span::raw("  "));
-            push_button(
-                &mut spans,
-                &mut buttons,
-                lines.len(),
-                "[N] deny all",
-                ApprovalAction::AllDeny,
-                Token::Error,
-                theme,
-                focused_el,
-            );
-            lines.push(Line::from(spans));
+            let items = vec![
+                Item::Text(Span::styled(
+                    format!("⏸ {n} approvals · {} open", self.open_count()),
+                    theme.fg(Token::Approval).add_modifier(Modifier::BOLD),
+                )),
+                button(
+                    "[Y] approve all once",
+                    ApprovalAction::AllOnce,
+                    Token::Ok,
+                    theme,
+                    focused_el,
+                ),
+                button(
+                    "[N] deny all",
+                    ApprovalAction::AllDeny,
+                    Token::Error,
+                    theme,
+                    focused_el,
+                ),
+            ];
+            let (l, b) = flow(items, width.max(1));
+            buttons.extend(b.into_iter().map(|mut b| {
+                b.row += lines.len();
+                b
+            }));
+            lines.extend(l);
         }
         for (i, r) in self.prompt.requests.iter().enumerate() {
             let focused = i == self.focus;
             match &self.answers[i] {
-                Some(a) => lines.push(answered_line(r, a, theme, width)),
+                Some(a) => lines.extend(answered_line(r, a, theme, width)),
                 None => self.request_lines(
                     i,
                     r,
@@ -318,69 +374,113 @@ impl ApprovalPanel {
             }
             Action::Tool { name } => (name.clone(), None),
         };
-        let left = vec![
+        let subject_token = if path.is_some() {
+            Token::Path
+        } else {
+            Token::Fg
+        };
+        let why = if r.verdict.outward {
+            "outward action".to_owned()
+        } else {
+            r.verdict.rule.reason.clone()
+        };
+        let head = vec![
             Span::styled("╭ ", border),
             Span::styled("⏸ approve ", theme.fg(Token::Approval)),
             Span::styled(
                 r.action.tool().to_owned(),
                 theme.fg(Token::Accent).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                format!("  {}", sanitize(&subject)),
-                theme.fg(if path.is_some() {
-                    Token::Path
-                } else {
-                    Token::Fg
-                }),
-            ),
-            Span::styled(" ", border),
         ];
-        let why = if r.verdict.outward {
-            "outward action".to_owned()
-        } else {
-            r.verdict.rule.reason.clone()
-        };
+        let subject = Span::styled(format!("  {}", sanitize(&subject)), theme.fg(subject_token));
+        let why_span = Span::styled(sanitize(&why), theme.fg(Token::Approval));
+        let mut left = head.clone();
+        left.push(subject.clone());
+        left.push(Span::styled(" ", border));
         let right = vec![
             Span::styled(" ", border),
-            Span::styled(truncate_str(&why, 30), theme.fg(Token::Approval)),
+            why_span.clone(),
             Span::styled(" ╮", border),
         ];
-        let mut block = vec![right_align(
-            Line::from(left),
-            right,
-            width,
-            Span::styled("─", border),
-        )];
-        let boxed = |l: Line<'static>| -> Line<'static> {
-            let l = truncate_line(l, inner);
-            let w = line_width(&l);
-            let mut spans = vec![Span::styled("│ ", border)];
-            spans.extend(l.spans);
-            spans.push(Span::raw(" ".repeat(inner.saturating_sub(w))));
-            spans.push(Span::styled(" │", border));
-            Line::from(spans)
+        let fill = Span::styled("─", border);
+        let one_row = line_width(&Line::from(left.clone()))
+            + right
+                .iter()
+                .map(|s| crate::chat::text::width(&s.content))
+                .sum::<usize>()
+            <= width;
+        // Rows inside the box: wrapped, the soft-wrap marker kept first.
+        let boxed = |l: Line<'static>| -> Vec<Line<'static>> {
+            wrap_line(l, inner.max(1), &[])
+                .into_iter()
+                .map(|mut l| {
+                    let marker = take_wrap_marker(&mut l);
+                    let w = line_width(&l);
+                    let mut spans: Vec<Span<'static>> = marker.into_iter().collect();
+                    spans.push(Span::styled("│ ", border));
+                    spans.extend(l.spans);
+                    spans.push(Span::raw(" ".repeat(inner.saturating_sub(w))));
+                    spans.push(Span::styled(" │", border));
+                    Line::from(spans)
+                })
+                .collect()
         };
+        let mut block = Vec::new();
+        if one_row {
+            block.push(right_align(Line::from(left), right, width, fill));
+        } else {
+            // The subject and reason move into the box, wrapped.
+            let mut h = head.clone();
+            h.push(Span::styled(" ", border));
+            let fits = line_width(&Line::from(h.clone())) + 2 <= width;
+            let h = if fits {
+                h
+            } else {
+                vec![Span::styled("╭", border)]
+            };
+            block.push(right_align(
+                Line::from(h),
+                vec![Span::styled(" ╮", border)],
+                width,
+                fill,
+            ));
+            if !fits {
+                let mut t = head[1..].to_vec();
+                t.push(subject.clone());
+                block.extend(boxed(Line::from(t)));
+            } else {
+                block.extend(boxed(Line::from(Span::styled(
+                    sanitize(&subject.content).trim_start().to_owned(),
+                    subject.style,
+                ))));
+            }
+            block.extend(boxed(Line::from(why_span)));
+        }
         // Matching rule.
         let rule = &r.verdict.rule;
         let layer = format!("{:?}", rule.layer).to_lowercase();
         let mut rule_spans = vec![
             Span::styled("rule: ", theme.fg(Token::Muted)),
-            Span::styled(format!("{layer} · {}", rule.origin), theme.fg(Token::Muted)),
+            Span::styled(
+                format!("{layer} · {}", sanitize(&rule.origin)),
+                theme.fg(Token::Muted),
+            ),
         ];
         if !rule.rule.is_empty() {
             rule_spans.push(Span::styled(
-                format!(": {}", rule.rule),
+                format!(": {}", sanitize(&rule.rule)),
                 theme.fg(Token::Fg),
             ));
         }
         if !rule.reason.is_empty() && rule.reason != why {
             rule_spans.push(Span::styled(
-                format!(" ({})", rule.reason),
+                format!(" ({})", sanitize(&rule.reason)),
                 theme.fg(Token::Muted),
             ));
         }
-        block.push(boxed(Line::from(rule_spans)));
+        block.extend(boxed(Line::from(rule_spans)));
         // Preview: a diff for writes and edits, text otherwise.
+        let mut extra: Vec<Button> = Vec::new();
         if let Some(p) = &r.preview {
             let rows = parse_unified(p);
             let is_diff = rows
@@ -398,71 +498,82 @@ impl ApprovalPanel {
                     .collect()
             };
             let total = preview.len();
-            for l in preview.into_iter().take(PREVIEW_LINES) {
-                block.push(boxed(l));
+            let all = self.expanded.get(i).copied().unwrap_or(false);
+            let shown = if all { total } else { PREVIEW_LINES };
+            for l in preview.into_iter().take(shown) {
+                block.extend(boxed(l));
             }
             if total > PREVIEW_LINES {
-                block.push(boxed(Line::from(Span::styled(
-                    format!("… {} more lines", total - PREVIEW_LINES),
-                    theme.fg(Token::Muted),
-                ))));
+                let label = if all {
+                    "▴ show less (e)".to_owned()
+                } else {
+                    format!(
+                        "… {} more lines · e or click to show all",
+                        total - PREVIEW_LINES
+                    )
+                };
+                let action = ApprovalAction::Preview(i);
+                let mut st = theme.fg(Token::Link);
+                if focused_el.is_some_and(|f| f.0 == button_id(action)) {
+                    st = st.patch(theme.focused());
+                }
+                let rows = boxed(Line::from(Span::styled(label, st)));
+                extra.push(Button {
+                    row: lines.len() + block.len(),
+                    x: 2,
+                    w: inner,
+                    h: rows.len(),
+                    action,
+                });
+                block.extend(rows);
             }
         }
         // Buttons.
-        let row = lines.len() + block.len();
-        let mut spans = Vec::new();
-        let mut btns = Vec::new();
-        push_button(
-            &mut spans,
-            &mut btns,
-            row,
+        let mut items = vec![button(
             "[y] once",
             ApprovalAction::Once(i),
             Token::Ok,
             theme,
             focused_el,
-        );
+        )];
         if let Some(pat) = &r.suggested_pattern {
-            spans.push(Span::raw("  "));
-            push_button(
-                &mut spans,
-                &mut btns,
-                row,
-                &format!("[s] session: {pat}"),
+            items.push(button(
+                &format!("[s] session: {}", sanitize(pat)),
                 ApprovalAction::Session(i),
                 Token::Ok,
                 theme,
                 focused_el,
-            );
-            spans.push(Span::raw("  "));
-            push_button(
-                &mut spans,
-                &mut btns,
-                row,
+            ));
+            items.push(button(
                 "[a] always",
                 ApprovalAction::Always(i),
                 Token::Warn,
                 theme,
                 focused_el,
-            );
+            ));
         }
-        spans.push(Span::raw("  "));
-        push_button(
-            &mut spans,
-            &mut btns,
-            row,
+        items.push(button(
             "[n] deny",
             ApprovalAction::Deny(i),
             Token::Error,
             theme,
             focused_el,
-        );
-        spans.push(Span::styled("  esc denies all", theme.fg(Token::Muted)));
-        for b in &mut btns {
+        ));
+        items.push(Item::Text(Span::styled(
+            "esc denies all",
+            theme.fg(Token::Muted),
+        )));
+        let (rows, btns) = flow(items, inner.max(1));
+        let base = lines.len() + block.len();
+        buttons.extend(extra);
+        buttons.extend(btns.into_iter().map(|mut b| {
+            b.row += base;
             b.x += 2; // inside "│ "
+            b
+        }));
+        for l in rows {
+            block.extend(boxed(l));
         }
-        buttons.extend(btns);
-        block.push(boxed(Line::from(spans)));
         block.push(Line::from(vec![
             Span::styled("╰", border),
             Span::styled("─".repeat(width.saturating_sub(2)), border),
@@ -488,15 +599,28 @@ impl ApprovalPanel {
     ) {
         let focused_el = self.focused_element(hits);
         let (lines, buttons) = self.layout(area.width as usize, theme, focused_el.as_ref());
-        let h = area.height as usize;
-        // Keep the focused request's buttons visible.
+        let total = lines.len();
+        // Too tall: the last row says how to see the rest.
+        let over = total > area.height as usize && area.height > 1;
+        let h = if over {
+            area.height as usize - 1
+        } else {
+            area.height as usize
+        };
+        let max = total.saturating_sub(h);
+        // Keep the focused request's buttons visible unless scrolled.
         let focus_row = buttons
             .iter()
             .find(|b| b.action == ApprovalAction::Once(self.focus))
             .map_or(0, |b| b.row);
-        let skip = (focus_row + 2).saturating_sub(h);
+        let auto = (focus_row + 2).saturating_sub(h).min(max);
+        let skip = self.top.map_or(auto, |t| t.min(max));
+        self.last.set((skip, max));
+        hits.register_pane(APPROVAL_PANE, area);
         for b in &buttons {
-            if b.row < skip || b.row >= skip + h {
+            let top = b.row.max(skip);
+            let bottom = (b.row + b.h).min(skip + h);
+            if bottom <= top {
                 continue;
             }
             let x = area.x + b.x as u16;
@@ -507,14 +631,27 @@ impl ApprovalPanel {
                 b.id(),
                 Rect::new(
                     x,
-                    area.y + (b.row - skip) as u16,
+                    area.y + (top - skip) as u16,
                     (b.w as u16).min(area.right() - x),
-                    1,
+                    (bottom - top) as u16,
                 ),
                 wrap(b.action),
             );
         }
-        let visible: Vec<Line<'static>> = lines.into_iter().skip(skip).take(h).collect();
+        let mut visible: Vec<Line<'static>> = lines.into_iter().skip(skip).take(h).collect();
+        if over {
+            let pos = format!("↕ {}-{}/{}", skip + 1, skip + h, total);
+            let aw = area.width as usize;
+            let hint = [
+                format!("{pos} · pgup/pgdn or wheel to scroll"),
+                format!("{pos} · pgup/pgdn"),
+                pos,
+            ]
+            .into_iter()
+            .find(|t| width(t) <= aw)
+            .unwrap_or_default();
+            visible.push(Line::from(Span::styled(hint, theme.fg(Token::Muted))));
+        }
         frame.render_widget(Paragraph::new(visible).style(theme.base()), area);
     }
 
@@ -527,6 +664,7 @@ impl ApprovalPanel {
                 ApprovalAction::Session(i),
                 ApprovalAction::Always(i),
                 ApprovalAction::Deny(i),
+                ApprovalAction::Preview(i),
             ]);
         }
         candidates
@@ -536,16 +674,12 @@ impl ApprovalPanel {
     }
 }
 
-fn truncate_str(s: &str, max: usize) -> String {
-    crate::chat::text::truncate(s, max)
-}
-
 fn answered_line(
     r: &ApprovalRequest,
     a: &ApprovalAnswer,
     theme: &Theme,
     width: usize,
-) -> Line<'static> {
+) -> Vec<Line<'static>> {
     let (icon, text, token) = match a {
         ApprovalAnswer::Approve(ApprovalScope::Once) => {
             ('✔', "approved once".to_owned(), Token::Ok)
@@ -558,14 +692,110 @@ fn answered_line(
         }
         ApprovalAnswer::Deny { .. } => ('✗', "denied".to_owned(), Token::Error),
     };
-    truncate_line(
+    wrap_line(
         Line::from(vec![
             Span::styled(format!("{icon} "), theme.fg(token)),
             Span::styled(sanitize(&r.action.summary()), theme.fg(Token::Muted)),
-            Span::styled(format!(" · {text}"), theme.fg(token)),
+            Span::styled(format!(" · {}", sanitize(&text)), theme.fg(token)),
         ]),
-        width,
+        width.max(1),
+        &[Span::raw("  ")],
     )
+}
+
+/// A piece of a row of buttons.
+enum Item {
+    /// Plain text.
+    Text(Span<'static>),
+    /// A button.
+    Button(Span<'static>, ApprovalAction),
+}
+
+fn button(
+    label: &str,
+    action: ApprovalAction,
+    token: Token,
+    theme: &Theme,
+    focused: Option<&ElementId>,
+) -> Item {
+    let mut style: Style = theme.fg(token).add_modifier(Modifier::BOLD);
+    if focused.is_some_and(|f| f.0 == button_id(action)) {
+        style = style.patch(theme.focused());
+    }
+    Item::Button(Span::styled(label.to_owned(), style), action)
+}
+
+/// Lays `items` out left to right, two cells apart, onto as many rows of
+/// `width` as they need. An item wider than a row wraps on rows of its
+/// own. Returns the rows and the buttons (rows relative to the first).
+fn flow(items: Vec<Item>, width: usize) -> (Vec<Line<'static>>, Vec<Button>) {
+    let mut rows: Vec<Vec<Span<'static>>> = vec![Vec::new()];
+    let mut used = 0usize;
+    let mut buttons = Vec::new();
+    for item in items {
+        let (span, action) = match item {
+            Item::Text(s) => (s, None),
+            Item::Button(s, a) => (s, Some(a)),
+        };
+        let w = crate::chat::text::width(&span.content);
+        if w > width {
+            if used > 0 {
+                rows.push(Vec::new());
+            }
+            let parts = wrap_text(&span.content, width);
+            let row = rows.len() - 1;
+            let n = parts.len();
+            for (k, p) in parts.into_iter().enumerate() {
+                if k > 0 {
+                    rows.push(Vec::new());
+                }
+                rows.last_mut()
+                    .expect("a row")
+                    .push(Span::styled(p, span.style));
+            }
+            if let Some(action) = action {
+                buttons.push(Button {
+                    row,
+                    x: 0,
+                    w: width,
+                    h: n,
+                    action,
+                });
+            }
+            rows.push(Vec::new());
+            used = 0;
+            continue;
+        }
+        if used > 0 && used + 2 + w > width {
+            rows.push(Vec::new());
+            used = 0;
+        }
+        if used > 0 {
+            // Text takes its gap in its own style (buttons have plain gaps).
+            let gap = if action.is_some() {
+                Span::raw("  ")
+            } else {
+                Span::styled("  ", span.style)
+            };
+            rows.last_mut().expect("a row").push(gap);
+            used += 2;
+        }
+        if let Some(action) = action {
+            buttons.push(Button {
+                row: rows.len() - 1,
+                x: used,
+                w,
+                h: 1,
+                action,
+            });
+        }
+        rows.last_mut().expect("a row").push(span);
+        used += w;
+    }
+    if rows.len() > 1 && rows.last().is_some_and(Vec::is_empty) {
+        rows.pop();
+    }
+    (rows.into_iter().map(Line::from).collect(), buttons)
 }
 
 #[derive(Debug, Clone)]
@@ -573,6 +803,8 @@ struct Button {
     row: usize,
     x: usize,
     w: usize,
+    /// Rows (a label wider than a row wraps).
+    h: usize,
     action: ApprovalAction,
 }
 
@@ -593,32 +825,8 @@ pub fn button_id(a: ApprovalAction) -> String {
         ApprovalAction::AllDeny => "approval.all.deny".into(),
         ApprovalAction::ConfirmIni(true) => "approval.ini.yes".into(),
         ApprovalAction::ConfirmIni(false) => "approval.ini.no".into(),
+        ApprovalAction::Preview(i) => format!("approval.{i}.preview"),
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn push_button(
-    spans: &mut Vec<Span<'static>>,
-    buttons: &mut Vec<Button>,
-    row: usize,
-    label: &str,
-    action: ApprovalAction,
-    token: Token,
-    theme: &Theme,
-    focused: Option<&ElementId>,
-) {
-    let x: usize = spans.iter().map(|s| width(&s.content)).sum();
-    let mut style: Style = theme.fg(token).add_modifier(Modifier::BOLD);
-    if focused.is_some_and(|f| f.0 == button_id(action)) {
-        style = style.patch(theme.focused());
-    }
-    spans.push(Span::styled(label.to_owned(), style));
-    buttons.push(Button {
-        row,
-        x,
-        w: width(label),
-        action,
-    });
 }
 
 type Reply = oneshot::Sender<Vec<(String, ApprovalAnswer)>>;
@@ -682,6 +890,13 @@ impl ApprovalQueue {
         self.settle(out)
     }
 
+    /// Scrolls the current prompt's cards by `lines` rows.
+    pub fn scroll(&mut self, lines: i32) {
+        if let Some((panel, _)) = self.queue.front_mut() {
+            panel.scroll(lines);
+        }
+    }
+
     /// Runs a clicked button of the current prompt.
     pub fn activate(&mut self, action: ApprovalAction) -> ApprovalOutcome {
         let Some((panel, _)) = self.queue.front_mut() else {
@@ -741,7 +956,42 @@ impl IniConfirm {
         }
     }
 
-    /// Draws the one-line confirmation with clickable yes / no buttons.
+    fn rows(
+        &self,
+        width: usize,
+        theme: &Theme,
+        focused: Option<&ElementId>,
+    ) -> (Vec<Line<'static>>, Vec<Button>) {
+        let items = vec![
+            Item::Text(Span::styled(
+                format!("⏸ {}", sanitize(&self.question())),
+                theme.fg(Token::Approval),
+            )),
+            button(
+                "[y] yes",
+                ApprovalAction::ConfirmIni(true),
+                Token::Ok,
+                theme,
+                focused,
+            ),
+            button(
+                "[n] no",
+                ApprovalAction::ConfirmIni(false),
+                Token::Error,
+                theme,
+                focused,
+            ),
+        ];
+        flow(items, width.max(1))
+    }
+
+    /// Rows the confirmation needs at `width` (the question wraps).
+    pub fn height(&self, width: u16) -> u16 {
+        self.rows(width as usize, &Theme::default(), None).0.len() as u16
+    }
+
+    /// Draws the confirmation, wrapped to [`IniConfirm::height`] rows, with
+    /// clickable yes / no buttons.
     pub fn render<A: Clone>(
         &self,
         frame: &mut Frame<'_>,
@@ -750,49 +1000,29 @@ impl IniConfirm {
         hits: &mut HitMap<A>,
         wrap: &dyn Fn(ApprovalAction) -> A,
     ) {
-        let mut spans = vec![Span::styled(
-            format!("⏸ {}  ", self.question()),
-            theme.fg(Token::Approval),
-        )];
-        let mut buttons = Vec::new();
         let focused = [true, false]
             .into_iter()
             .map(|b| ElementId(button_id(ApprovalAction::ConfirmIni(b))))
             .find(|id| hits.is_focused(id));
-        push_button(
-            &mut spans,
-            &mut buttons,
-            0,
-            "[y] yes",
-            ApprovalAction::ConfirmIni(true),
-            Token::Ok,
-            theme,
-            focused.as_ref(),
-        );
-        spans.push(Span::raw("  "));
-        push_button(
-            &mut spans,
-            &mut buttons,
-            0,
-            "[n] no",
-            ApprovalAction::ConfirmIni(false),
-            Token::Error,
-            theme,
-            focused.as_ref(),
-        );
+        let (lines, buttons) = self.rows(area.width as usize, theme, focused.as_ref());
         for b in buttons {
             let x = area.x + b.x as u16;
-            if x < area.right() {
+            let y = area.y + b.row as u16;
+            if x < area.right() && y < area.bottom() {
                 hits.register_button(
                     b.id(),
-                    Rect::new(x, area.y, (b.w as u16).min(area.right() - x), 1),
+                    Rect::new(
+                        x,
+                        y,
+                        (b.w as u16).min(area.right() - x),
+                        (b.h as u16).min(area.bottom() - y),
+                    ),
                     wrap(b.action),
                 );
             }
         }
         frame.render_widget(
-            Paragraph::new(truncate_line(Line::from(spans), area.width as usize))
-                .style(theme.bg(Token::CardApproval)),
+            Paragraph::new(lines).style(theme.bg(Token::CardApproval)),
             area,
         );
     }

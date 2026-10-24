@@ -38,7 +38,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use time::OffsetDateTime;
 
-use crate::chat::text::{cache_pct, fmt_cost, fmt_ms, fmt_tokens, truncate};
+use crate::chat::text::{cache_pct, fmt_cost, fmt_ms, fmt_tokens, sanitize, truncate, wrap_line};
 use crate::indicators::{Spinner, node_glyph};
 use crate::interaction::{Dispatch, ElementId, HitMap, Interaction, PaneId};
 use crate::layout::{BoxKind, Canvas, Density, GraphLayout, LayoutCache};
@@ -56,9 +56,6 @@ pub const MAP_PANE: &str = "map";
 pub const LIVE_PANE: &str = "map.live";
 /// Element id of the live pane's close button.
 pub const LIVE_CLOSE_ID: &str = "map.live.close";
-
-/// Narrowest the run name in the map header gets before the metrics are cut.
-const MIN_HEADER_NAME: usize = 12;
 
 /// Element id of a node on the map.
 pub fn node_element_id(id: &NodeId) -> String {
@@ -530,16 +527,22 @@ impl MapView {
     }
 
     /// Renders the map (header, graph, optional live pane) into `area`.
+    /// The header wraps onto more rows when it does not fit. When the
+    /// selected node's box cuts any of its text, an info line under the
+    /// graph shows all of it, wrapped, with how to open its detail.
     pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect, now: OffsetDateTime) {
         self.frames += 1;
         let theme = self.cfg.theme.clone();
         let mut hits = self.interaction.begin_frame();
-        let [header, body] =
-            Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
-        frame.render_widget(
-            Paragraph::new(self.header_line(&theme, now, header.width)),
-            header,
+        let head_lines = wrap_line(
+            self.header_line(&theme, now),
+            usize::from(area.width).max(1),
+            &[Span::raw(" ")],
         );
+        let head_h = (head_lines.len() as u16).min((area.height / 2).max(1));
+        let [header, body] =
+            Layout::vertical([Constraint::Length(head_h), Constraint::Min(1)]).areas(area);
+        frame.render_widget(Paragraph::new(head_lines), header);
         let (graph, live) = if self.live_open && body.height >= 8 {
             let [g, l] = Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)])
                 .areas(body);
@@ -547,15 +550,91 @@ impl MapView {
         } else {
             (body, None)
         };
-        self.render_graph(frame, graph, &theme, now, &mut hits);
+        // A dry run finds out whether the selected node is cut at this size.
+        let mut dry: HitMap<MapAction> = HitMap::new();
+        let cut = self.render_graph(frame, graph, &theme, now, &mut dry);
+        let info = cut
+            .then(|| self.selected_info(&theme, usize::from(graph.width).max(1)))
+            .filter(|l| !l.is_empty() && graph.height > 1);
+        match info {
+            Some(lines) => {
+                // As many rows as it needs, keeping two rows of the graph.
+                // When even that is too few, the last row says the detail
+                // (Enter) has the rest.
+                let ih = (lines.len() as u16).min(graph.height.saturating_sub(2).max(1));
+                let mut lines = lines;
+                if lines.len() > usize::from(ih) {
+                    lines.truncate(usize::from(ih).saturating_sub(1));
+                    lines.push(Line::from(Span::styled(
+                        "  … more: Enter opens the detail",
+                        theme.fg(Token::Accent),
+                    )));
+                }
+                let [g, i] =
+                    Layout::vertical([Constraint::Min(1), Constraint::Length(ih)]).areas(graph);
+                self.render_graph(frame, g, &theme, now, &mut hits);
+                frame.render_widget(Block::new().style(theme.base()), i);
+                frame.render_widget(Paragraph::new(lines), i);
+            }
+            None => {
+                self.render_graph(frame, graph, &theme, now, &mut hits);
+            }
+        }
         if let Some(l) = live {
             self.render_live(frame, l, &theme, &mut hits);
         }
         self.interaction.end_frame(hits);
     }
 
+    /// Everything about the selected node, wrapped to `width`: its full
+    /// name, agent, model, host, why it is blocked or failed, and the live
+    /// preview, then how to see more.
+    fn selected_info(&self, theme: &Theme, width: usize) -> Vec<Line<'static>> {
+        let Some(n) = self.selected.as_ref().and_then(|s| self.run.node(s)) else {
+            return Vec::new();
+        };
+        let muted = theme.fg(Token::Muted);
+        let (glyph, token) = node_glyph(n.status, &self.spinner);
+        let mut spans = vec![
+            Span::styled(format!("{glyph} "), theme.fg(token)),
+            Span::styled(
+                sanitize(&self.run.node_label(n)),
+                theme.fg(Token::Agent).add_modifier(Modifier::BOLD),
+            ),
+        ];
+        for part in [self.run.node_agent_detail(n), n.model.clone()]
+            .into_iter()
+            .flatten()
+        {
+            spans.push(Span::styled(format!(" · {}", sanitize(&part)), muted));
+        }
+        if let Some(h) = &n.host {
+            spans.push(Span::styled(" · ", muted));
+            spans.extend(self.host_spans(&sanitize(h), theme));
+        }
+        if let Some(b) = blocked(n) {
+            spans.push(Span::styled(
+                format!(" · ⏸ {}", b.short()),
+                theme.fg(Token::Approval),
+            ));
+        } else if let Some(e) = n.error.as_ref().and_then(|e| e.lines().next()) {
+            spans.push(Span::styled(
+                format!(" · {}", sanitize(e)),
+                theme.fg(Token::Error),
+            ));
+        } else if let Some(p) = self.preview(n, theme) {
+            spans.push(Span::styled(" · ", muted));
+            spans.push(p);
+        }
+        spans.push(Span::styled(
+            "  (Enter: detail · Space: live)",
+            theme.fg(Token::Accent),
+        ));
+        wrap_line(Line::from(spans), width, &[Span::raw("  ")])
+    }
+
     /// The map header: the run's name, then its status and metrics.
-    fn header_line(&self, theme: &Theme, now: OffsetDateTime, width: u16) -> Line<'static> {
+    fn header_line(&self, theme: &Theme, now: OffsetDateTime) -> Line<'static> {
         let r = &self.run;
         // An interactive session's run stays open between turns.
         let idle = !r.is_working();
@@ -610,24 +689,15 @@ impl MapView {
         if let Some(h) = hosts.first() {
             spans.push(Span::styled(format!("  ⧉ {h}"), theme.fg(Token::Running)));
         }
-        // Status, cost and waiting come first: the run's name gets the
-        // room left over, so a long title is cut instead of them.
-        let rest: usize = spans
-            .iter()
-            .map(|s| crate::chat::text::width(&s.content))
-            .sum();
-        let room = usize::from(width)
-            .saturating_sub(rest + 2)
-            .max(MIN_HEADER_NAME);
-        let name = crate::chat::text::truncate(&r.label(), room);
+        // The run's name first; the line wraps when it does not fit.
         spans.insert(
             0,
             Span::styled(
-                format!(" {name} "),
+                format!(" {} ", sanitize(&r.label())),
                 theme.fg(Token::Agent).add_modifier(Modifier::BOLD),
             ),
         );
-        crate::chat::text::truncate_line(Line::from(spans), usize::from(width))
+        Line::from(spans)
     }
 
     fn render_graph(
@@ -637,7 +707,7 @@ impl MapView {
         theme: &Theme,
         now: OffsetDateTime,
         hits: &mut HitMap<MapAction>,
-    ) {
+    ) -> bool {
         hits.register_pane(MAP_PANE, area);
         self.last_view = area;
         if self.run.nodes.is_empty() {
@@ -648,7 +718,7 @@ impl MapView {
                 ))),
                 area,
             );
-            return;
+            return false;
         }
         self.density = self.choose_density(area);
         let density = self.density;
@@ -683,6 +753,7 @@ impl MapView {
         for e in &layout.edges {
             c.path(&e.points, edge, e.arrow);
         }
+        let mut selected_cut = false;
         for b in &layout.boxes {
             if !rects_overlap(b.rect, view) {
                 continue;
@@ -691,12 +762,18 @@ impl MapView {
                 continue;
             };
             let selected = self.selected.as_ref() == Some(&b.id);
-            match (b.kind, density) {
+            let cut = match (b.kind, density) {
                 (BoxKind::Step, Density::Full) => {
                     self.draw_full(&mut c, b.rect, n, selected, theme, now)
                 }
                 _ => self.draw_line(&mut c, b.rect, n, selected, theme, now, b.kind),
-            }
+            };
+            // A box partly outside the view is cut by the view as well.
+            let visible = to_screen(b.rect, view, area).is_some_and(|s| {
+                s.width == b.rect.width.min(area.width)
+                    && s.height == b.rect.height.min(area.height)
+            });
+            selected_cut |= selected && (cut || !visible);
             let screen = to_screen(b.rect, view, area);
             if let Some(s) = screen {
                 hits.register(node_element_id(&b.id), s, MapAction::Select(b.id.clone()));
@@ -713,6 +790,7 @@ impl MapView {
             }
         }
         frame.render_widget(Paragraph::new(c.lines()), area);
+        selected_cut
     }
 
     fn border_style(&self, n: &NodeState, selected: bool, theme: &Theme) -> Style {
@@ -754,11 +832,19 @@ impl MapView {
         selected: bool,
         theme: &Theme,
         now: OffsetDateTime,
-    ) {
+    ) -> bool {
         let bg = if selected {
             theme.focused()
         } else {
             Style::default()
+        };
+        let mut cut = false;
+        let fits = |spans: &[Span<'_>], room: u16| {
+            spans
+                .iter()
+                .map(|s| crate::chat::text::width(&s.content))
+                .sum::<usize>()
+                <= usize::from(room)
         };
         c.fill(r, theme.base().patch(bg));
         c.frame(r, self.border_style(n, selected, theme));
@@ -786,16 +872,16 @@ impl MapView {
         } else {
             w
         };
+        let label = sanitize(&self.run.node_label(n));
+        cut |= (host_w > 0 && name_w == w)
+            || crate::chat::text::width(&label) > usize::from(name_w.saturating_sub(2));
         c.spans(
             x,
             r.y + 1,
             &[
                 Span::styled(format!("{glyph} "), theme.fg(token).patch(bg)),
                 Span::styled(
-                    truncate(
-                        &self.run.node_label(n),
-                        usize::from(name_w.saturating_sub(2)),
-                    ),
+                    truncate(&label, usize::from(name_w.saturating_sub(2))),
                     theme
                         .fg(Token::Agent)
                         .patch(bg)
@@ -823,6 +909,7 @@ impl MapView {
             }
             who.push(Span::styled(m.clone(), muted));
         }
+        cut |= !fits(&who, w);
         c.spans(x, r.y + 2, &who, w);
         let mut stats = Vec::new();
         if let Some(ms) = metrics::elapsed_ms(n, now) {
@@ -848,6 +935,7 @@ impl MapView {
             };
             stats.push(Span::styled(s, theme.fg(t).patch(bg)));
         }
+        cut |= !fits(&stats, w);
         c.spans(x, r.y + 3, &stats, w);
         if let Some((badge, token)) = self.node_badges.get(&n.id) {
             c.spans(
@@ -886,9 +974,11 @@ impl MapView {
             })
         };
         if let Some(s) = last {
-            let text = truncate(&s.content, usize::from(w));
+            cut |= crate::chat::text::width(&s.content) > usize::from(w);
+            let text = truncate(&sanitize(&s.content), usize::from(w));
             c.text(x, r.y + 5, &text, s.style, w);
         }
+        cut
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -901,7 +991,7 @@ impl MapView {
         theme: &Theme,
         now: OffsetDateTime,
         kind: BoxKind,
-    ) {
+    ) -> bool {
         let bg = if selected {
             theme.focused()
         } else {
@@ -916,7 +1006,7 @@ impl MapView {
         let mut spans = vec![
             Span::styled(format!("{glyph} "), theme.fg(token).patch(bg)),
             Span::styled(
-                self.run.node_label(n),
+                sanitize(&self.run.node_label(n)),
                 theme.fg(name_token).patch(bg).add_modifier(Modifier::BOLD),
             ),
         ];
@@ -966,7 +1056,16 @@ impl MapView {
             spans.push(Span::styled(" · ", theme.fg(Token::Muted).patch(bg)));
             spans.push(p.patch_style(bg));
         }
+        let total: usize = spans
+            .iter()
+            .map(|s| crate::chat::text::width(&s.content))
+            .sum();
         c.spans(r.x, r.y, &spans, r.width);
+        // A one-line node leaves out the agent (and the model outside
+        // trees), so its info line shows them.
+        let left_out =
+            n.agent.is_some() || (n.model.is_some() && !matches!(kind, BoxKind::Tree { .. }));
+        total > usize::from(r.width) || left_out
     }
 
     fn render_live(
@@ -980,8 +1079,15 @@ impl MapView {
             .selected
             .as_ref()
             .and_then(|s| self.run.node(s))
-            .map(|n| self.run.node_label(n))
+            .map(|n| sanitize(&self.run.node_label(n)))
             .unwrap_or_default();
+        // The title never runs under the close button: a name that does not
+        // fit is left out (the node box or the info line shows it).
+        let name = if crate::chat::text::width(&name) + 12 <= usize::from(area.width) {
+            name
+        } else {
+            String::new()
+        };
         let focused = hits.is_focused(&ElementId::from(LIVE_CLOSE_ID));
         let block = Block::new()
             .borders(Borders::TOP)

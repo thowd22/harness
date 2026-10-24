@@ -347,6 +347,67 @@ async fn http_errors_map_to_typed_errors_without_retrying_permanent_ones() {
     assert!(!err.to_string().contains("sk-ant-test-key"));
 }
 
+/// The pre-warm call: one non-streaming `max_tokens: 0` request carrying
+/// the real call's tools, system and thinking, then the real call reads
+/// what it wrote.
+#[tokio::test]
+async fn cache_prewarm_sends_a_non_generating_call_first() {
+    let warm = json!({"id": "msg_w", "type": "message", "role": "assistant", "content": [],
+        "stop_reason": "max_tokens", "usage": {"input_tokens": 1, "output_tokens": 0,
+        "cache_creation_input_tokens": 4100, "cache_read_input_tokens": 0}});
+    let mock = Mock::start(vec![
+        Reply::Status(200, warm.to_string()),
+        Reply::Sse(tool_turn()),
+    ])
+    .await;
+    let p = provider(&mock.url);
+    let mut req = ChatRequest::new("claude-opus-5-5");
+    req.system = Some("You are terse.".into());
+    req.tools = vec![ToolSpec {
+        name: "read".into(),
+        description: "read a file".into(),
+        input_schema: json!({"type": "object"}),
+    }];
+    req.thinking = Some(ThinkingConfig {
+        budget_tokens: None,
+        effort: Some(ReasoningEffort::High),
+    });
+    assert!(p.can_prewarm_cache(&req));
+    let usage = p
+        .prewarm_cache(req.clone(), CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!((usage.cache_write_tokens, usage.output_tokens), (4100, 0));
+    req.messages.push(Message::user("read a and b"));
+    let resp = collect(p.stream(req, CancellationToken::new()).await.unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.stop.kind, StopKind::ToolUse);
+
+    let rec = mock.recorded();
+    assert_eq!(rec.len(), 2);
+    let (w, r) = (&rec[0].body, &rec[1].body);
+    assert!(
+        rec[0].head.starts_with("post /v1/messages "),
+        "{}",
+        rec[0].head
+    );
+    assert_eq!(w["stream"], false);
+    assert_eq!(w["max_tokens"], 0);
+    assert_eq!(r["stream"], true);
+    for k in ["model", "tools", "system", "thinking", "output_config"] {
+        assert_eq!(w[k], r[k], "{k} must match the real call");
+    }
+    assert_eq!(w["messages"][0]["content"][0]["text"], "warmup");
+    assert!(
+        w["messages"][0]["content"][0]
+            .get("cache_control")
+            .is_none()
+    );
+    assert!(w["tools"][0].get("cache_control").is_some());
+    assert!(w["system"][0].get("cache_control").is_some());
+}
+
 /// Live smoke test; runs only with `HARNESS_LIVE_ANTHROPIC=1` and
 /// `ANTHROPIC_API_KEY` set.
 #[tokio::test]

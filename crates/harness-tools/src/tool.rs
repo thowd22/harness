@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::exec::StreamKind;
+use crate::tracker::{ReadTracker, StagedReads};
 
 /// Per-call context handed to every tool invocation.
 #[derive(Clone)]
@@ -24,6 +25,10 @@ pub struct ToolContext {
     /// Decides which found paths search tools may show (protected paths
     /// are dropped); `None` shows everything.
     pub read_filter: Option<ReadFilter>,
+    /// When set, read records go here instead of the session's
+    /// [`ReadTracker`] until the caller commits them (speculative calls,
+    /// see [`StagedReads`]). `None` records directly.
+    pub staged_reads: Option<Arc<StagedReads>>,
 }
 
 /// Returns false for an absolute path the agent may not read (see
@@ -38,6 +43,22 @@ impl ToolContext {
             supports_images: false,
             events: Arc::new(NoEvents),
             read_filter: None,
+            staged_reads: None,
+        }
+    }
+
+    /// Hold read records in `stage` instead of applying them directly.
+    pub fn with_staged_reads(mut self, stage: Option<Arc<StagedReads>>) -> Self {
+        self.staged_reads = stage;
+        self
+    }
+
+    /// Record that the model has seen `path` with `hash`: in `tracker`, or
+    /// in the staged reads when this context has them.
+    pub fn record_read(&self, tracker: &Arc<ReadTracker>, path: &std::path::Path, hash: String) {
+        match &self.staged_reads {
+            Some(stage) => stage.record(tracker, path, hash),
+            None => tracker.record(path, hash),
         }
     }
 
@@ -263,6 +284,16 @@ pub enum ToolEvent {
     /// reported with the id of the bash call that started it, also after
     /// that call has returned.
     Job(crate::jobs::JobInfo),
+    /// What a change-tracking wrapper (the change ledger around `bash`)
+    /// found the call changed, sent once before the call returns. The agent
+    /// loop uses it instead of assuming that every successful mutating
+    /// call changed files.
+    WorktreeChanges {
+        /// Changed files that count (not generated artifacts).
+        files: usize,
+        /// Generated build or test artifacts (`__pycache__/`, ...).
+        generated: usize,
+    },
 }
 
 /// What a running tool reports about itself besides output.

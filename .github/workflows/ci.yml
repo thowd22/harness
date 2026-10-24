@@ -98,6 +98,15 @@ jobs:
         # SLOW lines nextest prints every 60 s name whatever is still running.
         timeout-minutes: 15
         run: cargo nextest run --workspace --locked --profile ci
+      # `harness bench --fake` on the dev-profile binary the tests built:
+      # fails when harness overhead per model call or session start passes
+      # the limits in scripts/bench-guard.sh (best of 7 runs, up to 3
+      # attempts; docs/performance.md explains how to update them).
+      - name: Harness overhead guard
+        timeout-minutes: 5
+        run: |
+          cargo build --locked -p harness
+          scripts/bench-guard.sh target/debug/harness
       # Reruns the harness and harness-eval suites with HOME and the XDG
       # dirs pointed at a sentinel and fails if any test wrote there
       # (tests must never touch a user's real config or data; docs/ci.md).

@@ -314,6 +314,35 @@ pub trait Provider: Send + Sync {
         None
     }
 
+    /// Opens a connection to the provider ahead of the first call (DNS,
+    /// TCP, TLS) on the client later calls use, so the first request does
+    /// not pay for the handshake (`[experimental] prewarm_connection`).
+    /// Best effort and free (no tokens); the default does nothing.
+    async fn prewarm(&self) {}
+
+    /// Whether [`Provider::prewarm_cache`] can write the prompt cache for
+    /// `request` (`[experimental] cache_prewarm`). The default is false.
+    fn can_prewarm_cache(&self, _request: &ChatRequest) -> bool {
+        false
+    }
+
+    /// Writes the prompt cache for the prefix of `request` without
+    /// generating anything (Anthropic: a non-streaming `max_tokens: 0`
+    /// call with the same tools, system, thinking and effort), so the next
+    /// real call reads it. `request.messages` is the part shared with that
+    /// call. Returns the call's usage (a cache write is billed). Providers
+    /// without one return [`ProviderError::InvalidRequest`].
+    async fn prewarm_cache(
+        &self,
+        _request: ChatRequest,
+        _cancel: CancellationToken,
+    ) -> Result<Usage, ProviderError> {
+        Err(ProviderError::InvalidRequest(format!(
+            "{} has no cache pre-warm",
+            self.name()
+        )))
+    }
+
     /// Runs a call to completion and accumulates the response.
     async fn complete(
         &self,
@@ -437,6 +466,19 @@ impl ResponseBuilder {
         }
     }
 
+    /// The `tool_use` block at `index` as [`ResponseBuilder::finish`] would
+    /// build it from the arguments received so far, or `None` when that
+    /// block is not a tool call. Used after its [`StreamEvent::BlockStop`]
+    /// to start a call before the message ends.
+    pub fn tool_use(&self, index: usize) -> Option<ContentBlock> {
+        match self.blocks.get(&index)? {
+            Partial::ToolUse { id, name, json } => {
+                Some(tool_use_block(id.clone(), name.clone(), json))
+            }
+            _ => None,
+        }
+    }
+
     /// True once [`StreamEvent::MessageStop`] has been applied.
     pub fn is_complete(&self) -> bool {
         self.stop.is_some()
@@ -455,14 +497,7 @@ impl ResponseBuilder {
                 Partial::Reasoning { text, signature } => {
                     ContentBlock::Reasoning { text, signature }
                 }
-                Partial::ToolUse { id, name, json } => {
-                    let input = if json.trim().is_empty() {
-                        Value::Object(Default::default())
-                    } else {
-                        serde_json::from_str(&json).unwrap_or(Value::String(json))
-                    };
-                    ContentBlock::ToolUse { id, name, input }
-                }
+                Partial::ToolUse { id, name, json } => tool_use_block(id, name, &json),
                 Partial::Opaque { provider, data } => ContentBlock::Opaque { provider, data },
             })
             .collect();
@@ -478,6 +513,17 @@ impl ResponseBuilder {
             retries: self.retries,
         })
     }
+}
+
+/// A tool call's block: empty arguments become `{}`, arguments that are not
+/// valid JSON are kept as a JSON string.
+fn tool_use_block(id: String, name: String, json: &str) -> ContentBlock {
+    let input = if json.trim().is_empty() {
+        Value::Object(Default::default())
+    } else {
+        serde_json::from_str(json).unwrap_or_else(|_| Value::String(json.to_owned()))
+    };
+    ContentBlock::ToolUse { id, name, input }
 }
 
 fn mismatch(index: usize, expected: &str) -> ProviderError {
@@ -510,6 +556,46 @@ mod tests {
             stop: StopReason::from_anthropic("tool_use"),
             usage,
         }
+    }
+
+    #[test]
+    fn tool_use_returns_a_stopped_call_as_finish_builds_it() {
+        let mut b = ResponseBuilder::new();
+        b.apply(StreamEvent::TextDelta {
+            index: 0,
+            text: "hi".into(),
+        })
+        .unwrap();
+        b.apply(StreamEvent::ToolUseStart {
+            index: 1,
+            id: "t1".into(),
+            name: "read".into(),
+        })
+        .unwrap();
+        b.apply(StreamEvent::ToolInputDelta {
+            index: 1,
+            partial_json: "{\"path\":\"a\"}".into(),
+        })
+        .unwrap();
+        b.apply(StreamEvent::ToolUseStart {
+            index: 2,
+            id: "t2".into(),
+            name: "glob".into(),
+        })
+        .unwrap();
+        assert_eq!(b.tool_use(0), None);
+        assert_eq!(b.tool_use(9), None);
+        let early = b.tool_use(1).unwrap();
+        assert_eq!(
+            b.tool_use(2),
+            Some(ContentBlock::ToolUse {
+                id: "t2".into(),
+                name: "glob".into(),
+                input: json!({})
+            })
+        );
+        b.apply(stop(Usage::default())).unwrap();
+        assert_eq!(b.finish().unwrap().message.content[1], early);
     }
 
     #[tokio::test]

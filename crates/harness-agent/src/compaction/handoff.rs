@@ -176,6 +176,9 @@ pub struct CompactionReport {
     pub usage: Usage,
     /// Its cost, when known.
     pub cost_usd: Option<f64>,
+    /// The summary ran in the background (`[context] background_compaction`)
+    /// and was swapped in later; the turn did not wait for the whole call.
+    pub background: bool,
 }
 
 /// Why compaction did not happen.
@@ -190,6 +193,16 @@ pub enum CompactionError {
     /// The model returned no text.
     #[error("compaction call returned no handoff text")]
     EmptyHandoff,
+    /// The background summary task ended abnormally.
+    #[error("background compaction stopped: {0}")]
+    Background(String),
+}
+
+impl CompactionError {
+    /// True when the summarization call was cancelled.
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, CompactionError::Provider(e) if matches!(e.root(), ProviderError::Cancelled))
+    }
 }
 
 /// Summarizes older history into a [`Handoff`].
@@ -392,9 +405,26 @@ impl Compactor {
         instructions: Option<&str>,
         cancel: &CancellationToken,
     ) -> Result<CompactionReport, CompactionError> {
-        let cut = cut_index(&conv.messages, self.keep_recent_turns)
-            .ok_or(CompactionError::NothingToCompact)?;
-        let older = &conv.messages[..cut];
+        let call = self.start(&conv.messages, recorder, parent, instructions)?;
+        let cut = call.cut;
+        let summary = call.run(cancel.clone()).await?;
+        Ok(self.apply(conv, cut, summary))
+    }
+
+    /// Starts a summarization of `messages[..cut]`, `cut` from
+    /// `keep_recent_turns`: records the `compaction` node and its
+    /// `model_call_started` now and returns the call to run. The returned
+    /// call owns everything it needs, so it can run in the background.
+    pub(crate) fn start(
+        &self,
+        messages: &[Message],
+        recorder: &RunRecorder,
+        parent: &NodeId,
+        instructions: Option<&str>,
+    ) -> Result<SummaryCall, CompactionError> {
+        let cut =
+            cut_index(messages, self.keep_recent_turns).ok_or(CompactionError::NothingToCompact)?;
+        let older = &messages[..cut];
         let request = self.request(older, instructions);
         let node = NodeId::random();
         Self::emit(
@@ -423,92 +453,40 @@ impl Compactor {
                 request: Payload::Json(json!({
                     "purpose": COMPACTION_NODE,
                     "messages_summarized": cut,
-                    "messages_kept": conv.messages.len() - cut,
+                    "messages_kept": messages.len() - cut,
                     "system": request.system,
                     "messages": request.messages,
                 })),
             },
         );
-        let start = Instant::now();
-        let result = tokio::select! {
-            r = self.provider.complete(request, cancel.child_token()) => r,
-            _ = cancel.cancelled() => Err(ProviderError::Cancelled),
-        };
-        let millis = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let response = match result {
-            Ok(r) => r,
-            Err(e) => {
-                Self::emit(
-                    recorder,
-                    &node,
-                    parent,
-                    EventKind::ModelCallFinished {
-                        call_id,
-                        usage: EventUsage::default(),
-                        stop_reason: Some("error".into()),
-                        response: None,
-                        duration_ms: millis,
-                    },
-                );
-                let status = if matches!(e.root(), ProviderError::Cancelled) {
-                    NodeStatus::Cancelled
-                } else {
-                    NodeStatus::Failed
-                };
-                Self::emit(
-                    recorder,
-                    &node,
-                    parent,
-                    EventKind::NodeFinished {
-                        status,
-                        error: Some(format!("error: compaction call failed: {e}")),
-                    },
-                );
-                return Err(e.into());
-            }
-        };
-        let usage = response.usage;
-        Self::emit(
-            recorder,
-            &node,
-            parent,
-            EventKind::ModelCallFinished {
-                call_id,
-                usage: EventUsage {
-                    input: usage.input_tokens + usage.cache_write_tokens,
-                    cached_input: usage.cache_read_tokens,
-                    output: usage.output_tokens,
-                    reasoning: usage.reasoning_tokens,
-                    cache_write: usage.cache_write_tokens,
-                },
-                stop_reason: response.stop.raw.clone(),
-                response: Some(Payload::Json(
-                    serde_json::to_value(&response.message).unwrap_or(Value::Null),
-                )),
-                duration_ms: millis,
-            },
-        );
-        let cost = harness_providers::openai::notice::reported_cost(&response)
-            .or_else(|| self.cost.as_ref().and_then(|f| f(&usage)));
-        if let Some(usd) = cost {
-            Self::emit(recorder, &node, parent, EventKind::Cost { usd });
-        }
-        let text = response.message.text();
-        if text.trim().is_empty() {
-            Self::emit(
-                recorder,
-                &node,
-                parent,
-                EventKind::NodeFinished {
-                    status: NodeStatus::Failed,
-                    error: Some("error: compaction call returned no handoff text".into()),
-                },
-            );
-            return Err(CompactionError::EmptyHandoff);
-        }
-        let mut handoff = Handoff::parse(&text);
-        handoff.merge_files(&files_touched(older));
+        Ok(SummaryCall {
+            compactor: self.clone(),
+            cut,
+            files: files_touched(older),
+            request,
+            node,
+            parent: parent.clone(),
+            call_id,
+            recorder: recorder.clone(),
+        })
+    }
 
+    /// Replaces `conv.messages[..cut]` with the handoff of `summary`; the
+    /// messages from `cut` on stay verbatim (a leading user prompt is
+    /// merged into the handoff message). Marks the conversation for
+    /// re-logging.
+    pub(crate) fn apply(
+        &self,
+        conv: &mut Conversation,
+        cut: usize,
+        summary: Summary,
+    ) -> CompactionReport {
+        let Summary {
+            node,
+            handoff,
+            usage,
+            cost_usd,
+        } = summary;
         let messages_before = conv.messages.len();
         let tokens_before = estimate_messages(&conv.messages);
         let kept = conv.messages.split_off(cut);
@@ -522,7 +500,7 @@ impl Compactor {
         conv.messages = std::iter::once(first).chain(rest).collect();
         conv.invalidate_log_from(0);
         let report = CompactionReport {
-            node: node.clone(),
+            node,
             messages_before,
             messages_after: conv.messages.len(),
             summarized: cut,
@@ -530,17 +508,9 @@ impl Compactor {
             tokens_after: estimate_messages(&conv.messages),
             handoff,
             usage,
-            cost_usd: cost,
+            cost_usd,
+            background: false,
         };
-        Self::emit(
-            recorder,
-            &node,
-            parent,
-            EventKind::NodeFinished {
-                status: NodeStatus::Succeeded,
-                error: None,
-            },
-        );
         tracing::info!(
             target: "harness::agent",
             summarized = report.summarized,
@@ -548,6 +518,128 @@ impl Compactor {
             tokens_after = report.tokens_after,
             "context compacted"
         );
-        Ok(report)
+        report
+    }
+}
+
+/// A finished summarization call, ready to be swapped in with
+/// [`Compactor::apply`].
+#[derive(Debug, Clone)]
+pub(crate) struct Summary {
+    node: NodeId,
+    handoff: Handoff,
+    usage: Usage,
+    cost_usd: Option<f64>,
+}
+
+impl Summary {
+    /// Usage of the summarization call.
+    pub(crate) fn usage(&self) -> Usage {
+        self.usage
+    }
+
+    /// Its cost, when known.
+    pub(crate) fn cost_usd(&self) -> Option<f64> {
+        self.cost_usd
+    }
+}
+
+/// A started summarization call (see [`Compactor::start`]).
+pub(crate) struct SummaryCall {
+    compactor: Compactor,
+    /// Index where the verbatim tail starts.
+    pub(crate) cut: usize,
+    files: Vec<String>,
+    request: ChatRequest,
+    node: NodeId,
+    parent: NodeId,
+    call_id: String,
+    recorder: RunRecorder,
+}
+
+impl SummaryCall {
+    /// Makes the call and records its result on the compaction node
+    /// (`model_call_finished`, cost, `node_finished`).
+    pub(crate) async fn run(self, cancel: CancellationToken) -> Result<Summary, CompactionError> {
+        let SummaryCall {
+            compactor,
+            files,
+            request,
+            node,
+            parent,
+            call_id,
+            recorder,
+            ..
+        } = self;
+        let emit = |kind| Compactor::emit(&recorder, &node, &parent, kind);
+        let start = Instant::now();
+        let result = tokio::select! {
+            r = compactor.provider.complete(request, cancel.child_token()) => r,
+            _ = cancel.cancelled() => Err(ProviderError::Cancelled),
+        };
+        let millis = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let response = match result {
+            Ok(r) => r,
+            Err(e) => {
+                emit(EventKind::ModelCallFinished {
+                    call_id,
+                    usage: EventUsage::default(),
+                    stop_reason: Some("error".into()),
+                    response: None,
+                    duration_ms: millis,
+                });
+                let status = if matches!(e.root(), ProviderError::Cancelled) {
+                    NodeStatus::Cancelled
+                } else {
+                    NodeStatus::Failed
+                };
+                emit(EventKind::NodeFinished {
+                    status,
+                    error: Some(format!("error: compaction call failed: {e}")),
+                });
+                return Err(e.into());
+            }
+        };
+        let usage = response.usage;
+        emit(EventKind::ModelCallFinished {
+            call_id,
+            usage: EventUsage {
+                input: usage.input_tokens + usage.cache_write_tokens,
+                cached_input: usage.cache_read_tokens,
+                output: usage.output_tokens,
+                reasoning: usage.reasoning_tokens,
+                cache_write: usage.cache_write_tokens,
+            },
+            stop_reason: response.stop.raw.clone(),
+            response: Some(Payload::Json(
+                serde_json::to_value(&response.message).unwrap_or(Value::Null),
+            )),
+            duration_ms: millis,
+        });
+        let cost = harness_providers::openai::notice::reported_cost(&response)
+            .or_else(|| compactor.cost.as_ref().and_then(|f| f(&usage)));
+        if let Some(usd) = cost {
+            emit(EventKind::Cost { usd });
+        }
+        let text = response.message.text();
+        if text.trim().is_empty() {
+            emit(EventKind::NodeFinished {
+                status: NodeStatus::Failed,
+                error: Some("error: compaction call returned no handoff text".into()),
+            });
+            return Err(CompactionError::EmptyHandoff);
+        }
+        let mut handoff = Handoff::parse(&text);
+        handoff.merge_files(&files);
+        emit(EventKind::NodeFinished {
+            status: NodeStatus::Succeeded,
+            error: None,
+        });
+        Ok(Summary {
+            node,
+            handoff,
+            usage,
+            cost_usd: cost,
+        })
     }
 }

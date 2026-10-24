@@ -44,6 +44,34 @@ gpt = openai/gpt-5
   set, it is bucketed: up to 4096 tokens is `low`, up to 16384 is `medium`,
   and anything larger is `high`. With no setting, the model's default
   effort applies.
+- **Prompt cache hints.** Every request carries a `prompt_cache_key`, so
+  OpenAI routes requests that share a prefix to the same prompt cache. The
+  key is `harness-` plus a truncated SHA-256 of the instructions and the
+  tool definitions (the reusable prefix), so it stays the same for every
+  turn of a session and is shared by subagents with the same instructions
+  and tools; it reveals nothing about the prompt. `prompt_cache_retention`
+  is not sent by default, so your organisation's own default applies:
+  organisations without Zero Data Retention already get `24h` on the
+  models that support extended caching, and ZDR organisations keep
+  in-memory caching (5-60 minutes). To ask for `24h` explicitly, opt in:
+
+  ```ini
+  [provider.openai]
+  prompt_cache_retention = 24h   ; default (send nothing) | 24h
+  ```
+
+  With `24h`, requests for the models that support extended caching
+  (`gpt-5.5`, `gpt-5.5-pro`, `gpt-5.4`, `gpt-5.2`, the `gpt-5.1` family,
+  `gpt-5`, `gpt-5-codex`, `gpt-4.1`, and their dated snapshots;
+  `openai::request::EXTENDED_RETENTION_MODELS`) carry
+  `prompt_cache_retention: "24h"`; other models (`gpt-5-mini`, `gpt-4o`,
+  the o-series, GPT-5.6 and later, which use explicit cache breakpoints
+  instead) never get it. For a ZDR organisation this overrides the
+  in-memory policy, so check your organisation's retention posture first;
+  whether OpenAI accepts it from ZDR organisations has not been checked.
+  With `auth = chatgpt` the key is sent and the retention is always left
+  out, because the plan route rejects it. The cache hit rate has not been
+  checked live yet; that waits for an OpenAI API key (TASK-128).
 - **Usage.** `input_tokens` excludes cached tokens, `cache_read_tokens` is
   OpenAI's `cached_tokens`, and `reasoning_tokens` is reported as a subset
   of output.
@@ -140,7 +168,8 @@ With `auth = chatgpt`, every OpenAI request goes to the Responses API
 (`POST https://api.openai.com/v1/responses`, or `base_url`) with the access
 token, `store: false` and streaming. Fields the plan route rejects are left
 out: `temperature`, `top_p`, `max_output_tokens`, `truncation`, `metadata`,
-`user` and the others in `chatgpt::UNSUPPORTED_REQUEST_FIELDS`. The API key
+`user`, `prompt_cache_retention` and the others in
+`chatgpt::UNSUPPORTED_REQUEST_FIELDS`; `prompt_cache_key` is kept. The API key
 in the section is not used, and there is never a silent fallback to it.
 
 Plan models are the GPT-5 and Codex families; the model catalog shows them

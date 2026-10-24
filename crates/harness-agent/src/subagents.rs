@@ -519,6 +519,7 @@ pub struct SubagentRuntime {
     board: Option<Arc<TaskBoard>>,
     extra: Option<Arc<dyn ExtraTools>>,
     labeler: Option<Labeler>,
+    fan_out: Option<crate::stagger::FanOut>,
 }
 
 impl std::fmt::Debug for SubagentRuntime {
@@ -563,7 +564,15 @@ impl SubagentRuntime {
             board: None,
             extra: None,
             labeler: None,
+            fan_out: None,
         }
+    }
+
+    /// Staggers children's requests through `gate`
+    /// (`[experimental] stagger_subagents`, see [`crate::stagger`]).
+    pub fn with_fan_out(mut self, gate: crate::stagger::FanOut) -> Self {
+        self.fan_out = Some(gate);
+        self
     }
 
     /// Labels every child's tool results with provenance tags (MCP results
@@ -760,6 +769,7 @@ impl SubagentRuntime {
         };
         // The child hears about the background jobs it starts.
         let job_notices = crate::job_notices::JobNotices::agent(&tools);
+        let tools_jobs = tools.jobs();
         let mut dispatcher = Dispatcher::new(tools, gate);
         let root = match &req.host {
             Some(h) => Some(&h.root),
@@ -777,17 +787,26 @@ impl SubagentRuntime {
         config.host = req.host.as_ref().map(|h| h.name.clone());
         config.thinking = thinking_for(parts.agent.effort);
         config.limits = combine_limits(limits_for(&parts.agent), req.limits);
-        let mut lp = AgentLoop::new(
-            parts.provider.clone(),
-            dispatcher,
-            self.recorder.clone(),
-            config,
-        )
-        .with_parent(req.parent.clone())
-        .with_node(node.clone());
+        let provider = match &self.fan_out {
+            Some(gate) => Arc::new(crate::stagger::StaggeredProvider::new(
+                parts.provider.clone(),
+                gate.clone(),
+                Some(crate::stagger::PrewarmSink {
+                    recorder: self.recorder.clone(),
+                    parent: node.clone(),
+                    cost: parts.cost.clone(),
+                }),
+            )) as Arc<dyn Provider>,
+            None => parts.provider.clone(),
+        };
+        let long_wait = crate::long_wait::LongWaitHook::new(tools_jobs);
+        let mut lp = AgentLoop::new(provider, dispatcher, self.recorder.clone(), config)
+            .with_parent(req.parent.clone())
+            .with_node(node.clone());
         if let Some(n) = job_notices {
             lp = lp.with_hook(Arc::new(n));
         }
+        lp = lp.with_hook(Arc::new(long_wait));
         if let Some(l) = &self.labeler {
             lp = lp.with_labeler(l.clone());
         }

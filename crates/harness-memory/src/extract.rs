@@ -193,12 +193,13 @@ pub fn parse_reply(reply: &str) -> Result<Vec<Candidate>, ExtractError> {
     serde_json::from_str(&reply[s..=e]).map_err(|err| ExtractError::BadReply(err.to_string()))
 }
 
-/// Validates candidates with the write guard and caps them at `max`.
+/// Validates candidates with the write guard (each with its path's limit,
+/// [`guard::limit_for_path`]) and caps them at `max`.
 /// Duplicates (same path and text) are dropped.
 pub fn screen(candidates: Vec<Candidate>, redactor: &Redactor, max: usize) -> Extraction {
     let mut out = Extraction::default();
     for c in candidates {
-        match guard::validate(&c.text, redactor) {
+        match guard::validate_for_path(&c.path, &c.text, redactor) {
             Ok(text) => {
                 if out.proposals.len() >= max
                     || out
@@ -400,6 +401,58 @@ mod tests {
                 RejectKind::Secret
             ]
         );
+    }
+
+    #[test]
+    fn screen_applies_per_path_limits() {
+        use crate::tool::guard::{MAX_BULLET_CHARS, MAX_OVERVIEW_BULLET_CHARS};
+        let lesson = |n: usize| {
+            let mut t = String::from("Build with cargo xtask dist; ");
+            while t.chars().count() < n {
+                t.push('w');
+            }
+            t
+        };
+        let cand = |path: &str, n: usize| Candidate {
+            path: path.into(),
+            text: lesson(n),
+            reason: String::new(),
+        };
+        let e = screen(
+            vec![
+                cand("project/overview", MAX_OVERVIEW_BULLET_CHARS),
+                cand("project/overview", MAX_OVERVIEW_BULLET_CHARS + 1),
+                cand("project/testing", MAX_BULLET_CHARS),
+                cand("project/testing", MAX_BULLET_CHARS + 1),
+                cand("tools/cargo", MAX_BULLET_CHARS + 1),
+            ],
+            &Redactor::default(),
+            10,
+        );
+        let accepted: Vec<_> = e
+            .proposals
+            .iter()
+            .map(|p| (p.path.as_str(), p.text.chars().count()))
+            .collect();
+        assert_eq!(
+            accepted,
+            vec![
+                ("project/overview", MAX_OVERVIEW_BULLET_CHARS),
+                ("project/testing", MAX_BULLET_CHARS)
+            ]
+        );
+        let rejected: Vec<_> = e
+            .rejected
+            .iter()
+            .map(|(c, r)| (c.path.as_str(), r.kind, r.message.clone()))
+            .collect();
+        assert_eq!(rejected.len(), 3);
+        assert_eq!(rejected[0].0, "project/overview");
+        assert!(rejected[0].2.contains("the limit is 1000 per bullet"));
+        for (path, kind, msg) in &rejected[1..] {
+            assert_eq!(*kind, RejectKind::Format, "{path}");
+            assert!(msg.contains("the limit is 400 per bullet"), "{path}: {msg}");
+        }
     }
 
     #[test]

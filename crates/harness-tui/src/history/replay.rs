@@ -21,6 +21,7 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use crate::chat::text::sanitize;
 use crate::interaction::{Dispatch, ElementId, HitMap, Interaction};
 use crate::theme::{Theme, Token};
 
@@ -245,31 +246,15 @@ impl ReplayBar {
         }
     }
 
-    /// Renders the bar (one line) for `replay`.
-    pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect, replay: &Replay) {
-        let t = self.theme.clone();
-        let mut hits: HitMap<ReplayAction> = self.interaction.begin_frame();
-        let mut x = area.x;
-        let buttons = [
-            (ReplayAction::PrevNode, "[◀◀ node]"),
-            (ReplayAction::PrevEvent, "[◀ event]"),
-            (ReplayAction::NextEvent, "[event ▶]"),
-            (ReplayAction::NextNode, "[node ▶▶]"),
-        ];
-        for (a, label) in buttons {
-            let w = label.chars().count() as u16;
-            let rect = Rect::new(x, area.y, w.min(area.width.saturating_sub(x - area.x)), 1);
-            let style = if hits.is_focused(&ElementId::from(control_id(a))) {
-                t.focused()
-            } else {
-                t.fg(Token::Accent)
-            };
-            frame.render_widget(Paragraph::new(Span::styled(label, style)), rect);
-            hits.register(control_id(a), rect, a);
-            x += w + 1;
-        }
-        let info = match replay.current() {
-            Some(e) => format!(
+    /// Rows the bar needs at `width` for `replay` (buttons, track and
+    /// position flow onto more rows when one is too narrow).
+    pub fn height(&self, width: u16, replay: &Replay) -> u16 {
+        self.layout(Rect::new(0, 0, width, u16::MAX), replay).2
+    }
+
+    fn info(replay: &Replay) -> String {
+        match replay.current() {
+            Some(e) => sanitize(&format!(
                 " {}/{} {:02}:{:02}:{:02} {}{}",
                 replay.position(),
                 replay.len(),
@@ -281,21 +266,90 @@ impl ReplayBar {
                     .as_ref()
                     .map(|n| format!(" {n}"))
                     .unwrap_or_default()
-            ),
+            )),
             None => format!(" 0/{}", replay.len()),
-        };
-        let info_w = info.chars().count() as u16;
-        let right = area.x + area.width;
-        let track_w = right.saturating_sub(x).saturating_sub(info_w).max(4);
-        self.track = Rect::new(x, area.y, track_w.min(right.saturating_sub(x)), 1);
+        }
+    }
+
+    /// Button rects, the track rect, the rows used and the info rows.
+    #[allow(clippy::type_complexity)]
+    fn layout(
+        &self,
+        area: Rect,
+        replay: &Replay,
+    ) -> (
+        Vec<(ReplayAction, &'static str, Rect)>,
+        Rect,
+        u16,
+        Vec<(u16, String)>,
+    ) {
+        let aw = area.width.max(1);
+        let (mut x, mut y) = (0u16, 0u16);
+        let mut buttons = Vec::new();
+        for (a, label) in BUTTONS {
+            let w = (label.chars().count() as u16).min(aw);
+            if x > 0 && x + w > aw {
+                x = 0;
+                y += 1;
+            }
+            buttons.push((
+                a,
+                label,
+                Rect::new(area.x + x, area.y.saturating_add(y), w, 1),
+            ));
+            x += w + 1;
+        }
+        let info = Self::info(replay);
+        let info_w = crate::chat::text::width(&info) as u16;
+        let rem = aw.saturating_sub(x);
+        let mut infos = Vec::new();
+        let track;
+        if rem >= 8 + info_w {
+            track = Rect::new(area.x + x, area.y.saturating_add(y), rem - info_w, 1);
+            infos.push((y, info));
+        } else {
+            if rem < 8 {
+                x = 0;
+                y += 1;
+            }
+            let tw = aw - x;
+            track = Rect::new(area.x + x, area.y.saturating_add(y), tw, 1);
+            for l in crate::chat::text::wrap_text(info.trim_start(), usize::from(aw)) {
+                y += 1;
+                infos.push((y, l));
+            }
+        }
+        (buttons, track, y + 1, infos)
+    }
+
+    /// Renders the bar for `replay`, flowing onto the rows of `area`
+    /// ([`ReplayBar::height`]).
+    pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect, replay: &Replay) {
+        let t = self.theme.clone();
+        let mut hits: HitMap<ReplayAction> = self.interaction.begin_frame();
+        let (buttons, track, _, infos) = self.layout(area, replay);
+        let inside = |r: Rect| r.y < area.bottom() && r.x < area.right() && r.width > 0;
+        for (a, label, rect) in buttons {
+            if !inside(rect) {
+                continue;
+            }
+            let style = if hits.is_focused(&ElementId::from(control_id(a))) {
+                t.focused()
+            } else {
+                t.fg(Token::Accent)
+            };
+            frame.render_widget(Paragraph::new(Span::styled(label, style)), rect);
+            hits.register(control_id(a), rect, a);
+        }
+        self.track = track;
         let filled = if replay.is_empty() {
             0
         } else {
             (replay.position() * usize::from(self.track.width.saturating_sub(1))) / replay.len()
         };
-        let mut track = String::new();
+        let mut bar = String::new();
         for i in 0..usize::from(self.track.width) {
-            track.push(if i == filled {
+            bar.push(if i == filled {
                 '●'
             } else if i < filled {
                 '━'
@@ -303,25 +357,35 @@ impl ReplayBar {
                 '─'
             });
         }
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(track, t.fg(Token::Running)))),
-            self.track,
-        );
-        hits.register(
-            control_id(ReplayAction::Track),
-            self.track,
-            ReplayAction::Track,
-        );
-        let ix = self.track.x + self.track.width;
-        if ix < right {
+        if inside(track) {
             frame.render_widget(
-                Paragraph::new(Span::styled(info, t.fg(Token::Muted))),
-                Rect::new(ix, area.y, right - ix, 1),
+                Paragraph::new(Line::from(Span::styled(bar, t.fg(Token::Running)))),
+                track,
             );
+            hits.register(control_id(ReplayAction::Track), track, ReplayAction::Track);
+        }
+        for (k, (row, text)) in infos.into_iter().enumerate() {
+            let y = area.y.saturating_add(row);
+            let x = if k == 0 && row == track.y - area.y {
+                track.right()
+            } else {
+                area.x
+            };
+            let r = Rect::new(x, y, area.right().saturating_sub(x), 1);
+            if inside(r) {
+                frame.render_widget(Paragraph::new(Span::styled(text, t.fg(Token::Muted))), r);
+            }
         }
         self.interaction.end_frame(hits);
     }
 }
+
+const BUTTONS: [(ReplayAction, &str); 4] = [
+    (ReplayAction::PrevNode, "[◀◀ node]"),
+    (ReplayAction::PrevEvent, "[◀ event]"),
+    (ReplayAction::NextEvent, "[event ▶]"),
+    (ReplayAction::NextNode, "[node ▶▶]"),
+];
 
 #[cfg(test)]
 mod tests {
@@ -443,5 +507,50 @@ mod tests {
         bar.handle(&mut r, &key("enter"));
         assert_eq!(r.position(), 6);
         assert_eq!(bar.handle(&mut r, &key("esc")), Some(ReplayOutput::Back));
+    }
+
+    /// At a narrow width the bar flows onto more rows ([`ReplayBar::height`])
+    /// instead of dropping its buttons, and every button still works by
+    /// click and by keyboard.
+    #[test]
+    fn a_narrow_bar_wraps_and_its_buttons_work_by_click_and_keyboard() {
+        let mut r = Replay::new(run());
+        let mut bar = ReplayBar::new(Theme::default());
+        let h = bar.height(24, &r);
+        assert!(h > 1, "wraps: {h}");
+        let mut term = Terminal::new(TestBackend::new(24, h)).unwrap();
+        term.draw(|f| bar.render(f, f.area(), &r)).unwrap();
+        let text = crate::interaction::testing::buffer_text(term.backend().buffer());
+        for b in ["[◀◀ node]", "[◀ event]", "[event ▶]", "[node ▶▶]", "/7"] {
+            assert!(text.contains(b), "{b}: {text}");
+        }
+        let (x, y) = find_text(term.backend().buffer(), "[◀ event]").unwrap();
+        assert_eq!(bar.handle(&mut r, &click(x, y)), Some(ReplayOutput::Moved));
+        assert_eq!(r.position(), 6);
+        // Tab moves from the clicked button to `[event ▶]`; Enter runs it.
+        bar.handle(&mut r, &key("tab"));
+        bar.handle(&mut r, &key("enter"));
+        assert_eq!(r.position(), 7);
+    }
+
+    /// TASK-160 layout matrix: the bar fits at every size with nothing cut.
+    #[test]
+    fn replay_bar_fits_at_every_size() {
+        use crate::layout_matrix::*;
+        matrix("replay bar", |w, h, check| {
+            let r = Replay::new(run());
+            let mut bar = ReplayBar::new(Theme::default());
+            let bh = bar.height(w, &r).min(h);
+            let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+            let buf = frame(&mut t, |f| bar.render(f, Rect::new(0, 0, w, bh), &r));
+            if check {
+                let text = checked("replay bar", &buf);
+                assert_reachable(
+                    "replay bar",
+                    &[text],
+                    &["[◀◀ node]", "[◀ event]", "[event ▶]", "[node ▶▶]", "/7"],
+                );
+            }
+        });
     }
 }

@@ -26,7 +26,7 @@ use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 
 use crate::cards::{arg_summary, payload_json, payload_text};
-use crate::chat::text::{sanitize, truncate, truncate_line, wrap_line};
+use crate::chat::text::{sanitize, wrap_line};
 use crate::theme::{Theme, Token};
 
 /// Bytes of stream text kept per node; older segments are dropped.
@@ -450,10 +450,14 @@ impl LivePane<'_> {
                         out.extend(wrap_line(Line::from(spans), width, &[]));
                     }
                 }
-                Segment::Note(n) => out.push(Line::from(Span::styled(
-                    truncate(&format!("ⓘ {n}"), width),
-                    t.fg(Token::Warn).add_modifier(Modifier::ITALIC),
-                ))),
+                Segment::Note(n) => out.extend(wrap_line(
+                    Line::from(Span::styled(
+                        format!("ⓘ {}", sanitize(n)),
+                        t.fg(Token::Warn).add_modifier(Modifier::ITALIC),
+                    )),
+                    width,
+                    &[Span::raw("  ")],
+                )),
                 Segment::Tool {
                     tool,
                     summary,
@@ -470,10 +474,7 @@ impl LivePane<'_> {
                     let mut spans = vec![
                         Span::styled(format!("{icon} "), t.fg(token)),
                         Span::styled(tool.clone(), t.fg(Token::Accent)),
-                        Span::styled(
-                            format!(" {}", truncate(&sanitize(summary), width.saturating_sub(4))),
-                            t.fg(Token::Muted),
-                        ),
+                        Span::styled(format!(" {}", sanitize(summary)), t.fg(Token::Muted)),
                     ];
                     if let Some(ms) = duration_ms.filter(|_| tool.starts_with("mcp ")) {
                         spans.push(Span::styled(
@@ -481,13 +482,26 @@ impl LivePane<'_> {
                             t.fg(Token::Number),
                         ));
                     }
-                    out.push(truncate_line(Line::from(spans), width));
+                    let indent = [Span::raw("  ")];
+                    out.extend(wrap_line(Line::from(spans), width, &indent));
                     let lines: Vec<&str> = output.lines().collect();
-                    for l in &lines[lines.len().saturating_sub(self.tool_lines)..] {
+                    let skip = lines.len().saturating_sub(self.tool_lines);
+                    if skip > 0 {
+                        // The tail only: say where the rest is.
                         out.push(Line::from(Span::styled(
-                            truncate(&format!("  {}", sanitize(l)), width),
+                            format!("  … {skip} earlier lines (Enter: node detail)"),
                             t.fg(Token::Muted),
                         )));
+                    }
+                    for l in &lines[skip..] {
+                        out.extend(wrap_line(
+                            Line::from(Span::styled(
+                                format!("  {}", sanitize(l)),
+                                t.fg(Token::Muted),
+                            )),
+                            width,
+                            &indent,
+                        ));
                     }
                 }
             }

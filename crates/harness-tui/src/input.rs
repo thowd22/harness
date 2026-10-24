@@ -34,7 +34,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 use unicode_width::UnicodeWidthChar;
 
-use crate::chat::text::{truncate, width};
+use crate::chat::text::{sanitize, truncate, truncate_line, width, wrap_line};
 use crate::fuzzy::{self, Fuzzy};
 use crate::interaction::{ElementId, HitMap};
 use crate::keys::Action;
@@ -196,6 +196,8 @@ pub struct Input {
     dismissed: bool,
     scroll: usize,
     fuzzy: Fuzzy,
+    /// Width of the last render, for moving the cursor by display rows.
+    width: usize,
 }
 
 fn placeholder(i: usize) -> char {
@@ -732,6 +734,8 @@ impl Input {
             },
             KeyCode::Home => self.cursor = self.line_start(),
             KeyCode::End => self.cursor = self.line_end(),
+            KeyCode::Up if text_mods && self.move_row(true) => {}
+            KeyCode::Down if text_mods && self.move_row(false) => {}
             KeyCode::Up if text_mods => {
                 if self.is_first_line() {
                     if !self.history_prev() {
@@ -753,6 +757,76 @@ impl Input {
             _ => return InputOutcome::Ignored,
         }
         InputOutcome::Changed
+    }
+
+    /// Moves the cursor one display row up or down at the last rendered
+    /// width (rows of wrapped lines included), keeping its column. False
+    /// on the first (last) row, where Up (Down) recalls history, or before
+    /// the first render.
+    fn move_row(&mut self, up: bool) -> bool {
+        if self.width == 0 {
+            return false;
+        }
+        let (rows, (crow, ccol), _) = self.layout_rows(self.width);
+        let target = if up {
+            if crow == 0 {
+                return false;
+            }
+            crow - 1
+        } else {
+            if crow + 1 >= rows.len() {
+                return false;
+            }
+            crow + 1
+        };
+        // The last character starting at or before `ccol` on the target
+        // row; a wrapped row's end is its last character.
+        let mut best = None;
+        for (row, col, byte) in self.cells(self.width) {
+            if row == target && (col <= ccol || best.is_none()) {
+                best = Some(byte);
+            }
+        }
+        match best {
+            Some(b) => {
+                self.cursor = b;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// `(row, column, byte)` of each character start, laid out like
+    /// [`Input::layout_rows`].
+    fn cells(&self, width: usize) -> Vec<(usize, usize, usize)> {
+        let avail = width.saturating_sub(width_of(PROMPT)).max(1);
+        let (mut row, mut w, mut pos) = (0, 0, 0);
+        let mut out = Vec::new();
+        for c in self.text.chars() {
+            let start = pos;
+            pos += c.len_utf8();
+            if c == '\n' {
+                // The end of the line, then the start of the next one.
+                out.push((row, w, start));
+                row += 1;
+                w = 0;
+                out.push((row, 0, pos));
+                continue;
+            }
+            let cw = match paste_index(c) {
+                Some(i) => width_of(&self.label(i)),
+                None if c == '\t' => TAB_WIDTH - w % TAB_WIDTH,
+                None => width_of(&c.to_string()).max(usize::from(c.is_control())),
+            };
+            if w + cw > avail && w > 0 {
+                row += 1;
+                w = 0;
+            }
+            out.push((row, w, start));
+            w += cw;
+        }
+        out.push((row, w, pos));
+        out
     }
 
     // ---- layout ----
@@ -796,8 +870,10 @@ impl Input {
             let (s, p) = match paste_index(c) {
                 Some(i) if self.is_literal(i) => (self.label(i), None),
                 Some(i) => (self.label(i), Some(i)),
-                // Tabs are shown as spaces to the next tab stop.
+                // Tabs are shown as spaces to the next tab stop, other
+                // control characters as a space.
                 None if c == '\t' => (" ".repeat(TAB_WIDTH - w % TAB_WIDTH), None),
+                None if c.is_control() => (" ".to_owned(), None),
                 None => (c.to_string(), None),
             };
             let cw = width_of(&s);
@@ -876,6 +952,7 @@ impl Input {
         wrap: &dyn Fn(InputAction) -> A,
     ) {
         hits.register(INPUT_ID, area, wrap(InputAction::Focus));
+        self.width = area.width as usize;
         let (rows, (crow, ccol), hard) = self.layout_rows(area.width as usize);
         let h = area.height as usize;
         if h == 0 || area.width == 0 {
@@ -946,8 +1023,62 @@ impl Input {
         }
     }
 
+    /// Rows the completion popup needs at `width` (0 when closed): one
+    /// per offered command (up to [`MAX_COMPLETIONS`]) plus, when the
+    /// selected row cuts its name or description, the extra rows that
+    /// command takes wrapped in full.
+    pub fn completion_height_at(&self, width: u16) -> u16 {
+        let n = self.completion_height();
+        if n == 0 {
+            return 0;
+        }
+        let sel = self.selected_full(width as usize).map_or(1, |l| l.len());
+        n - 1 + sel as u16
+    }
+
+    /// Width of the name column at `w` cells.
+    fn completion_name_w(&self, w: usize) -> usize {
+        let Some(comp) = &self.completion else {
+            return 0;
+        };
+        comp.matches
+            .iter()
+            .map(|m| {
+                let c = &self.commands[m.command];
+                width(&sanitize(&c.name))
+                    + c.args.as_ref().map_or(0, |a| width(&sanitize(a)) + 1)
+                    + 1
+            })
+            .max()
+            .unwrap_or(0)
+            .min(w / 2)
+    }
+
+    /// The selected command's full text wrapped to `w` cells, when its row
+    /// would cut it.
+    fn selected_full(&self, w: usize) -> Option<Vec<Line<'static>>> {
+        let comp = self.completion.as_ref()?;
+        let c = &self.commands[comp.matches.get(comp.selected)?.command];
+        let name_w = self.completion_name_w(w);
+        let (name, desc, scope) = completion_texts(c);
+        let desc_w = w.saturating_sub(name_w + 2 + width(&scope));
+        let cut = width(&name) > name_w || width(&desc) > desc_w || name_w + 2 + width(&scope) > w;
+        cut.then(|| {
+            let line = Line::from(vec![
+                Span::raw(" "),
+                Span::raw(name),
+                Span::raw("  "),
+                Span::raw(desc),
+                Span::raw(scope),
+            ]);
+            wrap_line(line, w, &[Span::raw("   ")])
+        })
+    }
+
     /// Draws the completion popup into `area` (sized by
-    /// [`Input::completion_height`]) and registers its rows.
+    /// [`Input::completion_height_at`]) and registers its rows. Rows show
+    /// one command each, cut to align; the selected command shows in full,
+    /// wrapped over as many rows as it needs.
     pub fn render_completion<A: Clone>(
         &mut self,
         frame: &mut Frame<'_>,
@@ -956,6 +1087,9 @@ impl Input {
         hits: &mut HitMap<A>,
         wrap: &dyn Fn(InputAction) -> A,
     ) {
+        let w = area.width as usize;
+        let name_w = self.completion_name_w(w);
+        let full = self.selected_full(w);
         let Input {
             completion: Some(comp),
             commands,
@@ -967,27 +1101,23 @@ impl Input {
             return;
         };
         let selected = comp.selected;
-        let cmds: Vec<&SlashCommand> = comp.matches.iter().map(|m| &commands[m.command]).collect();
+        let n = comp.matches.len();
+        let height = area.height as usize;
+        frame.render_widget(Clear, area);
+        if height == 0 || w == 0 || n == 0 {
+            return;
+        }
         let name_pat = fuzzy::fuzzy(&comp.token);
         let desc_pat = fuzzy::substring(&comp.token);
         let mut idx = Vec::new();
-        frame.render_widget(Clear, area);
-        let w = area.width as usize;
-        let name_w = cmds
-            .iter()
-            .map(|c| width(&c.name) + c.args.as_ref().map_or(0, |a| width(a) + 1) + 1)
-            .max()
-            .unwrap_or(0)
-            .min(w / 2);
-        let first = selected.saturating_sub(MAX_COMPLETIONS - 1);
-        let mut lines = Vec::new();
-        for (row, (i, c)) in cmds
-            .iter()
-            .enumerate()
-            .skip(first)
-            .take(area.height as usize)
-            .enumerate()
-        {
+        // One row per command and all of the selected command's rows: as
+        // many commands above it as fit, the rest below.
+        let sel_h = full.as_ref().map_or(1, |l| l.len()).min(height);
+        let first = selected - selected.min(height - sel_h);
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        let mut i = first;
+        while i < n && lines.len() < height {
+            let c = &commands[comp.matches[i].command];
             let id = ElementId(format!("completion.{i}"));
             let sel = i == selected || hits.is_focused(&id);
             let base = if sel {
@@ -999,18 +1129,19 @@ impl Input {
             let hit = base
                 .patch(theme.fg(Token::Highlight))
                 .add_modifier(Modifier::BOLD);
-            let mut name = format!("/{}", c.name);
-            if let Some(a) = &c.args {
-                name.push(' ');
-                name.push_str(a);
-            }
-            let name = format!("{:<name_w$}", truncate(&name, name_w));
-            let scope = c.scope.clone().map(|s| format!(" {s}")).unwrap_or_default();
-            let desc_w = w.saturating_sub(name_w + 2 + width(&scope));
-            // Highlights are computed for visible rows only. Name
-            // positions shift by one for the slash, bare-name positions
-            // also by the namespace.
-            let desc = format!("{:<desc_w$}", truncate(&c.description, desc_w));
+            let (full_name, full_desc, scope) = completion_texts(c);
+            let expanded = i == selected && full.is_some();
+            let (name, desc) = if expanded {
+                (full_name, full_desc)
+            } else {
+                let desc_w = w.saturating_sub(name_w + 2 + width(&scope));
+                (
+                    format!("{:<name_w$}", truncate(&full_name, name_w)),
+                    format!("{:<desc_w$}", truncate(&full_desc, desc_w)),
+                )
+            };
+            // Highlights: name positions shift by one for the slash,
+            // bare-name positions also by the namespace.
             let ns = keys[m.command].ns;
             let mut name_hits = Vec::new();
             let mut desc_hits = Vec::new();
@@ -1037,7 +1168,7 @@ impl Input {
                 base.patch(theme.fg(Token::Accent)),
                 hit,
             ));
-            spans.push(Span::styled(" ", base));
+            spans.push(Span::styled(if expanded { "  " } else { " " }, base));
             spans.extend(fuzzy::highlight(
                 &desc,
                 &desc_hits,
@@ -1045,15 +1176,47 @@ impl Input {
                 hit,
             ));
             spans.push(Span::styled(scope, base.patch(theme.fg(Token::Muted))));
-            lines.push(Line::from(spans));
+            let rows: Vec<Line<'static>> = if expanded {
+                wrap_line(Line::from(spans), w, &[Span::styled("   ", base)])
+                    .into_iter()
+                    .map(|l| l.style(base))
+                    .take(height - lines.len())
+                    .collect()
+            } else {
+                vec![truncate_line(Line::from(spans), w)]
+            };
             hits.register(
                 id,
-                Rect::new(area.x, area.y + row as u16, area.width, 1),
+                Rect::new(
+                    area.x,
+                    area.y + lines.len() as u16,
+                    area.width,
+                    rows.len() as u16,
+                ),
                 wrap(InputAction::Complete(i)),
             );
+            lines.extend(rows);
+            i += 1;
         }
         frame.render_widget(Paragraph::new(lines).style(theme.bg(Token::Surface)), area);
     }
+}
+
+/// A command's name (with slash and argument hint), description and scope
+/// as shown in completion.
+fn completion_texts(c: &SlashCommand) -> (String, String, String) {
+    let mut name = format!("/{}", sanitize(&c.name));
+    if let Some(a) = &c.args {
+        name.push(' ');
+        name.push_str(&sanitize(a));
+    }
+    let desc = sanitize(&c.description).replace('\n', " ");
+    let scope = c
+        .scope
+        .as_ref()
+        .map(|s| format!(" {}", sanitize(s)))
+        .unwrap_or_default();
+    (name, desc, scope)
 }
 
 /// Match positions that are still on screen in `shown` (a possibly
@@ -1269,6 +1432,48 @@ mod tests {
         i.set_commands(commands());
         typ(&mut i, "see /help");
         assert!(i.completions().is_none());
+    }
+
+    /// Up and Down move the cursor by display rows inside a wrapped line
+    /// (keeping the column), so every row of a long draft is reachable;
+    /// on the first row Up still recalls history.
+    #[test]
+    fn up_and_down_walk_the_rows_of_a_wrapped_line() {
+        let mut input = Input::new();
+        let line = "abcdefghij".repeat(5);
+        input.set_text(&line);
+        let theme = Theme::default();
+        let mut term = Terminal::new(TestBackend::new(22, 3)).unwrap();
+        let mut draw = |input: &mut Input| {
+            term.draw(|f| {
+                let mut hits: HitMap<()> = HitMap::new();
+                input.render(f, f.area(), &theme, true, &mut hits, &|_| ());
+            })
+            .unwrap();
+            buffer_text(term.backend().buffer())
+        };
+        // 20 cells per row after the prompt: rows of 20, 20 and 10.
+        draw(&mut input);
+        assert_eq!(input.cursor(), 50);
+        assert_eq!(press(&mut input, "up"), InputOutcome::Changed);
+        assert_eq!(input.cursor(), 30, "same column one row up");
+        assert_eq!(press(&mut input, "up"), InputOutcome::Changed);
+        assert_eq!(input.cursor(), 10);
+        let text = draw(&mut input);
+        assert!(
+            text.starts_with("› abcdefghij"),
+            "scrolled to the top: {text}"
+        );
+        assert_eq!(press(&mut input, "up"), InputOutcome::Ignored, "no history");
+        assert_eq!(press(&mut input, "down"), InputOutcome::Changed);
+        assert_eq!(input.cursor(), 30);
+        assert_eq!(press(&mut input, "down"), InputOutcome::Changed);
+        assert_eq!(input.cursor(), 50, "the end of the shorter last row");
+        // A wrapped previous line is entered at its last row.
+        input.set_text(&format!("{line}\nxy"));
+        draw(&mut input);
+        assert_eq!(press(&mut input, "up"), InputOutcome::Changed);
+        assert_eq!(input.cursor(), 42, "column 2 of the line's last row");
     }
 
     fn draw(input: &mut Input, it: &mut Interaction<InputAction>) -> Terminal<TestBackend> {

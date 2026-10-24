@@ -19,7 +19,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use super::highlight::{self, State};
-use super::text::{truncate_line, width as text_width, wrap_line};
+use super::text::{width as text_width, wrap_line};
 use crate::clipboard::COPY_LABEL;
 use crate::theme::{Theme, Token};
 
@@ -212,30 +212,51 @@ fn render_indexed(
                 } else {
                     format!("  {label}  ")
                 };
-                headers.push(CodeHeader {
-                    line: out.len(),
-                    col: text_width(&head),
-                });
-                out.push(truncate_line(
-                    Line::from(vec![
+                if text_width(&head) + text_width(COPY_LABEL) <= width {
+                    headers.push(CodeHeader {
+                        line: out.len(),
+                        col: text_width(&head),
+                    });
+                    out.push(Line::from(vec![
                         Span::styled(head, theme.fg(Token::Muted)),
                         Span::styled(COPY_LABEL, theme.fg(Token::Muted)),
-                    ]),
-                    width,
-                ));
+                    ]));
+                } else {
+                    // A long language label wraps; the copy button gets
+                    // its own row below it.
+                    out.extend(wrap_line(
+                        Line::from(Span::styled(head, theme.fg(Token::Muted))),
+                        width,
+                        &[Span::raw("  ")],
+                    ));
+                    headers.push(CodeHeader {
+                        line: out.len(),
+                        col: 2.min(width.saturating_sub(1)),
+                    });
+                    out.push(Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(COPY_LABEL, theme.fg(Token::Muted)),
+                    ]));
+                }
             }
             continue;
         }
         if let Some((lang, state)) = fence.as_mut() {
-            let mut spans = vec![Span::styled("│ ", theme.fg(Token::Border))];
+            let bar = Span::styled("│ ", theme.fg(Token::Border));
+            let mut spans = vec![bar.clone()];
             spans.extend(highlight::highlight_line(
                 *lang,
-                &raw.replace('\t', "    "),
+                &crate::chat::text::sanitize(raw),
                 state,
                 theme,
                 Style::default(),
             ));
-            out.push(truncate_line(Line::from(spans), width));
+            // Long code lines wrap under the bar, never cut.
+            out.extend(wrap_line(
+                Line::from(spans),
+                width,
+                std::slice::from_ref(&bar),
+            ));
             continue;
         }
         if t.is_empty() {
@@ -501,5 +522,33 @@ mod tests {
         let mut cache = MarkdownCache::new();
         cache.lines("a\n\n```py\nx", 40, &theme, true);
         assert_eq!(cache.code_headers().len(), 1);
+    }
+
+    #[test]
+    fn long_code_lines_and_labels_wrap_instead_of_being_cut() {
+        let theme = Theme::default();
+        let code = format!("let s = \"{}\";\tx", "y".repeat(70));
+        let md = format!("```a-very-long-language-label-for-this-block\n{code}\n```\n");
+        let (lines, headers) = render_indexed(&md, 30, &theme, true);
+        let t = texts(&lines);
+        for l in &t {
+            assert!(text_width(l) <= 30, "{l}\n{t:?}");
+            assert!(!l.contains('…'), "{t:?}");
+            assert!(!l.contains('\t'), "{t:?}");
+        }
+        // Every code row keeps the bar; continuation rows are soft wraps.
+        let rows: Vec<&String> = t.iter().filter(|l| l.starts_with("│ ")).collect();
+        assert!(rows.len() >= 3, "{t:?}");
+        let joined: String = rows.iter().map(|r| &r[4..]).collect::<String>();
+        assert!(joined.contains(&"y".repeat(70)), "{t:?}");
+        assert!(
+            lines
+                .iter()
+                .any(|l| super::super::text::soft_join(l) != crate::selection::Join::Hard)
+        );
+        // The copy button sits where its header says.
+        let h = &headers[0];
+        let row: String = t[h.line].chars().skip(h.col).collect();
+        assert!(row.starts_with(COPY_LABEL), "{t:?} {h:?}");
     }
 }

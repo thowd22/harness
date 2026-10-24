@@ -17,6 +17,7 @@ pub mod indicators;
 pub mod input;
 pub mod inspector;
 pub mod interaction;
+pub mod item_detail;
 pub mod keys;
 pub mod layout;
 pub mod login;
@@ -31,3 +32,6 @@ pub mod session_picker;
 pub mod status;
 pub mod terminal;
 pub mod theme;
+
+#[cfg(test)]
+mod layout_matrix;

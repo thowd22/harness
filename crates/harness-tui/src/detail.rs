@@ -19,8 +19,9 @@
 //!
 //! Every group header, card, reasoning toggle, sidebar item and button is
 //! registered in the interaction layer: click it, or move focus with
-//! Tab / arrows and press Enter. Esc backs out. PgUp/PgDn and the wheel
-//! scroll the log.
+//! Tab / arrows and press Enter. Esc backs out. PgUp/PgDn, Home/End and
+//! the wheel scroll the log. Headers, sidebar items and outputs wrap
+//! rather than being cut.
 //!
 //! Palette actions ([`palette_entries`], [`DetailView::run_palette`]):
 //! search the log, copy the focused entry, open the diff review and open
@@ -51,7 +52,7 @@ use time::OffsetDateTime;
 
 use crate::cards::{CardCtx, CardStatus, ToolCard, payload_json, payload_text, str_arg};
 use crate::chat::text::{
-    fmt_cost, fmt_ms, fmt_tokens, right_align, sanitize, truncate, truncate_line, wrap_line,
+    fmt_cost, fmt_ms, fmt_tokens, line_width, right_align, sanitize, wrap_line,
 };
 use crate::chat::transcript::{TurnMeta, ViewSettings};
 use crate::indicators::{Spinner, node_glyph};
@@ -247,6 +248,8 @@ struct Rendered {
 struct Hit {
     id: String,
     line: usize,
+    /// Lines it covers (a wrapped header covers all of its rows).
+    rows: usize,
     x: u16,
     width: u16,
     action: DetailAction,
@@ -261,10 +264,70 @@ fn hit(id: impl Into<String>, line: usize, action: DetailAction) -> Hit {
     Hit {
         id: id.into(),
         line,
+        rows: 1,
         x: 0,
         width: 0,
         action,
     }
+}
+
+/// `left` with `right` at the right edge when both fit in `width`;
+/// otherwise `left` wraps (continuation rows indented by `indent` cells)
+/// and `right` goes at the end of the last row, or on a row of its own.
+fn header_rows(
+    left: Line<'static>,
+    right: Vec<Span<'static>>,
+    width: usize,
+    indent: usize,
+) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let rw: usize = right
+        .iter()
+        .map(|s| crate::chat::text::width(&s.content))
+        .sum();
+    let lw = line_width(&left);
+    if (rw == 0 && lw <= width) || lw + rw < width {
+        return vec![right_align(left, right, width, Span::raw(" "))];
+    }
+    let style = left.style;
+    let pad = [Span::raw(" ".repeat(indent))];
+    // Room beside `right` on the first row: wrap there and keep `right`
+    // (the time) on the first row.
+    if rw > 0 && width >= rw + 1 + 16 {
+        let mut rows = wrap_line(left, width - rw - 1, &pad);
+        let first = rows.remove(0);
+        rows.insert(0, right_align(first, right, width, Span::raw(" ")));
+        return rows;
+    }
+    let mut rows = wrap_line(left, width, &pad);
+    if rw > 0 {
+        let last = rows.pop().unwrap_or_default();
+        if line_width(&last) + rw < width {
+            rows.push(right_align(last, right, width, Span::raw(" ")));
+        } else {
+            rows.push(last);
+            rows.push(right_align(
+                Line::default().style(style),
+                right,
+                width,
+                Span::raw(" "),
+            ));
+        }
+    }
+    rows
+}
+
+/// `line` wrapped to `width`, each row after `prefix` (the soft-wrap marker
+/// stays first, see [`prefixed`]).
+fn wrapped(prefix: Vec<Span<'static>>, line: Line<'static>, width: usize) -> Vec<Line<'static>> {
+    let pw: usize = prefix
+        .iter()
+        .map(|s| crate::chat::text::width(&s.content))
+        .sum();
+    wrap_line(line, width.saturating_sub(pw).max(1), &[])
+        .into_iter()
+        .map(|wl| prefixed(prefix.clone(), wl))
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -319,6 +382,8 @@ pub struct DetailView {
     side_scroll: usize,
     /// The last focused log entry (the copy button takes focus when clicked).
     copy_focus: Option<ElementId>,
+    /// Header rows that did not fit above the log (shown at its top).
+    head_rest: Vec<Line<'static>>,
 }
 
 impl DetailView {
@@ -349,6 +414,7 @@ impl DetailView {
             focus_scroll: None,
             side_scroll: 0,
             copy_focus: None,
+            head_rest: Vec::new(),
         }
     }
 
@@ -538,7 +604,9 @@ impl DetailView {
                 server,
                 tool,
             } => self.with_card(call_id, |c| c.set_mcp(server, tool)),
-            EventKind::FileChanged { path, change, diff } => {
+            EventKind::FileChanged {
+                path, change, diff, ..
+            } => {
                 let diff = diff.as_ref().map(payload_text);
                 self.file_changed(path, *change, diff);
             }
@@ -938,6 +1006,15 @@ impl DetailView {
                     });
                     return None;
                 }
+                KeyCode::Home => {
+                    self.scroll = 0;
+                    self.follow = false;
+                    return None;
+                }
+                KeyCode::End => {
+                    self.scroll = usize::MAX / 2;
+                    return None;
+                }
                 KeyCode::Esc => return Some(DetailOutput::Back),
                 _ => {}
             }
@@ -965,7 +1042,7 @@ struct Ctx<'a> {
 }
 
 impl DetailView {
-    fn turn_header(&self, i: usize, expanded: bool, c: &Ctx<'_>) -> Line<'static> {
+    fn turn_header(&self, i: usize, expanded: bool, c: &Ctx<'_>) -> Vec<Line<'static>> {
         let t = &self.turns[i];
         let th = c.theme;
         let muted = th.fg(Token::Muted);
@@ -985,7 +1062,7 @@ impl DetailView {
                 format!("Turn {}", i + 1),
                 th.fg(Token::Fg).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format!("  {}", t.model), th.fg(Token::Agent)),
+            Span::styled(format!("  {}", sanitize(&t.model)), th.fg(Token::Agent)),
         ];
         if let Some(m) = &t.meta {
             let u = m.usage;
@@ -1019,7 +1096,7 @@ impl DetailView {
             .format(t.ts, c.now)
             .map(|s| vec![Span::styled(s, muted)])
             .unwrap_or_default();
-        right_align(Line::from(left), right, c.width, Span::raw(" "))
+        header_rows(Line::from(left), right, c.width, 4)
     }
 
     fn layout_group(&self, gi: usize, c: &Ctx<'_>) -> (Vec<Line<'static>>, Vec<Hit>) {
@@ -1040,13 +1117,15 @@ impl DetailView {
         match &g.key {
             GroupKey::Turn(i) => {
                 let t = &self.turns[*i];
-                lines.push(
-                    self.turn_header(*i, expanded, c)
-                        .patch_style(header_style(&gid)),
-                );
-                hits.push(hit(gid.clone(), 0, DetailAction::Toggle(g.key.clone())));
+                for l in self.turn_header(*i, expanded, c) {
+                    lines.push(l.patch_style(header_style(&gid)));
+                }
+                hits.push(Hit {
+                    rows: lines.len(),
+                    ..hit(gid.clone(), 0, DetailAction::Toggle(g.key.clone()))
+                });
                 if expanded {
-                    let w = c.width.saturating_sub(2).max(10);
+                    let w = c.width.saturating_sub(2).max(1);
                     if !t.reasoning.is_empty()
                         && self.settings.show_thinking != ShowThinking::Hidden
                     {
@@ -1086,13 +1165,14 @@ impl DetailView {
                         }
                     }
                     if let Some(h) = &t.hidden {
-                        lines.push(Line::from(vec![
-                            indent(),
-                            Span::styled(
-                                format!("ⓘ {h}"),
+                        lines.extend(wrapped(
+                            vec![indent()],
+                            Line::from(Span::styled(
+                                format!("ⓘ {}", sanitize(h)),
                                 th.fg(Token::Warn).add_modifier(Modifier::ITALIC),
-                            ),
-                        ]));
+                            )),
+                            c.width,
+                        ));
                     }
                     for l in t.text.lines() {
                         let line = Line::from(Span::styled(sanitize(l), th.fg(Token::Fg)));
@@ -1125,9 +1205,7 @@ impl DetailView {
                         }
                     }
                     if let Some(m) = &t.meta {
-                        let mut spans = vec![indent()];
-                        spans.extend(m.line(th).spans);
-                        lines.push(truncate_line(Line::from(spans), c.width));
+                        lines.extend(wrapped(vec![indent()], m.line(th), c.width));
                     }
                 }
             }
@@ -1155,21 +1233,21 @@ impl DetailView {
                     Span::styled("verify ", th.fg(Token::Accent)),
                     Span::styled(sanitize(&v.command), th.fg(Token::Fg)),
                 ]);
-                lines.push(
-                    right_align(left, right, c.width, Span::raw(" "))
-                        .patch_style(header_style(&gid)),
-                );
-                hits.push(hit(gid.clone(), 0, DetailAction::Toggle(g.key.clone())));
+                for l in header_rows(left, right, c.width, 4) {
+                    lines.push(l.patch_style(header_style(&gid)));
+                }
+                hits.push(Hit {
+                    rows: lines.len(),
+                    ..hit(gid.clone(), 0, DetailAction::Toggle(g.key.clone()))
+                });
                 if expanded {
-                    let out: Vec<&str> = v.output.lines().collect();
-                    for l in &out[out.len().saturating_sub(20)..] {
-                        lines.push(Line::from(vec![
-                            indent(),
-                            Span::styled(
-                                truncate(&sanitize(l), c.width.saturating_sub(2)),
-                                th.fg(Token::Muted),
-                            ),
-                        ]));
+                    // The whole output, wrapped: the log scrolls.
+                    for l in v.output.lines() {
+                        lines.extend(wrapped(
+                            vec![indent()],
+                            Line::from(Span::styled(sanitize(l), th.fg(Token::Muted))),
+                            c.width,
+                        ));
                     }
                 }
             }
@@ -1199,7 +1277,7 @@ impl DetailView {
                     } else {
                         Vec::new()
                     };
-                    lines.push(right_align(line, right, c.width, Span::raw(" ")));
+                    lines.extend(header_rows(line, right, c.width, 2));
                 }
                 if lines.is_empty() {
                     lines.push(Line::from(Span::styled(format!("{icon}"), th.fg(token))));
@@ -1220,8 +1298,9 @@ impl DetailView {
                 hits.push(hit(gid.clone(), 0, DetailAction::Toggle(g.key.clone())));
                 if expanded {
                     for l in &self.hygiene {
-                        lines.push(truncate_line(
-                            Line::from(vec![indent(), Span::styled(sanitize(l), th.fg(Token::Fg))]),
+                        lines.extend(wrapped(
+                            vec![indent()],
+                            Line::from(Span::styled(sanitize(l), th.fg(Token::Fg))),
                             c.width,
                         ));
                     }
@@ -1272,14 +1351,19 @@ impl DetailView {
                 if expanded {
                     for (i, name) in self.artifacts.iter().enumerate() {
                         let id = artifact_id(i);
-                        hits.push(hit(id.clone(), lines.len(), DetailAction::OpenArtifact(i)));
-                        lines.push(Line::from(vec![
-                            indent(),
-                            Span::styled(
+                        let rows = wrapped(
+                            vec![indent()],
+                            Line::from(Span::styled(
                                 format!("[{}]", sanitize(name)),
                                 th.fg(Token::Link).patch(header_style(&id)),
-                            ),
-                        ]));
+                            )),
+                            c.width,
+                        );
+                        hits.push(Hit {
+                            rows: rows.len(),
+                            ..hit(id.clone(), lines.len(), DetailAction::OpenArtifact(i))
+                        });
+                        lines.extend(rows);
                     }
                 }
             }
@@ -1373,7 +1457,10 @@ impl DetailView {
                                 Span::raw("  "),
                                 Span::styled(format!("{icon} "), th.fg(card.status.token())),
                                 Span::styled(card.display_name(), th.fg(Token::Accent)),
-                                Span::styled(format!(" {}", card.summary()), th.fg(Token::Muted)),
+                                Span::styled(
+                                    format!(" {}", sanitize(&card.summary())),
+                                    th.fg(Token::Muted),
+                                ),
                             ]),
                             DetailAction::JumpCard(card.call_id.clone()),
                         ));
@@ -1391,7 +1478,7 @@ impl DetailView {
                         Line::from(vec![
                             Span::styled(format!("{icon} "), th.fg(token)),
                             Span::styled("verify ", th.fg(Token::Accent)),
-                            Span::styled(v.command.clone(), th.fg(Token::Muted)),
+                            Span::styled(sanitize(&v.command), th.fg(Token::Muted)),
                         ]),
                         DetailAction::Jump(g.key.clone()),
                     ));
@@ -1415,7 +1502,7 @@ impl DetailView {
         out
     }
 
-    fn header(&self, now: OffsetDateTime, width: u16) -> Line<'static> {
+    fn header(&self, now: OffsetDateTime) -> Line<'static> {
         let th = &self.theme;
         let muted = th.fg(Token::Muted);
         let num = th.fg(Token::Number);
@@ -1429,7 +1516,7 @@ impl DetailView {
         let mut spans = vec![
             Span::styled(format!(" {glyph} "), th.fg(token)),
             Span::styled(
-                self.run.node_label(n),
+                sanitize(&self.run.node_label(n)),
                 th.fg(Token::Agent).add_modifier(Modifier::BOLD),
             ),
         ];
@@ -1437,10 +1524,13 @@ impl DetailView {
             .into_iter()
             .flatten()
         {
-            spans.push(Span::styled(format!(" · {part}"), muted));
+            spans.push(Span::styled(format!(" · {}", sanitize(&part)), muted));
         }
         if let Some(h) = &n.host {
-            spans.push(Span::styled(format!(" · ⧉{h}"), th.fg(Token::Running)));
+            spans.push(Span::styled(
+                format!(" · ⧉{}", sanitize(h)),
+                th.fg(Token::Running),
+            ));
         }
         if let Some(ms) = metrics::elapsed_ms(n, now) {
             spans.push(Span::styled("  ", muted));
@@ -1471,29 +1561,44 @@ impl DetailView {
             "  f to follow"
         };
         spans.push(Span::styled(follow, muted));
-        truncate_line(Line::from(spans), usize::from(width))
+        Line::from(spans)
     }
 
     /// Renders the view into `area`.
     pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect, now: OffsetDateTime) {
         let theme = self.theme.clone();
         let mut hits = self.interaction.begin_frame();
-        let [head, body] =
-            Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
         if let Some(f) = self.interaction.focused()
             && f.0 != COPY_BUTTON_ID
         {
             self.copy_focus = Some(f.clone());
         }
+        // The header wraps; the copy button goes at the end of its last row,
+        // or on a row of its own when that row is full.
         let bw = crate::chat::text::width(COPY_BUTTON_LABEL) as u16;
-        let (head, button) = if head.width > bw + 20 {
-            let [h, b] =
-                Layout::horizontal([Constraint::Min(1), Constraint::Length(bw)]).areas(head);
-            (h, Some(b))
-        } else {
-            (head, None)
-        };
-        frame.render_widget(Paragraph::new(self.header(now, head.width)), head);
+        let with_button = area.width > bw + 20;
+        let mut head_lines = wrap_line(
+            self.header(now),
+            usize::from(area.width).max(1),
+            &[Span::raw("   ")],
+        );
+        if with_button
+            && head_lines
+                .last()
+                .is_some_and(|l| line_width(l) + usize::from(bw) + 1 > usize::from(area.width))
+        {
+            head_lines.push(Line::default());
+        }
+        let button_row = head_lines.len().saturating_sub(1);
+        // All of it, keeping three rows for the log; rows beyond that start
+        // the log, so they scroll into view.
+        let head_h = (head_lines.len() as u16).min(area.height.saturating_sub(3).max(1));
+        self.head_rest = head_lines.split_off(usize::from(head_h).min(head_lines.len()));
+        let [head, body] =
+            Layout::vertical([Constraint::Length(head_h), Constraint::Min(1)]).areas(area);
+        let button = (with_button && button_row < usize::from(head_h))
+            .then(|| Rect::new(head.right() - bw, head.y + button_row as u16, bw, 1));
+        frame.render_widget(Paragraph::new(head_lines), head);
         let (side, log) = if body.width >= SIDEBAR_WIDTH + 40 {
             let [s, l] =
                 Layout::horizontal([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(1)])
@@ -1533,29 +1638,53 @@ impl DetailView {
         let inner = block.inner(area);
         frame.render_widget(block, area);
         hits.register_pane("detail.sidebar", inner);
-        let items = self.sidebar_items();
+        // Items wrap; the sidebar scrolls by rows and keeps the focused
+        // item in view.
+        let w = usize::from(inner.width).max(1);
+        let items: Vec<(String, Vec<Line<'static>>, DetailAction)> = self
+            .sidebar_items()
+            .into_iter()
+            .map(|(id, line, action)| (id, wrap_line(line, w, &[Span::raw("    ")]), action))
+            .collect();
         let h = usize::from(inner.height);
+        let mut tops = Vec::with_capacity(items.len());
+        let mut total = 0usize;
+        for it in &items {
+            tops.push(total);
+            total += it.1.len();
+        }
         if let Some(fi) = focus.and_then(|f| items.iter().position(|i| i.0 == f)) {
-            if fi < self.side_scroll {
-                self.side_scroll = fi;
-            } else if fi >= self.side_scroll + h {
-                self.side_scroll = fi + 1 - h;
+            let (a, b) = (tops[fi], tops[fi] + items[fi].1.len());
+            if a < self.side_scroll {
+                self.side_scroll = a;
+            } else if b > self.side_scroll + h {
+                self.side_scroll = b.saturating_sub(h).min(a);
             }
         }
-        self.side_scroll = self.side_scroll.min(items.len().saturating_sub(h));
+        self.side_scroll = self.side_scroll.min(total.saturating_sub(h));
         let first = self.side_scroll;
         crate::selection::update("detail.sidebar", |r| r.set_scroll(first));
         let mut lines = Vec::new();
-        for (row, (id, line, action)) in
-            items.into_iter().skip(self.side_scroll).take(h).enumerate()
-        {
-            let rect = Rect::new(inner.x, inner.y + row as u16, inner.width, 1);
+        for (k, (id, rows, action)) in items.into_iter().enumerate() {
+            let top = tops[k];
+            let (a, b) = (top.max(first), (top + rows.len()).min(first + h));
+            if a >= b {
+                continue;
+            }
             let style = if focus == Some(id.as_str()) {
                 theme.focused()
             } else {
                 Style::default()
             };
-            lines.push(truncate_line(line, usize::from(inner.width)).patch_style(style));
+            let rect = Rect::new(
+                inner.x,
+                inner.y + (a - first) as u16,
+                inner.width,
+                (b - a) as u16,
+            );
+            for l in rows.into_iter().skip(a - top).take(b - a) {
+                lines.push(l.patch_style(style));
+            }
             hits.register(id, rect, action);
         }
         frame.render_widget(Paragraph::new(lines), inner);
@@ -1581,7 +1710,9 @@ impl DetailView {
             focus,
         };
         let mut offsets = Vec::with_capacity(self.groups.len());
-        let mut total = 0usize;
+        // The header rows that did not fit above come first.
+        let rest = std::mem::take(&mut self.head_rest);
+        let mut total = rest.len();
         for gi in 0..self.groups.len() {
             self.ensure_layout(gi, &c);
             offsets.push(total);
@@ -1617,6 +1748,11 @@ impl DetailView {
         let end = (start + height).min(total);
         let mut lines = Vec::with_capacity(height);
         // First group intersecting the viewport (binary search on offsets).
+        for (k, l) in rest.iter().enumerate() {
+            if k >= start && k < end {
+                lines.push(l.clone());
+            }
+        }
         let first = offsets.partition_point(|&o| o <= start).saturating_sub(1);
         for (gi, &off) in offsets.iter().enumerate().skip(first) {
             if off >= end {
@@ -1632,15 +1768,17 @@ impl DetailView {
                 }
             }
             for h in &r.hits {
-                let line_no = off + h.line;
-                if line_no >= start && line_no < end {
-                    let y = area.y + (line_no - start) as u16;
+                // The visible part of the rows the element covers.
+                let first = (off + h.line).max(start);
+                let last = (off + h.line + h.rows.max(1)).min(end);
+                if first < last {
+                    let y = area.y + (first - start) as u16;
                     let (x, w) = if h.width == 0 {
                         (area.x, area.width)
                     } else {
                         (area.x + h.x, h.width.min(area.width.saturating_sub(h.x)))
                     };
-                    let rect = Rect::new(x, y, w, 1);
+                    let rect = Rect::new(x, y, w, (last - first) as u16);
                     if h.width == 0 {
                         hits.register(h.id.clone(), rect, h.action.clone());
                     } else {

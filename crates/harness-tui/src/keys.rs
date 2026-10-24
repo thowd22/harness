@@ -457,36 +457,94 @@ impl Keymap {
 /// Element id of the help overlay's close button.
 pub const HELP_CLOSE_ID: &str = "help.close";
 
+/// Scroll pane id of the help overlay (the wheel scrolls it).
+pub const HELP_PANE: &str = "help";
+
 /// The help overlay listing the active bindings. It is modal: it registers a
 /// modal layer in the [`HitMap`] with a focusable close button, so it can be
 /// closed with Esc, Enter on the button, a click on the button or a click
-/// outside it.
+/// outside it. Long keys and descriptions wrap in their columns; when the
+/// list is taller than the screen it scrolls ([`HelpOverlay::scrolled`],
+/// [`help_scroll`]) and the bottom border shows the position.
 pub struct HelpOverlay<'a> {
     keymap: &'a Keymap,
     theme: &'a Theme,
+    scroll: u16,
+}
+
+/// Rows a key in the help overlay scrolls it by: Up/Down one, PageUp/
+/// PageDown a page, Home/End to either end. `None` for other keys.
+pub fn help_scroll(key: &KeyEvent) -> Option<i32> {
+    if key.kind == KeyEventKind::Release {
+        return None;
+    }
+    match key.code {
+        KeyCode::Up => Some(-1),
+        KeyCode::Down => Some(1),
+        KeyCode::PageUp => Some(-8),
+        KeyCode::PageDown => Some(8),
+        KeyCode::Home => Some(-i32::from(u16::MAX)),
+        KeyCode::End => Some(i32::from(u16::MAX)),
+        _ => None,
+    }
 }
 
 impl<'a> HelpOverlay<'a> {
     /// Creates the overlay for `keymap`.
     pub fn new(keymap: &'a Keymap, theme: &'a Theme) -> HelpOverlay<'a> {
-        HelpOverlay { keymap, theme }
+        HelpOverlay {
+            keymap,
+            theme,
+            scroll: 0,
+        }
+    }
+
+    /// Starts the list `offset` rows down (clamped when drawn).
+    pub fn scrolled(mut self, offset: u16) -> HelpOverlay<'a> {
+        self.scroll = offset;
+        self
+    }
+
+    fn widths(&self) -> (usize, usize) {
+        let rows = self.keymap.help_rows();
+        let key_w = rows.iter().map(|(k, _)| width_of(k)).max().unwrap_or(0);
+        let desc_w = rows.iter().map(|(_, d)| width_of(d)).max().unwrap_or(0);
+        (key_w, desc_w)
+    }
+
+    /// The list rows at overlay width `w`: keys and descriptions wrapped
+    /// in their columns.
+    fn body(&self, w: u16) -> Vec<Line<'static>> {
+        let theme = self.theme;
+        let iw = (w.saturating_sub(2) as usize).max(1);
+        let (key_w, _) = self.widths();
+        // The key column takes at most half the width.
+        let kw = key_w.min((iw.saturating_sub(3)) / 2).max(1);
+        let dw = iw.saturating_sub(kw + 3).max(1);
+        let mut out = Vec::new();
+        for (keys, desc) in self.keymap.help_rows() {
+            let k = crate::chat::text::wrap_text(&keys, kw);
+            let d = crate::chat::text::wrap_text(desc, dw);
+            for i in 0..k.len().max(d.len()) {
+                let kt = k.get(i).cloned().unwrap_or_default();
+                let pad = kw.saturating_sub(width_of(&kt));
+                out.push(Line::from(vec![
+                    Span::styled(
+                        format!(" {kt}{}  ", " ".repeat(pad)),
+                        theme.fg(Token::Accent),
+                    ),
+                    Span::styled(d.get(i).cloned().unwrap_or_default(), theme.fg(Token::Fg)),
+                ]));
+            }
+        }
+        out
     }
 
     /// The overlay rectangle, centred in `area`.
     pub fn area(&self, area: Rect) -> Rect {
-        let rows = self.keymap.help_rows();
-        let key_w = rows
-            .iter()
-            .map(|(k, _)| k.chars().count())
-            .max()
-            .unwrap_or(0);
-        let desc_w = rows
-            .iter()
-            .map(|(_, d)| d.chars().count())
-            .max()
-            .unwrap_or(0);
+        let (key_w, desc_w) = self.widths();
         let width = ((key_w + desc_w + 7) as u16).min(area.width);
-        let height = ((rows.len() + 4) as u16).min(area.height);
+        let height = ((self.body(width).len() + 4) as u16).min(area.height);
         Rect {
             x: area.x + (area.width - width) / 2,
             y: area.y + (area.height - height) / 2,
@@ -495,32 +553,24 @@ impl<'a> HelpOverlay<'a> {
         }
     }
 
-    /// Renders the overlay and registers its modal layer and close button,
-    /// which dispatches `close`.
+    /// Renders the overlay and registers its modal layer, scroll pane and
+    /// close button, which dispatches `close`. Returns the largest scroll
+    /// offset (0 when everything fits).
     pub fn render<A: Clone>(
         self,
         frame: &mut Frame<'_>,
         area: Rect,
         hits: &mut HitMap<A>,
         close: A,
-    ) {
+    ) -> u16 {
         let theme = self.theme;
         let rect = self.area(area);
-        let rows = self.keymap.help_rows();
-        let key_w = rows
-            .iter()
-            .map(|(k, _)| k.chars().count())
-            .max()
-            .unwrap_or(0);
-        let mut lines: Vec<Line<'_>> = rows
-            .into_iter()
-            .map(|(keys, desc)| {
-                Line::from(vec![
-                    Span::styled(format!(" {keys:<key_w$}  "), theme.fg(Token::Accent)),
-                    Span::styled(desc, theme.fg(Token::Fg)),
-                ])
-            })
-            .collect();
+        let body = self.body(rect.width);
+        // Inside the border: the list, a blank row and the close button.
+        let view = rect.height.saturating_sub(4) as usize;
+        let max = body.len().saturating_sub(view);
+        let first = (self.scroll as usize).min(max);
+        let mut lines: Vec<Line<'static>> = body.iter().skip(first).take(view).cloned().collect();
         lines.push(Line::default());
 
         hits.push_modal(rect);
@@ -533,7 +583,7 @@ impl<'a> HelpOverlay<'a> {
         lines
             .push(Line::from(Span::styled("[ Close ]", button_style)).alignment(Alignment::Center));
 
-        let block = Block::new()
+        let mut block = Block::new()
             .borders(Borders::ALL)
             .border_style(theme.border(true))
             .title(Span::styled(" Keys ", theme.fg(Token::Accent)))
@@ -541,8 +591,25 @@ impl<'a> HelpOverlay<'a> {
                 Line::from(Span::styled(" esc to close ", theme.fg(Token::Muted))).right_aligned(),
             )
             .style(theme.base());
+        if max > 0 {
+            block = block.title_bottom(
+                Line::from(Span::styled(
+                    format!(" ↕ {}-{}/{} ", first + 1, first + view, body.len()),
+                    theme.fg(Token::Muted),
+                ))
+                .left_aligned(),
+            );
+        }
         frame.render_widget(Clear, rect);
+        let inner = block.inner(rect);
         frame.render_widget(Paragraph::new(lines).block(block), rect);
+        hits.register_pane(
+            HELP_PANE,
+            Rect {
+                height: view as u16,
+                ..inner
+            },
+        );
 
         // The button is on the last text row inside the border.
         let label = 9u16;
@@ -554,7 +621,12 @@ impl<'a> HelpOverlay<'a> {
             height: 1,
         };
         hits.register_button(HELP_CLOSE_ID, button, close);
+        max as u16
     }
+}
+
+fn width_of(s: &str) -> usize {
+    crate::chat::text::width(s)
 }
 
 #[cfg(test)]

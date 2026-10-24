@@ -34,8 +34,19 @@ pub const KEY_ACTIONS: &[&str] = &[
 
 /// Fixed (non-dotted) section names.
 pub const FIXED_SECTIONS: &[&str] = &[
-    "general", "models", "pricing", "keys", "ui", "theme", "policy", "sandbox", "verify",
-    "context", "budget", "memory",
+    "general",
+    "models",
+    "pricing",
+    "keys",
+    "ui",
+    "theme",
+    "policy",
+    "sandbox",
+    "verify",
+    "context",
+    "budget",
+    "memory",
+    "experimental",
 ];
 
 config_enum!(
@@ -110,11 +121,48 @@ config_enum!(
         Off = "off" }
 );
 config_enum!(
-    /// Prompt-cache lifetime for Anthropic models on OpenRouter
-    /// (`[provider.openrouter] cache_ttl`).
-    CacheTtl { /// Five minutes (the default).
+    /// Prompt-cache lifetime (`[provider.anthropic] cache_ttl`, and for
+    /// Anthropic models `[provider.openrouter] cache_ttl`, which accepts
+    /// only `5m` and `1h`, see [`OpenRouterCacheTtl`]).
+    CacheTtl { /// Five minutes on every breakpoint (the default).
+        FiveMinutes = "5m", /// One hour on every breakpoint; cache writes cost 2x
+        /// instead of 1.25x.
+        OneHour = "1h", /// Anthropic only: one hour on the tool and system
+        /// breakpoints, five minutes on the message breakpoints.
+        Mixed = "mixed" }
+);
+config_enum!(
+    /// The lifetimes `[provider.openrouter] cache_ttl` accepts.
+    OpenRouterCacheTtl { /// Five minutes (the default).
         FiveMinutes = "5m", /// One hour; cache writes cost more.
         OneHour = "1h" }
+);
+
+impl From<OpenRouterCacheTtl> for CacheTtl {
+    fn from(t: OpenRouterCacheTtl) -> Self {
+        match t {
+            OpenRouterCacheTtl::FiveMinutes => Self::FiveMinutes,
+            OpenRouterCacheTtl::OneHour => Self::OneHour,
+        }
+    }
+}
+config_enum!(
+    /// How the Anthropic provider returns thinking
+    /// (`[provider.anthropic] thinking_display`).
+    ThinkingDisplay { /// Readable reasoning summaries (the default).
+        Summarized = "summarized", /// Empty thinking blocks (signatures only).
+        Omitted = "omitted", /// Only the between-tool progress notes (beta).
+        Updates = "updates" }
+);
+config_enum!(
+    /// OpenRouter service tier (`[provider.openrouter] service_tier`).
+    OpenRouterServiceTier { /// Send `service_tier: "default"`: standard endpoints only (also
+        /// stops a `:nitro` model from admitting priority endpoints).
+        Default = "default", /// Send `service_tier: "fast"`: the priority tier where the model
+        /// has one (Anthropic fast mode on Claude Opus), at its higher
+        /// price; OpenRouter falls back to standard endpoints at the
+        /// standard price when none is available.
+        Fast = "fast" }
 );
 config_enum!(
     /// How the OpenAI provider authenticates (`[provider.openai] auth`).
@@ -122,6 +170,16 @@ config_enum!(
         ApiKey = "api_key", /// Sign in with ChatGPT (`harness login openai`); usage counts
         /// against the ChatGPT plan.
         ChatGpt = "chatgpt" }
+);
+config_enum!(
+    /// OpenAI prompt-cache retention (`[provider.openai]
+    /// prompt_cache_retention`).
+    OpenAiCacheRetention { /// Send nothing, so the organisation's default applies (the
+        /// default; `24h` for organisations without Zero Data Retention,
+        /// `in_memory` for ZDR organisations).
+        Default = "default", /// Send `prompt_cache_retention: "24h"` for the models that
+        /// support extended caching (opt-in).
+        TwentyFourHours = "24h" }
 );
 config_enum!(
     /// Remote workspace sync method (`[remote.<name>] sync`).
@@ -198,13 +256,39 @@ pub struct ProviderConfig {
     pub provider_order: Vec<String>,
     /// OpenRouter only: allow routing fallbacks.
     pub allow_fallbacks: Option<bool>,
-    /// OpenRouter only: prompt-cache lifetime for Anthropic models
-    /// (`cache_ttl`, default `5m`).
+    /// Anthropic, and OpenRouter for Anthropic models: prompt-cache
+    /// lifetime (`cache_ttl`, default `5m`; `mixed` only for anthropic).
     pub cache_ttl: Option<CacheTtl>,
+    /// OpenRouter only: send a per-session `session_id` so OpenRouter
+    /// keeps routing the session to the same upstream (sticky routing,
+    /// warm prompt cache) from the first request on (`session_id`,
+    /// default on; `None` = default). Ignored by OpenRouter when
+    /// `provider_order` is set.
+    pub session_id: Option<bool>,
     /// Anthropic only: request-body gzip (`gzip_requests`, default `auto`).
     pub gzip_requests: Option<GzipRequests>,
     /// Anthropic only: gzip level 1 to 9 (`gzip_level`, default 3).
     pub gzip_level: Option<u32>,
+    /// Anthropic only: thinking display (`thinking_display`, default
+    /// `summarized`). Left out of the serialized form when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_display: Option<ThinkingDisplay>,
+    /// Anthropic only: use the one-hour lifetime on every breakpoint while
+    /// a long wait is expected (a background job runs, or the last tool
+    /// round was long) (`cache_ttl_auto_1h`, default false). Left out of
+    /// the serialized form when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_ttl_auto_1h: Option<bool>,
+    /// OpenRouter only: ask for reasoning to be left out of responses
+    /// (`reasoning_exclude`, default false). Left out of the serialized
+    /// form when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_exclude: Option<bool>,
+    /// OpenRouter only: the service tier to request (`service_tier`,
+    /// default unset: the field is not sent). Left out of the serialized
+    /// form when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<OpenRouterServiceTier>,
     /// OpenAI only: `api_key` (default) or `chatgpt` (Sign in with
     /// ChatGPT).
     pub auth: Option<AuthMode>,
@@ -212,6 +296,11 @@ pub struct ProviderConfig {
     /// (`chatgpt_headless`, default false). The ChatGPT credential is
     /// personal; CI is refused even when this is set.
     pub chatgpt_headless: bool,
+    /// OpenAI only: prompt-cache retention to request
+    /// (`prompt_cache_retention`, default unset = `default`: the field is
+    /// not sent). Left out of the serialized form when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_retention: Option<OpenAiCacheRetention>,
 }
 
 impl ProviderConfig {
@@ -362,6 +451,25 @@ pub struct Context {
     /// instead. Default [`DEFAULT_MCP_SCHEMA_BUDGET`].
     #[serde(skip_serializing_if = "is_default_mcp_budget")]
     pub mcp_schema_budget: u64,
+    /// `background_compaction`: start the handoff summary in the background
+    /// at `background_compact_at` and swap it in at `compact_at`, so the
+    /// turn that crosses `compact_at` does not wait for the summary call.
+    /// Default false (experimental, TASK-161.5). Left out of the serialized
+    /// config when off, so config hashes stay unchanged.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub background_compaction: bool,
+    /// `background_compact_at`: fraction of the window at which a
+    /// background summary starts (capped at `compact_at`). Default
+    /// [`DEFAULT_BACKGROUND_COMPACT_AT`].
+    #[serde(skip_serializing_if = "is_default_background_compact_at")]
+    pub background_compact_at: f64,
+}
+
+/// Default `[context] background_compact_at`.
+pub const DEFAULT_BACKGROUND_COMPACT_AT: f64 = 0.7;
+
+fn is_default_background_compact_at(v: &f64) -> bool {
+    *v == DEFAULT_BACKGROUND_COMPACT_AT
 }
 
 /// Default `[context] mcp_schema_budget` (tokens).
@@ -382,6 +490,38 @@ pub struct Budget {
     pub daily_usd: Option<f64>,
     /// What to do on overrun. Default `ask`.
     pub on_exceed: OnExceed,
+}
+
+/// `[experimental]`: opt-in performance experiments (TASK-161,
+/// `docs/performance.md`). Everything is off by default.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct Experimental {
+    /// `prewarm_connection`: open the model provider's connection (DNS,
+    /// TCP, TLS) in the background when a session starts, so the first
+    /// request does not pay for it.
+    pub prewarm_connection: bool,
+    /// `cache_prewarm`: write the prompt cache ahead of the first request
+    /// with a non-generating call (Anthropic `max_tokens: 0`) at session
+    /// start and resume, after `/compact`, and (with `stagger_subagents`)
+    /// before a subagent fan-out. Costs a cache write per pre-warm.
+    pub cache_prewarm: bool,
+    /// `stagger_subagents`: when several subagent requests with the same
+    /// prompt prefix start together, send the first one alone and start
+    /// the rest once its response begins (its cache entry exists then).
+    pub stagger_subagents: bool,
+    /// `early_tool_start`: start a reply's leading read-only tool calls
+    /// that policy allows without asking as soon as each call's arguments
+    /// are complete in the stream, instead of after the whole message.
+    /// Results and the event log are unchanged.
+    pub early_tool_start: bool,
+}
+
+impl Experimental {
+    /// True when nothing is turned on (the section is then left out of the
+    /// serialized config, so config hashes stay unchanged).
+    pub fn is_off(&self) -> bool {
+        *self == Experimental::default()
+    }
 }
 
 /// `[memory]`.
@@ -472,6 +612,9 @@ pub struct Config {
     /// are unchanged.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub mcp: BTreeMap<String, super::mcp::McpServer>,
+    /// `[experimental]`. Omitted from the serialized form when off.
+    #[serde(skip_serializing_if = "Experimental::is_off")]
+    pub experimental: Experimental,
     /// Where each set value came from, keyed `section.key` (for
     /// `harness config show`).
     #[serde(skip)]
@@ -536,6 +679,8 @@ impl Config {
                 keep_recent_turns: 6,
                 elide_tool_results_over: 4000,
                 mcp_schema_budget: DEFAULT_MCP_SCHEMA_BUDGET,
+                background_compaction: false,
+                background_compact_at: DEFAULT_BACKGROUND_COMPACT_AT,
             },
             budget: Budget {
                 session_usd: None,
@@ -552,6 +697,7 @@ impl Config {
                 headless_access: false,
             },
             remotes: BTreeMap::new(),
+            experimental: Experimental::default(),
             mcp: BTreeMap::new(),
             origins: BTreeMap::new(),
         }
@@ -586,6 +732,7 @@ impl Config {
                 "context" => read_context(&mut r, &mut cfg.context),
                 "budget" => read_budget(&mut r, &mut cfg.budget),
                 "memory" => read_memory(&mut r, &mut cfg.memory),
+                "experimental" => read_experimental(&mut r, &mut cfg.experimental),
                 name => {
                     if let Some(id) = name
                         .strip_prefix("provider.")
@@ -755,16 +902,25 @@ fn read_provider(r: &mut SectionReader<'_>, id: &str) -> ProviderConfig {
             r.invalid(entry, "must be between 1 and 9");
             p.gzip_level = None;
         }
+        p.thinking_display = r.enumerated("thinking_display");
+        p.cache_ttl = r.enumerated("cache_ttl");
+        p.cache_ttl_auto_1h = r.bool("cache_ttl_auto_1h");
     }
     if id == "openai" {
         p.auth = r.enumerated("auth");
         p.chatgpt_headless = r.bool("chatgpt_headless").unwrap_or(false);
+        p.prompt_cache_retention = r.enumerated("prompt_cache_retention");
     }
     if id == "openrouter" {
         p.app_name = r.nonempty_string("app_name");
         p.provider_order = r.list("provider_order").unwrap_or_default();
         p.allow_fallbacks = r.bool("allow_fallbacks");
-        p.cache_ttl = r.enumerated("cache_ttl");
+        p.cache_ttl = r
+            .enumerated::<OpenRouterCacheTtl>("cache_ttl")
+            .map(Into::into);
+        p.session_id = r.bool("session_id");
+        p.reasoning_exclude = r.bool("reasoning_exclude");
+        p.service_tier = r.enumerated("service_tier");
     }
     p
 }
@@ -924,14 +1080,20 @@ fn read_verify(r: &mut SectionReader<'_>, v: &mut Verify) {
 }
 
 fn read_context(r: &mut SectionReader<'_>, c: &mut Context) {
-    if let Some(f) = r.float("compact_at") {
-        if f > 0.0 && f <= 1.0 {
-            c.compact_at = f;
-        } else {
-            let entry = r.section().get("compact_at").expect("key was just read");
-            r.invalid(entry, "expected a fraction greater than 0 and at most 1");
+    for (key, slot) in [
+        ("compact_at", &mut c.compact_at),
+        ("background_compact_at", &mut c.background_compact_at),
+    ] {
+        if let Some(f) = r.float(key) {
+            if f > 0.0 && f <= 1.0 {
+                *slot = f;
+            } else {
+                let entry = r.section().get(key).expect("key was just read");
+                r.invalid(entry, "expected a fraction greater than 0 and at most 1");
+            }
         }
     }
+    set!(c.background_compaction, r.bool("background_compaction"));
     set!(c.keep_recent_turns, r.uint("keep_recent_turns"));
     set!(c.elide_tool_results_over, r.uint("elide_tool_results_over"));
     set!(c.mcp_schema_budget, r.uint("mcp_schema_budget"));
@@ -953,6 +1115,13 @@ fn read_budget(r: &mut SectionReader<'_>, b: &mut Budget) {
         }
     }
     set!(b.on_exceed, r.enumerated("on_exceed"));
+}
+
+fn read_experimental(r: &mut SectionReader<'_>, x: &mut Experimental) {
+    set!(x.prewarm_connection, r.bool("prewarm_connection"));
+    set!(x.cache_prewarm, r.bool("cache_prewarm"));
+    set!(x.stagger_subagents, r.bool("stagger_subagents"));
+    set!(x.early_tool_start, r.bool("early_tool_start"));
 }
 
 fn read_memory(r: &mut SectionReader<'_>, m: &mut Memory) {
@@ -1202,6 +1371,17 @@ mod tests {
     }
 
     #[test]
+    fn openrouter_session_id_defaults_on_with_an_off_switch() {
+        let c = load("[provider.openrouter]\napi_key = k\n").unwrap();
+        assert_eq!(c.providers["openrouter"].session_id, None);
+        let c = load("[provider.openrouter]\nsession_id = false\n").unwrap();
+        assert_eq!(c.providers["openrouter"].session_id, Some(false));
+        assert!(load("[provider.openai]\nsession_id = false\n").is_err());
+        // The pre-release experimental key is gone.
+        assert!(load("[experimental]\nopenrouter_session_id = true\n").is_err());
+    }
+
+    #[test]
     fn openrouter_cache_ttl() {
         let c = load("[provider.openrouter]\ncache_ttl = 1h\n").unwrap();
         assert_eq!(c.providers["openrouter"].cache_ttl, Some(CacheTtl::OneHour));
@@ -1209,6 +1389,156 @@ mod tests {
         assert_eq!(c.providers["openrouter"].cache_ttl, None);
         let errs = load("[provider.openrouter]\ncache_ttl = 2h\n").unwrap_err();
         assert!(errs[0].to_string().contains("5m | 1h"), "{errs:?}");
+    }
+
+    #[test]
+    fn anthropic_request_options() {
+        let c = load("[provider.anthropic]\n").unwrap();
+        let a = &c.providers["anthropic"];
+        assert_eq!(
+            (a.thinking_display, a.cache_ttl, a.cache_ttl_auto_1h),
+            (None, None, None)
+        );
+        let plain = serde_json::to_value(&c).unwrap();
+        let p = &plain["providers"]["anthropic"];
+        for k in ["thinking_display", "cache_ttl_auto_1h"] {
+            assert!(p.get(k).is_none(), "{k} unset must not change the hash");
+        }
+        let c = load(
+            "[provider.anthropic]\nthinking_display = omitted\ncache_ttl = mixed\ncache_ttl_auto_1h = true\n",
+        )
+        .unwrap();
+        let a = &c.providers["anthropic"];
+        assert_eq!(a.thinking_display, Some(ThinkingDisplay::Omitted));
+        assert_eq!(a.cache_ttl, Some(CacheTtl::Mixed));
+        assert_eq!(a.cache_ttl_auto_1h, Some(true));
+        for (v, want) in [
+            ("summarized", ThinkingDisplay::Summarized),
+            ("updates", ThinkingDisplay::Updates),
+        ] {
+            let c = load(&format!("[provider.anthropic]\nthinking_display = {v}\n")).unwrap();
+            assert_eq!(c.providers["anthropic"].thinking_display, Some(want));
+        }
+        let errs =
+            load("[provider.anthropic]\nthinking_display = full\ncache_ttl = 2h\n").unwrap_err();
+        let all = errs
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(all.contains("summarized | omitted | updates"), "{all}");
+        assert!(all.contains("5m | 1h | mixed"), "{all}");
+        // OpenRouter keeps its own two lifetimes and the Anthropic-only keys
+        // are unknown there.
+        let errs = load("[provider.openrouter]\ncache_ttl = mixed\nthinking_display = omitted\n")
+            .unwrap_err();
+        let all = errs
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(all.contains("5m | 1h"), "{all}");
+        assert!(all.contains("unknown key `thinking_display`"), "{all}");
+    }
+
+    #[test]
+    fn openrouter_service_tier_is_opt_in() {
+        let c = load("[provider.openrouter]\n").unwrap();
+        assert_eq!(c.providers["openrouter"].service_tier, None);
+        let plain = serde_json::to_value(&c).unwrap();
+        assert!(
+            plain["providers"]["openrouter"]
+                .get("service_tier")
+                .is_none(),
+            "unset must not change the hash"
+        );
+        for (v, want) in [
+            ("fast", OpenRouterServiceTier::Fast),
+            ("default", OpenRouterServiceTier::Default),
+        ] {
+            let c = load(&format!("[provider.openrouter]\nservice_tier = {v}\n")).unwrap();
+            assert_eq!(c.providers["openrouter"].service_tier, Some(want));
+        }
+        let errs = load("[provider.openrouter]\nservice_tier = flex\n").unwrap_err();
+        assert!(errs[0].to_string().contains("default | fast"), "{errs:?}");
+        let errs = load("[provider.anthropic]\nservice_tier = fast\n").unwrap_err();
+        assert!(
+            errs[0].to_string().contains("unknown key `service_tier`"),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn openrouter_reasoning_exclude() {
+        let c = load("[provider.openrouter]\nreasoning_exclude = true\n").unwrap();
+        assert_eq!(c.providers["openrouter"].reasoning_exclude, Some(true));
+        let c = load("[provider.openrouter]\n").unwrap();
+        assert_eq!(c.providers["openrouter"].reasoning_exclude, None);
+        let errs = load("[provider.anthropic]\nreasoning_exclude = true\n").unwrap_err();
+        assert!(
+            errs[0]
+                .to_string()
+                .contains("unknown key `reasoning_exclude`")
+        );
+    }
+
+    #[test]
+    fn cache_prewarm_and_stagger_are_experimental_and_off_by_default() {
+        let c = load("").unwrap();
+        assert!(!c.experimental.cache_prewarm && !c.experimental.stagger_subagents);
+        let c = load("[experimental]\ncache_prewarm = true\nstagger_subagents = true\n").unwrap();
+        assert!(c.experimental.cache_prewarm && c.experimental.stagger_subagents);
+        assert!(!c.experimental.is_off());
+    }
+
+    #[test]
+    fn early_tool_start_is_experimental_and_off_by_default() {
+        assert!(!load("").unwrap().experimental.early_tool_start);
+        let c = load("[experimental]\nearly_tool_start = true\n").unwrap();
+        assert!(c.experimental.early_tool_start);
+        assert!(!c.experimental.is_off());
+    }
+
+    #[test]
+    fn experimental_section_is_off_by_default_and_hash_neutral() {
+        let c = load("").unwrap();
+        assert!(c.experimental.is_off());
+        let plain = serde_json::to_value(&c).unwrap();
+        assert!(plain.get("experimental").is_none());
+        let c = load("[experimental]\nprewarm_connection = true\n").unwrap();
+        assert!(c.experimental.prewarm_connection);
+        assert!(
+            serde_json::to_value(&c)
+                .unwrap()
+                .get("experimental")
+                .is_some()
+        );
+        let errs = load("[experimental]\nwarp_speed = true\n").unwrap_err();
+        assert!(errs[0].to_string().contains("warp_speed"), "{errs:?}");
+    }
+
+    #[test]
+    fn background_compaction_is_off_by_default_and_hash_neutral() {
+        let c = load("").unwrap();
+        assert!(!c.context.background_compaction);
+        assert_eq!(
+            c.context.background_compact_at,
+            DEFAULT_BACKGROUND_COMPACT_AT
+        );
+        let plain = serde_json::to_value(&c).unwrap();
+        assert!(plain["context"].get("background_compaction").is_none());
+        assert!(plain["context"].get("background_compact_at").is_none());
+        let c = load("[context]\nbackground_compaction = true\nbackground_compact_at = 0.65\n")
+            .unwrap();
+        assert!(c.context.background_compaction);
+        assert_eq!(c.context.background_compact_at, 0.65);
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["context"]["background_compaction"], true);
+        let errs = load("[context]\nbackground_compact_at = 1.5\n").unwrap_err();
+        assert!(
+            errs[0].to_string().contains("background_compact_at"),
+            "{errs:?}"
+        );
     }
 
     #[test]
@@ -1239,6 +1569,39 @@ mod tests {
         // Only the Anthropic provider takes them.
         let errs = load("[provider.openai]\ngzip_requests = auto\n").unwrap_err();
         assert!(errs[0].to_string().contains("unknown key `gzip_requests`"));
+    }
+
+    #[test]
+    fn openai_prompt_cache_retention_is_opt_in() {
+        let c = load("[provider.openai]\n").unwrap();
+        assert_eq!(c.providers["openai"].prompt_cache_retention, None);
+        let plain = serde_json::to_value(&c).unwrap();
+        assert!(
+            plain["providers"]["openai"]
+                .get("prompt_cache_retention")
+                .is_none(),
+            "unset must not change the hash"
+        );
+        for (v, want) in [
+            ("24h", OpenAiCacheRetention::TwentyFourHours),
+            ("default", OpenAiCacheRetention::Default),
+        ] {
+            let c = load(&format!(
+                "[provider.openai]\nprompt_cache_retention = {v}\n"
+            ))
+            .unwrap();
+            assert_eq!(c.providers["openai"].prompt_cache_retention, Some(want));
+        }
+        let errs = load("[provider.openai]\nprompt_cache_retention = 1h\n").unwrap_err();
+        assert!(errs[0].to_string().contains("default | 24h"), "{errs:?}");
+        // Only the OpenAI provider takes it.
+        let errs = load("[provider.openrouter]\nprompt_cache_retention = 24h\n").unwrap_err();
+        assert!(
+            errs[0]
+                .to_string()
+                .contains("unknown key `prompt_cache_retention`"),
+            "{errs:?}"
+        );
     }
 
     #[test]

@@ -390,7 +390,7 @@ fn header_and_nodes_use_run_titles_and_agent_display_names() {
 }
 
 #[test]
-fn a_long_title_is_cut_before_the_header_metrics_at_80_columns() {
+fn a_long_title_and_the_header_metrics_wrap_at_80_columns() {
     let mut h = H::new(80, 12);
     let mut b = EventBuilder::new();
     b.run_started("coder", None);
@@ -403,12 +403,16 @@ fn a_long_title_is_cut_before_the_header_metrics_at_80_columns() {
     b.approval("coder", "approval-1-1", "git push origin main");
     h.feed(b.events());
     let text = h.draw();
-    let header = text.lines().next().unwrap();
+    // The header wraps onto a second row instead of dropping metrics.
+    let header: String = text.lines().take(2).collect::<Vec<_>>().join("\n");
     assert!(header.starts_with(" Coder · Refa"), "{header}");
-    assert!(header.contains('…'), "the title is cut: {header}");
-    for needle in ["running", "$0.42", "⏸ 1 waiting"] {
+    for needle in ["running", "$0.42", "⏸ 1 waiting", "critical path"] {
         assert!(header.contains(needle), "{needle} in {header}");
     }
+    assert!(
+        text.lines().nth(2).unwrap().contains('╭'),
+        "graph below: {text}"
+    );
 }
 
 #[test]
@@ -455,4 +459,55 @@ fn mcp_calls_show_server_tool_duration_and_result_in_the_live_pane() {
     h.send(&click(x + 2, y));
     assert!(h.map.live_open());
     assert!(h.draw().contains("mcp github › create_issue"));
+}
+
+/// A node whose name, agent or model do not fit its box gets an info line
+/// under the graph with all of it and how to open the detail; selecting
+/// it by click or by keyboard both show it, and Enter opens the detail.
+#[test]
+fn a_cut_node_shows_everything_in_an_info_line_by_click_and_keyboard() {
+    let mut h = H::new(100, 16);
+    let mut b = EventBuilder::new();
+    b.run_started("long", None);
+    b.start(NodeSpec::step("a").agent("implementer").model("sonnet"));
+    b.finish("a", NodeStatus::Succeeded, None);
+    b.start(
+        NodeSpec::step("b")
+            .name("a-step-with-a-name-far-too-long-for-its-box_end")
+            .agent("researcher")
+            .model("a-model-name-that-is-long-as-well_end")
+            .needs(&["a"]),
+    );
+    h.feed(b.events());
+    h.map.select(NodeId::from("a"));
+    let text = h.draw();
+    assert!(
+        !text.contains("Enter: detail"),
+        "fits, no info line: {text}"
+    );
+    // Keyboard: move right to the long node.
+    h.send(&key("right"));
+    let text = h.draw();
+    assert_eq!(h.map.selected(), Some(&NodeId::from("b")));
+    assert!(text.contains("Enter: detail"), "{text}");
+    assert!(
+        text.contains("a-step-with-a-name-far-too-long-for-its-box_end"),
+        "{text}"
+    );
+    assert!(
+        text.contains("a-model-name-that-is-long-as-well_end"),
+        "{text}"
+    );
+    assert_eq!(
+        h.send(&key("enter")),
+        Some(MapOutput::OpenDetail(NodeId::from("b")))
+    );
+    // Mouse: select the short node, then click the long one.
+    h.map.select(NodeId::from("a"));
+    h.draw();
+    let (x, y) = find_text(h.term.backend().buffer(), "a-step").unwrap();
+    h.send(&click(x, y));
+    let text = h.draw();
+    assert_eq!(h.map.selected(), Some(&NodeId::from("b")));
+    assert!(text.contains("Enter: detail"), "{text}");
 }

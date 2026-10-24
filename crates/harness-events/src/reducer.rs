@@ -73,7 +73,8 @@ pub struct NodeState {
     pub model_calls: u32,
     /// Tool calls requested.
     pub tool_calls: u32,
-    /// Files changed.
+    /// Files changed (`file_changed` events that are not generated
+    /// artifacts).
     pub files_changed: u32,
     /// Approvals currently awaiting an answer.
     pub pending_approvals: u32,
@@ -385,7 +386,13 @@ impl RunState {
                 }
             }
             (EventKind::ToolCall { .. }, Some(i)) => self.nodes[i].tool_calls += 1,
-            (EventKind::FileChanged { .. }, Some(i)) => self.nodes[i].files_changed += 1,
+            // Generated artifacts (`__pycache__/`, ...) are not changes.
+            (
+                EventKind::FileChanged {
+                    generated: false, ..
+                },
+                Some(i),
+            ) => self.nodes[i].files_changed += 1,
             (EventKind::VerifyFinished { passed, .. }, Some(i)) => {
                 self.nodes[i].last_verify_passed = Some(*passed);
             }

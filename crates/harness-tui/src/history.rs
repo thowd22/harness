@@ -26,8 +26,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use time::{OffsetDateTime, UtcOffset};
 
-use crate::chat::text::{fmt_cost, fmt_ms, truncate, width};
-use crate::interaction::{Dispatch, ElementId, HitMap, Interaction};
+use crate::chat::text::{fmt_cost, fmt_ms, sanitize, take_wrap_marker, truncate, width, wrap_line};
+use crate::interaction::{Dispatch, HitMap, Interaction};
 use crate::palette::{ArgSpec, EntryKind as PaletteKind, Invocation, PaletteEntry};
 use crate::theme::{Theme, Token};
 
@@ -297,7 +297,10 @@ pub struct HistoryView {
     runs: Vec<RunSummary>,
     filter: String,
     theme: Theme,
+    /// First shown row of the list.
     scroll: usize,
+    /// The focused run last frame (focus moving scrolls to it).
+    focus_seen: Option<RunId>,
     offset: UtcOffset,
     interaction: Interaction<RunId>,
 }
@@ -310,6 +313,7 @@ impl HistoryView {
             filter: String::new(),
             theme,
             scroll: 0,
+            focus_seen: None,
             offset: UtcOffset::UTC,
             interaction: Interaction::new(),
         }
@@ -380,6 +384,24 @@ impl HistoryView {
                 if k.code == KeyCode::Char('r') {
                     return self.selected().map(HistoryOutput::Replay);
                 }
+                // Up/Down step through every run, also those scrolled out
+                // of view (the list scrolls to the focused one).
+                if matches!(k.code, KeyCode::Up | KeyCode::Down) {
+                    let ids: Vec<RunId> = self.visible().iter().map(|r| r.run_id).collect();
+                    if ids.is_empty() {
+                        return None;
+                    }
+                    let cur = self
+                        .selected()
+                        .and_then(|s| ids.iter().position(|i| *i == s));
+                    let next = match (cur, k.code) {
+                        (None, _) => 0,
+                        (Some(i), KeyCode::Up) => (i + ids.len() - 1) % ids.len(),
+                        (Some(i), _) => (i + 1) % ids.len(),
+                    };
+                    self.interaction.set_focus(row_id(&ids[next]));
+                    return None;
+                }
                 self.interaction.handle_key(k)
             }
             Event::Mouse(m) => match m.kind {
@@ -402,47 +424,51 @@ impl HistoryView {
         }
     }
 
-    /// Renders the list.
+    /// Renders the list. Wide terminals get columns (the run column wraps
+    /// long labels onto more rows); narrow ones stack each run's label and
+    /// its details, wrapped, so nothing is cut.
     pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect, now: OffsetDateTime) {
         let t = self.theme.clone();
         let mut hits: HitMap<RunId> = self.interaction.begin_frame();
         hits.register_pane("history", area);
         let muted = t.fg(Token::Muted);
-        let mut lines = Vec::new();
+        let aw = usize::from(area.width).max(1);
         let head = if self.filter.is_empty() {
             format!(" Runs ({})", self.runs.len())
         } else {
             format!(
                 " Runs matching “{}” ({} of {})",
-                self.filter,
+                sanitize(&self.filter),
                 self.visible().len(),
                 self.runs.len()
             )
         };
-        lines.push(Line::from(Span::styled(
-            head,
-            t.fg(Token::Fg).add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::from(Span::styled(
-            format!(
-                "   {:<RUN_COL$} {:<17} {:>8} {:>8}  {}",
-                "run", "started", "duration", "cost", "host"
-            ),
-            muted,
-        )));
+        let mut top: Vec<Line<'static>> = wrap_line(
+            Line::from(Span::styled(
+                head,
+                t.fg(Token::Fg).add_modifier(Modifier::BOLD),
+            )),
+            aw,
+            &[Span::raw(" ")],
+        );
         let visible: Vec<RunSummary> = self.visible().into_iter().cloned().collect();
-        let body_h = usize::from(area.height).saturating_sub(2);
-        if let Some(sel) = self
-            .selected()
-            .and_then(|s| visible.iter().position(|r| r.run_id == s))
-        {
-            if sel < self.scroll {
-                self.scroll = sel;
-            } else if sel >= self.scroll + body_h {
-                self.scroll = sel + 1 - body_h;
-            }
+        let host_text = |r: &RunSummary| {
+            r.host
+                .as_ref()
+                .map(|h| format!("⧉ {}", sanitize(h)))
+                .unwrap_or_else(|| "local".into())
+        };
+        let fixed = 3 + RUN_COL + 18 + 9 + 9 + 2;
+        let columns = visible.iter().all(|r| fixed + width(&host_text(r)) <= aw);
+        if columns {
+            top.push(Line::from(Span::styled(
+                format!(
+                    "   {:<RUN_COL$} {:<17} {:>8} {:>8}  {}",
+                    "run", "started", "duration", "cost", "host"
+                ),
+                muted,
+            )));
         }
-        self.scroll = self.scroll.min(visible.len().saturating_sub(body_h));
         // Rows with the same label and start minute get a short tag.
         let keys: Vec<(String, Option<String>)> = visible
             .iter()
@@ -451,68 +477,133 @@ impl HistoryView {
                 (r.what(), when)
             })
             .collect();
-        // The tag goes after the cut so colliding rows stay distinct.
         let labels: Vec<String> = names::collisions(&keys)
             .into_iter()
             .zip(&visible)
             .map(|(dup, r)| {
+                let what = sanitize(&r.what());
                 if dup {
-                    let tag = names::short_tag(&r.run_id.to_string());
-                    let room = RUN_COL.saturating_sub(width(&tag) + 1);
-                    format!("{} {tag}", truncate(&r.what(), room))
+                    format!("{what} {}", names::short_tag(&r.run_id.to_string()))
                 } else {
-                    r.what()
+                    what
                 }
             })
             .collect();
-        for (row, r) in visible.iter().skip(self.scroll).take(body_h).enumerate() {
-            let (icon, token) = match r.status {
-                RunStatus::Running => ('◐', Token::Running),
-                RunStatus::Succeeded => ('✔', Token::Ok),
-                RunStatus::Failed => ('✗', Token::Error),
-                RunStatus::Cancelled => ('⊘', Token::Muted),
-            };
-            let id = row_id(&r.run_id);
-            let focused = hits.is_focused(&ElementId::from(id.as_str()));
-            let start = r
-                .started_at
-                .map(|s| names::when_label(s, self.offset, now))
-                .unwrap_or_else(|| "?".into());
-            let mut line = Line::from(vec![
-                Span::styled(format!(" {icon} "), t.fg(token)),
-                Span::styled(
-                    format!(
-                        "{:<RUN_COL$}",
-                        truncate(&labels[row + self.scroll], RUN_COL)
-                    ),
-                    t.fg(Token::Agent),
-                ),
-                Span::styled(format!(" {start:<17}"), muted),
-                Span::styled(
-                    format!(" {:>8}", r.duration_ms.map(fmt_ms).unwrap_or_default()),
-                    t.fg(Token::Number),
-                ),
-                Span::styled(
-                    format!(" {:>8}", fmt_cost(Some(r.cost_usd))),
-                    t.fg(Token::Number),
-                ),
-                Span::styled(
-                    format!(
-                        "  {}",
-                        r.host
-                            .as_ref()
-                            .map(|h| format!("⧉ {h}"))
-                            .unwrap_or_else(|| "local".into())
-                    ),
-                    t.fg(Token::Running),
-                ),
-            ]);
-            if focused {
-                line = line.patch_style(t.focused());
+        let focused_id = self.interaction.focused().cloned();
+        let items: Vec<Vec<Line<'static>>> = visible
+            .iter()
+            .enumerate()
+            .map(|(k, r)| {
+                let (icon, token) = match r.status {
+                    RunStatus::Running => ('◐', Token::Running),
+                    RunStatus::Succeeded => ('✔', Token::Ok),
+                    RunStatus::Failed => ('✗', Token::Error),
+                    RunStatus::Cancelled => ('⊘', Token::Muted),
+                };
+                let start = r
+                    .started_at
+                    .map(|s| names::when_label(s, self.offset, now))
+                    .unwrap_or_else(|| "?".into());
+                let dur = r.duration_ms.map(fmt_ms).unwrap_or_default();
+                let cost = fmt_cost(Some(r.cost_usd));
+                let label = Line::from(Span::styled(labels[k].clone(), t.fg(Token::Agent)));
+                let mut rows = Vec::new();
+                if columns {
+                    let parts = wrap_line(label, RUN_COL, &[]);
+                    for (n, mut p) in parts.into_iter().enumerate() {
+                        let marker = take_wrap_marker(&mut p);
+                        let pw = crate::chat::text::line_width(&p);
+                        let mut spans: Vec<Span<'static>> = marker.into_iter().collect();
+                        if n == 0 {
+                            spans.push(Span::styled(format!(" {icon} "), t.fg(token)));
+                        } else {
+                            spans.push(Span::raw("   "));
+                        }
+                        spans.extend(p.spans);
+                        if n == 0 {
+                            spans.push(Span::raw(" ".repeat(RUN_COL.saturating_sub(pw))));
+                            spans.push(Span::styled(format!(" {start:<17}"), muted));
+                            spans.push(Span::styled(format!(" {dur:>8}"), t.fg(Token::Number)));
+                            spans.push(Span::styled(format!(" {cost:>8}"), t.fg(Token::Number)));
+                            spans.push(Span::styled(
+                                format!("  {}", host_text(r)),
+                                t.fg(Token::Running),
+                            ));
+                        }
+                        rows.push(Line::from(spans));
+                    }
+                } else {
+                    let mut first = vec![Span::styled(format!(" {icon} "), t.fg(token))];
+                    first.extend(label.spans);
+                    rows.extend(wrap_line(Line::from(first), aw, &[Span::raw("   ")]));
+                    rows.extend(wrap_line(
+                        Line::from(vec![
+                            Span::styled(format!("   {start}"), muted),
+                            Span::styled(format!(" · {dur}"), t.fg(Token::Number)),
+                            Span::styled(format!(" · {cost}"), t.fg(Token::Number)),
+                            Span::styled(format!(" · {}", host_text(r)), t.fg(Token::Running)),
+                        ]),
+                        aw,
+                        &[Span::raw("   ")],
+                    ));
+                }
+                if focused_id
+                    .as_ref()
+                    .is_some_and(|f| f.0 == row_id(&r.run_id))
+                {
+                    rows = rows
+                        .into_iter()
+                        .map(|l| l.patch_style(t.focused()))
+                        .collect();
+                }
+                rows
+            })
+            .collect();
+        let top_h = top.len().min(usize::from(area.height));
+        let body_h = usize::from(area.height).saturating_sub(top_h);
+        let tops: Vec<usize> = items
+            .iter()
+            .scan(0usize, |acc, it| {
+                let t = *acc;
+                *acc += it.len();
+                Some(t)
+            })
+            .collect();
+        let total: usize = items.iter().map(Vec::len).sum();
+        // The list scrolls by rows. When keyboard focus moves to a run,
+        // its rows come into view (its first row when it is taller).
+        let sel = self.selected();
+        if sel != self.focus_seen
+            && let Some(k) = sel.and_then(|s| visible.iter().position(|r| r.run_id == s))
+        {
+            let (a, b) = (tops[k], tops[k] + items[k].len());
+            if a < self.scroll {
+                self.scroll = a;
+            } else if b > self.scroll + body_h {
+                self.scroll = b.saturating_sub(body_h).min(a);
             }
-            let y = area.y + 2 + row as u16;
-            hits.register(id, Rect::new(area.x, y, area.width, 1), r.run_id);
-            lines.push(line);
+        }
+        self.focus_seen = sel;
+        self.scroll = self.scroll.min(total.saturating_sub(body_h));
+        let first = self.scroll;
+        let mut lines = top;
+        lines.truncate(top_h);
+        for (k, rows) in items.into_iter().enumerate() {
+            let (a, b) = (
+                tops[k].max(first),
+                (tops[k] + rows.len()).min(first + body_h),
+            );
+            if a >= b {
+                continue;
+            }
+            let r = &visible[k];
+            let y = area.y + (top_h + a - first) as u16;
+            hits.register(
+                row_id(&r.run_id),
+                Rect::new(area.x, y, area.width, (b - a) as u16),
+                r.run_id,
+            );
+            lines.extend(rows.into_iter().skip(a - tops[k]).take(b - a));
         }
         if visible.is_empty() {
             lines.push(Line::from(Span::styled("   no runs", muted)));
@@ -602,6 +693,55 @@ mod tests {
         assert!(text.contains("$0.42"), "{text}");
         assert!(text.contains("⧉ gpu-box"), "{text}");
         assert!(text.contains("local"), "{text}");
+    }
+
+    /// A long run label wraps (no `…`) at any width; a click on its second
+    /// row opens it, and Up/Down reach runs scrolled out of view.
+    #[test]
+    fn long_rows_wrap_and_open_by_click_on_any_row_and_by_keyboard() {
+        let runs: Vec<RunSummary> = (0..12)
+            .map(|i| RunSummary {
+                run_id: RunId::new(),
+                name: format!("r{i}"),
+                workflow: None,
+                agent: None,
+                who: "Coder".into(),
+                title: Some(format!(
+                    "a title long enough to need a second row in the run column_{i}"
+                )),
+                files_changed: 0,
+                error: None,
+                status: RunStatus::Succeeded,
+                started_at: None,
+                duration_ms: Some(1000),
+                cost_usd: 0.1,
+                host: None,
+                nodes: 1,
+                truncated: false,
+            })
+            .collect();
+        let ids: Vec<RunId> = runs.iter().map(|r| r.run_id).collect();
+        let mut v = HistoryView::new(runs, Theme::default());
+        let now = OffsetDateTime::now_utc();
+        for w in [60, 120] {
+            let mut term = Terminal::new(TestBackend::new(w, 10)).unwrap();
+            term.draw(|f| v.render(f, f.area(), now)).unwrap();
+            let text = buffer_text(term.backend().buffer());
+            assert!(!text.contains('…'), "{text}");
+            let (x, y) = find_text(term.backend().buffer(), "column_0").unwrap();
+            assert!(
+                !text.lines().nth(usize::from(y)).unwrap().contains('✔'),
+                "a wrapped row: {text}"
+            );
+            assert_eq!(v.handle(&click(x, y)), Some(HistoryOutput::Open(ids[0])));
+        }
+        let mut term = Terminal::new(TestBackend::new(60, 10)).unwrap();
+        for _ in 0..11 {
+            v.handle(&key("down"));
+            term.draw(|f| v.render(f, f.area(), now)).unwrap();
+        }
+        assert!(buffer_text(term.backend().buffer()).contains("column_11"));
+        assert_eq!(v.handle(&key("enter")), Some(HistoryOutput::Open(ids[11])));
     }
 
     #[tokio::test]
