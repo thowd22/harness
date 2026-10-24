@@ -11,6 +11,8 @@ to built-in prompts, agents, workflows and `harness.ini` defaults.
 
 ## Unreleased
 
+## [0.4.0] - 2026-10-24
+
 ### Added
 
 - `/effort [default|low|medium|high]` sets the reasoning effort of the
