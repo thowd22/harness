@@ -35,7 +35,7 @@ use harness_agent::subagents::{
     AgentPlace, CatalogChildBuilder, ModelResolver, SubagentLimits, SubagentRuntime, ToolsFactory,
 };
 use harness_agent::todo::{TASKS_FILE, TaskBoard};
-use harness_config::agents::{Agent, MemoryAccess};
+use harness_config::agents::{Agent, Effort, MemoryAccess};
 use harness_config::discovery::Catalog;
 use harness_config::ini::Config;
 use harness_config::paths::DataDir;
@@ -51,6 +51,7 @@ use harness_policy::provenance::{Labeler, ProjectTrust};
 use harness_policy::rules::{Mode, PolicyConfig, PolicyEngine, PolicyOverlay};
 use harness_policy::sandbox::{Launcher, SandboxConfig, SandboxedExec};
 use harness_providers::provider::Provider;
+use harness_providers::registry::ThinkingStyle;
 use harness_tools::bash::EnvScrubber;
 use harness_tools::config::ToolsConfig;
 use harness_tools::exec::Exec;
@@ -114,6 +115,66 @@ pub struct Model {
     pub images: bool,
     /// Context window in tokens.
     pub context_window: u32,
+    /// How the registry says the model reasons ([`ThinkingStyle::None`]
+    /// for fake and unknown models; see [`Core::effort`]).
+    pub thinking: ThinkingStyle,
+}
+
+/// Where the session's reasoning effort comes from (`/effort`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EffortState {
+    /// The `/effort` override for this session, if any.
+    pub session: Option<Effort>,
+    /// The agent YAML's `effort`, if any.
+    pub agent: Option<Effort>,
+    /// Whether the session's model reasons. When it does not, providers
+    /// send no reasoning fields whatever the effort.
+    pub reasons: bool,
+    /// How the model's provider requests reasoning.
+    pub style: ThinkingStyle,
+}
+
+impl EffortState {
+    /// The effort sent with the next request (`None`: the model default).
+    pub fn effective(&self) -> Option<Effort> {
+        self.session.or(self.agent)
+    }
+
+    /// `low`, `medium`, `high` or `model default`.
+    pub fn label(&self) -> &'static str {
+        effort_name(self.effective())
+    }
+
+    /// Where the effective effort comes from.
+    pub fn source(&self) -> &'static str {
+        match (self.session, self.agent) {
+            (Some(_), _) => "set with /effort for this session",
+            (None, Some(_)) => "from the agent's YAML",
+            (None, None) => "no effort is sent; the model decides",
+        }
+    }
+
+    /// The status-line text: `effort low`, `no reasoning` when an effort
+    /// is set on a model that does not reason, and `None` when no effort
+    /// is set.
+    pub fn status(&self) -> Option<String> {
+        let e = self.effective()?;
+        Some(if self.reasons {
+            format!("effort {}", effort_name(Some(e)))
+        } else {
+            "no reasoning".into()
+        })
+    }
+}
+
+/// `low`, `medium`, `high`, or `model default` for `None`.
+pub fn effort_name(effort: Option<Effort>) -> &'static str {
+    match effort {
+        Some(Effort::Low) => "low",
+        Some(Effort::Medium) => "medium",
+        Some(Effort::High) => "high",
+        None => "model default",
+    }
 }
 
 /// Longest a turn waits for a cache pre-warm still in flight.
@@ -202,6 +263,7 @@ pub async fn resolve_model(
                 cost: None,
                 images: caps.images,
                 context_window: caps.context_window,
+                thinking: ThinkingStyle::None,
             };
             (fake.clone(), model, Vec::new())
         }
@@ -217,6 +279,7 @@ pub async fn resolve_model(
                 cost: Some(wiring::cost_fn(&resolved)),
                 images: caps.images,
                 context_window: caps.context_window,
+                thinking: resolved.info.thinking,
             };
             (provider, model, resolved.warnings.clone())
         }
@@ -535,7 +598,7 @@ impl Core {
 
         // Loop settings and hooks.
         let mut config = LoopConfig::new(&agent.name, &model.id);
-        config.thinking = wiring::thinking(&agent);
+        config.thinking = wiring::thinking(&agent, session.meta().effort);
         config.limits = LoopLimits {
             max_turns: opts.max_turns.or(agent.max_turns),
             max_tokens: opts.budget_tokens.or(agent.budget.tokens),
@@ -997,6 +1060,30 @@ impl Core {
         self.config.model = model.id.clone();
         self.model = model;
         Ok(warnings)
+    }
+
+    /// The session's reasoning effort: the `/effort` override, the agent
+    /// YAML's `effort` and whether the model reasons.
+    pub fn effort(&self) -> EffortState {
+        let caps = self.model.provider.capabilities(&self.model.id);
+        EffortState {
+            session: self.session.meta().effort,
+            agent: self.agent.effort,
+            reasons: caps.thinking || self.model.thinking != ThinkingStyle::None,
+            style: self.model.thinking,
+        }
+    }
+
+    /// Sets the reasoning effort for the rest of the session (`/effort`):
+    /// the next request carries it, and the session file keeps it for
+    /// resume. `None` restores the agent YAML's `effort` or the model
+    /// default.
+    pub fn set_effort(&mut self, effort: Option<Effort>) -> Result<EffortState, String> {
+        self.session
+            .set_effort(effort)
+            .map_err(|e| format!("session: {e}"))?;
+        self.config.thinking = wiring::thinking(&self.agent, effort);
+        Ok(self.effort())
     }
 
     /// Records `run_finished` (status from the last turn) and closes the log.

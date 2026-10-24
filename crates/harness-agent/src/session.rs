@@ -7,7 +7,7 @@
 //!
 //! - [`SessionStore`] keeps `<data_dir>/sessions/<id>/session.json`
 //!   ([`SessionMeta`]: name, description, project, times, message count,
-//!   cost, runs and file hashes).
+//!   cost, runs, file hashes and the `/effort` override).
 //! - Names and descriptions are derived locally, without a model call:
 //!   the name from the first prompt ([`names::session_name`], until the
 //!   user sets one with `/rename`), the description from the first and
@@ -28,6 +28,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
 
+use harness_config::agents::Effort;
 use harness_events::blobs::BlobStore;
 use harness_events::names;
 use harness_events::schema::{BlobEncoding, EventKind, Payload, RunEvent, RunId};
@@ -149,6 +150,11 @@ pub struct SessionMeta {
     /// last save (`None` = the file did not exist).
     #[serde(default)]
     pub files: BTreeMap<String, Option<String>>,
+    /// Reasoning effort chosen with `/effort` for the session's agent;
+    /// `None` uses the agent YAML's `effort` or the model default. Restored
+    /// on resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<Effort>,
 }
 
 impl SessionMeta {
@@ -179,6 +185,7 @@ impl SessionMeta {
             runs: Vec::new(),
             last_stop: None,
             files: BTreeMap::new(),
+            effort: None,
         }
     }
 
@@ -892,6 +899,13 @@ impl SessionHandle {
     pub fn rename(&mut self, name: &str) -> Result<(), SessionError> {
         self.meta.name = clean_name(name)?;
         self.meta.renamed = true;
+        self.touch_and_save()
+    }
+
+    /// Sets the session's reasoning effort override (`/effort`; `None`
+    /// restores the agent's or model's default) and saves.
+    pub fn set_effort(&mut self, effort: Option<Effort>) -> Result<(), SessionError> {
+        self.meta.effort = effort;
         self.touch_and_save()
     }
 

@@ -440,9 +440,11 @@ pub fn system_prompt(catalog: &Catalog, agent: &Agent, cwd: &Path) -> Result<Str
     ))
 }
 
-/// The agent's effort as reasoning settings.
-pub fn thinking(agent: &Agent) -> Option<ThinkingConfig> {
-    agent.effort.map(|e| ThinkingConfig {
+/// The reasoning settings of the session's agent: the `/effort` override
+/// when one is set, else the agent YAML's `effort` (`None`: no reasoning
+/// fields, the model default).
+pub fn thinking(agent: &Agent, session: Option<Effort>) -> Option<ThinkingConfig> {
+    session.or(agent.effort).map(|e| ThinkingConfig {
         budget_tokens: None,
         effort: Some(match e {
             Effort::Low => ReasoningEffort::Low,
@@ -879,5 +881,111 @@ mod openrouter_tests {
             openrouter(&cfg, "k").unwrap().options().service_tier,
             Some(ServiceTier::Fast)
         );
+    }
+}
+
+/// TASK-163 AC3: the `/effort` override reaches each provider's wire
+/// format through the same wiring as a session (registry, `harness.ini`
+/// keys, `provider_sync`), and models that do not reason get no
+/// reasoning fields.
+#[cfg(test)]
+mod effort_wire_tests {
+    use super::*;
+    use harness_config::discovery::{Artifact, Kind, Scope, SourceFile};
+    use harness_providers::model::{ChatRequest, Message};
+    use serde_json::{Value, json};
+
+    fn agent(yaml_effort: Option<&str>) -> Agent {
+        let effort = yaml_effort.map_or(String::new(), |e| format!("effort: {e}\n"));
+        Agent::load(&SourceFile::inline(
+            Scope::Global,
+            Kind::Agent,
+            "agents/a.yaml",
+            format!("name: a\nprompt_text: x\n{effort}"),
+        ))
+        .unwrap()
+    }
+
+    /// The body `model` would be sent with `agent` and the session effort.
+    fn body(model: &str, agent: &Agent, session: Option<Effort>) -> Value {
+        let tmp = tempfile::tempdir().unwrap();
+        let ini = format!(
+            "[general]\ndata_dir = {}\n\
+             [provider.anthropic]\napi_key = test-a\n\
+             [provider.openai]\napi_key = test-o\n\
+             [provider.openrouter]\napi_key = test-r\n",
+            tmp.path().display()
+        );
+        let cfg = harness_config::ini::load_str(&ini, None).unwrap();
+        let registry = registry(&cfg).unwrap();
+        let resolved = registry.resolve(model).unwrap();
+        let provider = provider_sync(&cfg, &registry, &resolved).unwrap();
+        let mut request = ChatRequest::new(resolved.reference.model.clone());
+        request.messages = vec![Message::user("hi")];
+        request.thinking = thinking(agent, session);
+        provider.request_body(&request).expect("a wire format")
+    }
+
+    #[test]
+    fn anthropic_adaptive_models_get_output_config_effort() {
+        let a = agent(None);
+        let b = body("anthropic/claude-opus-5-5", &a, Some(Effort::Low));
+        assert_eq!(b["thinking"]["type"], "adaptive");
+        assert_eq!(b["output_config"], json!({"effort": "low"}));
+        // `default` on an agent without `effort`: no reasoning fields.
+        let b = body("anthropic/claude-opus-5-5", &a, None);
+        assert!(b.get("thinking").is_none() && b.get("output_config").is_none());
+        // `default` restores the agent YAML's effort; the override wins.
+        let a = agent(Some("high"));
+        let b = body("anthropic/claude-opus-5-5", &a, None);
+        assert_eq!(b["output_config"], json!({"effort": "high"}));
+        let b = body("anthropic/claude-opus-5-5", &a, Some(Effort::Medium));
+        assert_eq!(b["output_config"], json!({"effort": "medium"}));
+    }
+
+    #[test]
+    fn anthropic_budget_models_get_a_thinking_budget() {
+        use harness_providers::anthropic::request::effort_budget;
+        use harness_providers::model::ReasoningEffort;
+        let a = agent(None);
+        for (e, r) in [
+            (Effort::Low, ReasoningEffort::Low),
+            (Effort::Medium, ReasoningEffort::Medium),
+            (Effort::High, ReasoningEffort::High),
+        ] {
+            let b = body("anthropic/claude-haiku-4-5", &a, Some(e));
+            assert_eq!(
+                b["thinking"],
+                json!({"type": "enabled", "budget_tokens": effort_budget(r)}),
+                "{e:?}"
+            );
+            assert!(b.get("output_config").is_none());
+        }
+    }
+
+    #[test]
+    fn openrouter_and_openai_get_reasoning_effort() {
+        let a = agent(None);
+        let b = body(
+            "openrouter/anthropic/claude-opus-5.5",
+            &a,
+            Some(Effort::High),
+        );
+        assert_eq!(b["reasoning"], json!({"effort": "high"}));
+        let b = body("openrouter/anthropic/claude-opus-5.5", &a, None);
+        assert!(b.get("reasoning").is_none());
+        let b = body("openai/gpt-5", &a, Some(Effort::Low));
+        assert_eq!(b["reasoning"]["effort"], "low");
+        let b = body("openai/gpt-5", &a, None);
+        assert!(b["reasoning"].get("effort").is_none());
+    }
+
+    #[test]
+    fn models_that_do_not_reason_get_no_reasoning_fields() {
+        let a = agent(None);
+        let b = body("openai/gpt-4o", &a, Some(Effort::High));
+        assert!(b.get("reasoning").is_none(), "{b}");
+        // OpenRouter catalog models without `reasoning` are covered in
+        // harness-providers (`reasoning_is_left_out_for_catalog_models...`).
     }
 }

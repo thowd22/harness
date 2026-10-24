@@ -379,6 +379,7 @@ async fn builtin(d: &mut Driver, b: Builtin, cmd: &Command) {
             }
         },
         Builtin::Model => model(d, cmd.get("model")).await,
+        Builtin::Effort => super::effort::command(d, cmd.get("effort")).await,
         Builtin::Login if cmd.get("provider") == Some("mcp") => {
             super::mcp_login::open(d, cmd.get("server")).await
         }
@@ -630,6 +631,8 @@ pub(super) async fn model(d: &mut Driver, name: Option<&str>) {
     match core.set_model(name).await {
         Ok(warnings) => {
             let (reference, window) = (core.model.reference.clone(), core.model.context_window);
+            // Reasoning support may differ on the new model.
+            let effort = super::effort::status_event(core);
             let branch = harness_config::prompts::git_branch(&core.cwd);
             d.opts.model = Some(name.to_owned());
             d.send(CoreEvent::Session {
@@ -638,6 +641,7 @@ pub(super) async fn model(d: &mut Driver, name: Option<&str>) {
                 branch,
             })
             .await;
+            d.send(effort).await;
             for w in warnings {
                 d.notify(Level::Warning, "model", Some(w)).await;
             }
@@ -1316,6 +1320,9 @@ pub(super) async fn panel_action(d: &mut Driver, id: &str) {
     }
     if super::jobs::is_action(id) {
         return super::jobs::action(d, id).await;
+    }
+    if super::effort::is_action(id) {
+        return super::effort::action(d, id).await;
     }
     let Some(name) = id.strip_prefix(REMOTE_TEST) else {
         return;

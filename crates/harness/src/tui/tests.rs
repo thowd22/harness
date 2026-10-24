@@ -1933,3 +1933,290 @@ async fn subagent_jobs_are_reported_listed_and_stopped_with_the_session() {
     assert!(!last.contains(&format!("{notice} j1")), "{last}");
     h.d.finish_core().await;
 }
+
+/// The `thinking` of every top-level request seen so far, oldest first.
+fn top_level_thinking(seen: &[AppEvent]) -> Vec<serde_json::Value> {
+    seen.iter()
+        .filter_map(|e| match e {
+            AppEvent::Run(ev) if ev.parent_node_id.is_none() => match &ev.kind {
+                EventKind::ModelCallStarted {
+                    request: harness_events::schema::Payload::Json(v),
+                    ..
+                } => Some(v["thinking"].clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+const TWO_TEXTS: &str = "responses:\n  - content: [ { text: \"one\" } ]\n  - content: [ { text: \"two\" } ]\n  - content: [ { text: \"three\" } ]\n";
+
+/// TASK-163 AC1, AC2, AC5: `/effort low` reaches the next request, shows
+/// in the status line and survives resume; `/effort default` restores the
+/// agent's (none for the coder) and the session file forgets the override.
+#[tokio::test]
+async fn effort_sets_the_next_request_shows_in_the_status_and_survives_resume() {
+    let env = Env::new();
+    let script = env.script(TWO_TEXTS);
+    let mut h = Harness::start(&env, &script).await;
+    // No effort yet: nothing in the status line, no thinking on the wire.
+    h.until(|e| matches!(e, AppEvent::Core(CoreEvent::Effort(None))))
+        .await;
+    h.d.request(UiRequest::Submit("first".into())).await;
+    h.finish_turn().await;
+    h.until(|e| matches!(e, AppEvent::Run(ev) if matches!(ev.kind, EventKind::ModelCallFinished { .. })))
+        .await;
+    assert_eq!(top_level_thinking(&h.seen), vec![serde_json::Value::Null]);
+
+    h.d.request(UiRequest::Submit("/effort low".into())).await;
+    h.until(|e| matches!(e, AppEvent::Core(CoreEvent::Effort(Some(s))) if s == "effort low"))
+        .await;
+    h.until(
+        |e| matches!(e, AppEvent::Core(CoreEvent::Notify { title, .. }) if title == "effort low"),
+    )
+    .await;
+    let id = h.d.core.as_ref().unwrap().session_id().to_owned();
+    let store = harness_agent::session::SessionStore::new(h.d.data.sessions());
+    assert_eq!(
+        store.load(&id).unwrap().effort,
+        Some(harness_config::agents::Effort::Low)
+    );
+    h.seen.clear();
+    h.d.request(UiRequest::Submit("second".into())).await;
+    h.finish_turn().await;
+    h.until(|e| matches!(e, AppEvent::Run(ev) if matches!(ev.kind, EventKind::ModelCallFinished { .. })))
+        .await;
+    assert_eq!(
+        top_level_thinking(&h.seen),
+        vec![serde_json::json!({"effort": "low"})]
+    );
+
+    // Resume (a new core from the session file) restores it.
+    h.seen.clear();
+    h.d.request(UiRequest::Submit("/new".into())).await;
+    assert_eq!(
+        h.d.core.as_ref().unwrap().effort().session,
+        None,
+        "/new resets"
+    );
+    h.d.request(UiRequest::Resume(id.clone())).await;
+    assert_eq!(h.d.core.as_ref().unwrap().session_id(), id);
+    assert_eq!(
+        h.d.core.as_ref().unwrap().effort().effective(),
+        Some(harness_config::agents::Effort::Low)
+    );
+    h.until(|e| matches!(e, AppEvent::Core(CoreEvent::Effort(Some(s))) if s == "effort low"))
+        .await;
+
+    // `default` clears the override.
+    h.d.request(UiRequest::Submit("/effort default".into()))
+        .await;
+    h.until(|e| matches!(e, AppEvent::Core(CoreEvent::Notify { title, .. }) if title == "effort model default"))
+        .await;
+    assert_eq!(store.load(&id).unwrap().effort, None);
+    h.seen.clear();
+    h.d.request(UiRequest::Submit("third".into())).await;
+    h.finish_turn().await;
+    h.until(|e| matches!(e, AppEvent::Run(ev) if matches!(ev.kind, EventKind::ModelCallFinished { .. })))
+        .await;
+    assert_eq!(top_level_thinking(&h.seen), vec![serde_json::Value::Null]);
+}
+
+/// TASK-163 AC2: `default` restores the agent YAML's effort (the
+/// researcher's `low`), and an override wins over it.
+#[tokio::test]
+async fn effort_default_restores_the_agent_yaml_effort() {
+    let env = Env::new();
+    let script = env.script(TEXT);
+    let mut h = Harness::start(&env, &script).await;
+    h.d.request(UiRequest::Submit("/researcher".into())).await;
+    let core = h.d.core.as_ref().unwrap();
+    assert_eq!(core.agent.name, "researcher");
+    assert_eq!(
+        core.effort().effective(),
+        Some(harness_config::agents::Effort::Low)
+    );
+    h.until(|e| matches!(e, AppEvent::Core(CoreEvent::Effort(Some(s))) if s == "effort low"))
+        .await;
+    h.d.request(UiRequest::Submit("/effort high".into())).await;
+    let state = h.d.core.as_ref().unwrap().effort();
+    assert_eq!(
+        state.effective(),
+        Some(harness_config::agents::Effort::High)
+    );
+    assert_eq!(state.agent, Some(harness_config::agents::Effort::Low));
+    h.d.request(UiRequest::Submit("/effort default".into()))
+        .await;
+    let state = h.d.core.as_ref().unwrap().effort();
+    assert_eq!(state.session, None);
+    assert_eq!(state.effective(), Some(harness_config::agents::Effort::Low));
+    h.until(|e| matches!(e, AppEvent::Core(CoreEvent::Notify { title, body: Some(b), .. }) if title == "effort low" && b.contains("YAML")))
+        .await;
+}
+
+/// TASK-163 AC4: on a model that does not reason `/effort` says so, and
+/// the request carries the effort only for providers to drop.
+#[tokio::test]
+async fn effort_on_a_model_without_reasoning_warns() {
+    let env = Env::new();
+    let script = env.script(&format!(
+        "capabilities: {{ tools: true, thinking: false, context_window: 1000 }}\n{TEXT}"
+    ));
+    let mut h = Harness::start(&env, &script).await;
+    h.d.request(UiRequest::Submit("/effort".into())).await;
+    let lines = h.panel(effort::TITLE).await;
+    assert!(
+        lines.iter().any(|l| l.contains("does not reason")),
+        "{lines:?}"
+    );
+    h.d.request(UiRequest::Submit("/effort high".into())).await;
+    h.until(|e| {
+        matches!(e, AppEvent::Core(CoreEvent::Notify { level: Level::Warning, title, body: Some(b) })
+            if title == "effort high: not sent" && b.contains("does not reason"))
+    })
+    .await;
+    h.until(|e| matches!(e, AppEvent::Core(CoreEvent::Effort(Some(s))) if s == "no reasoning"))
+        .await;
+    // An unknown value is an error, never a silent default.
+    h.d.request(UiRequest::Submit("/effort max".into())).await;
+    assert_eq!(
+        h.d.core.as_ref().unwrap().effort().session,
+        Some(harness_config::agents::Effort::High)
+    );
+}
+
+/// TASK-163 AC1 and the UI rule: the bare `/effort` picker shows the
+/// active effort ("model default"), and its buttons work by keyboard
+/// (Right to focus, Enter) and by mouse.
+#[tokio::test]
+async fn effort_picker_works_with_keyboard_and_mouse() {
+    use harness_tui::app::{App, AppConfig};
+    use harness_tui::interaction::testing::{buffer_text, click, find_text, key};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let env = Env::new();
+    let script = env.script(TEXT);
+    let mut h = Harness::start(&env, &script).await;
+    h.d.request(UiRequest::Submit("/effort".into())).await;
+    let (lines, buttons) = match h
+        .until(|e| matches!(e, AppEvent::Core(CoreEvent::Panel { title, .. }) if title == effort::TITLE))
+        .await
+    {
+        AppEvent::Core(CoreEvent::Panel { lines, buttons, .. }) => (lines.clone(), buttons.clone()),
+        _ => unreachable!(),
+    };
+    assert!(
+        lines.iter().any(|l| l.starts_with("effort  model default")),
+        "{lines:?}"
+    );
+    assert!(lines.iter().any(|l| l.contains("fake/")), "{lines:?}");
+    let ids: Vec<&str> = buttons.iter().map(|b| b.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        [
+            "effort.set:default",
+            "effort.set:low",
+            "effort.set:medium",
+            "effort.set:high"
+        ]
+    );
+
+    let (tx, mut requests) = mpsc::unbounded_channel();
+    let mut app = App::new(AppConfig::default(), tx);
+    let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    app.handle(AppEvent::Core(CoreEvent::Panel {
+        title: effort::TITLE.into(),
+        lines,
+        buttons,
+    }));
+    term.draw(|f| app.render(f)).unwrap();
+    let text = buffer_text(term.backend().buffer());
+    for b in ["[ default ]", "[ low ]", "[ medium ]", "[ high ]"] {
+        assert!(text.contains(b), "{b}: {text}");
+    }
+    // Keyboard: the first button is focused; Right moves to `low`.
+    app.handle(AppEvent::Terminal(key("right")));
+    app.handle(AppEvent::Terminal(key("enter")));
+    let req = requests
+        .try_recv()
+        .expect("Enter activates the focused button");
+    assert_eq!(req, UiRequest::PanelAction("effort.set:low".into()));
+    h.d.request(req).await;
+    assert_eq!(
+        h.d.core.as_ref().unwrap().effort().session,
+        Some(harness_config::agents::Effort::Low)
+    );
+    // The open panel is refreshed with the new effort.
+    h.until(|e| {
+        matches!(e, AppEvent::Core(CoreEvent::PanelText { title, lines })
+            if title == effort::TITLE && lines.iter().any(|l| l.starts_with("effort  low")))
+    })
+    .await;
+
+    // Mouse: clicking `[ high ]` does the same.
+    term.draw(|f| app.render(f)).unwrap();
+    let (x, y) = find_text(term.backend().buffer(), "[ high ]").unwrap();
+    app.handle(AppEvent::Terminal(click(x + 2, y)));
+    let req = requests.try_recv().expect("a click activates the button");
+    assert_eq!(req, UiRequest::PanelAction("effort.set:high".into()));
+    h.d.request(req).await;
+    assert_eq!(
+        h.d.core.as_ref().unwrap().effort().session,
+        Some(harness_config::agents::Effort::High)
+    );
+    // Esc closes the picker.
+    app.handle(AppEvent::Terminal(key("esc")));
+    assert!(app.panel().is_none());
+}
+
+/// TASK-163 AC6: `/effort` is in `/help`, the palette and slash completion
+/// with its choices.
+#[tokio::test]
+async fn effort_is_in_help_palette_and_completion() {
+    let env = Env::new();
+    let script = env.script(TEXT);
+    let mut h = Harness::start(&env, &script).await;
+    let help = h.d.registry.help(None);
+    assert!(
+        help.iter()
+            .any(|l| l.contains("/effort") && l.contains("reasoning effort")),
+        "{help:?}"
+    );
+    let one = h.d.registry.help(Some("effort"));
+    assert!(
+        one.iter().any(|l| l.contains("default, low, medium, high")),
+        "{one:?}"
+    );
+    let entries = commands::palette_entries(&h.d.registry, h.d.core.as_ref().unwrap());
+    let e = entries
+        .iter()
+        .find(|e| e.id == "cmd.effort")
+        .expect("palette entry");
+    assert_eq!(e.args.len(), 1);
+    // The palette runs it with its argument.
+    h.d.request(UiRequest::Run(Invocation {
+        id: "cmd.effort".into(),
+        args: vec!["medium".into()],
+    }))
+    .await;
+    assert_eq!(
+        h.d.core.as_ref().unwrap().effort().session,
+        Some(harness_config::agents::Effort::Medium)
+    );
+    let slash = commands::slash_commands(&h.d.registry);
+    let s = slash.iter().find(|s| s.name == "effort").unwrap();
+    assert_eq!(s.choices, ["default", "low", "medium", "high"]);
+    assert_eq!(s.args.as_deref(), Some("[default|low|medium|high]"));
+    // Busy: the change is queued for after the turn.
+    h.d.request(UiRequest::Submit("go".into())).await;
+    assert!(h.d.busy());
+    h.d.request(UiRequest::Submit("/effort high".into())).await;
+    assert_eq!(h.d.queue.back().map(String::as_str), Some("/effort high"));
+    h.finish_turn().await;
+    assert_eq!(
+        h.d.core.as_ref().unwrap().effort().session,
+        Some(harness_config::agents::Effort::High)
+    );
+}

@@ -11,6 +11,7 @@
 
 mod commands;
 pub mod demo;
+mod effort;
 mod jobs;
 mod mcp;
 mod mcp_login;
@@ -344,6 +345,7 @@ impl Driver {
             branch: harness_config::prompts::git_branch(&core.cwd),
         })
         .await;
+        self.send(effort::status_event(&core)).await;
         let palette = commands::palette_entries(&self.registry, &core);
         let slash = commands::slash_commands(&self.registry);
         self.send(CoreEvent::PaletteEntries(palette.clone())).await;

@@ -61,6 +61,9 @@ pub struct StatusLine {
     pub branch: Option<String>,
     /// Model of the main agent.
     pub model: Option<String>,
+    /// Reasoning effort of the main agent (`effort low`, `no reasoning`),
+    /// shown after the model; `None` when no effort is set.
+    pub effort: Option<String>,
     /// Autonomy mode.
     pub mode: Mode,
     /// Context window of the model, in tokens.
@@ -91,6 +94,7 @@ impl StatusLine {
             cwd: display_path(cwd, home),
             branch: None,
             model: None,
+            effort: None,
             mode,
             context_window: None,
             context_used: 0,
@@ -153,6 +157,12 @@ impl StatusLine {
     pub fn set_model(&mut self, model: impl Into<String>, context_window: Option<u64>) {
         self.model = Some(model.into());
         self.context_window = context_window;
+    }
+
+    /// Sets the reasoning-effort label shown after the model (`None`
+    /// hides it).
+    pub fn set_effort(&mut self, effort: Option<String>) {
+        self.effort = effort;
     }
 
     /// Number of running agents.
@@ -241,17 +251,20 @@ impl StatusLine {
             loc.push(Span::styled(format!("  {b}"), theme.fg(Token::Keyword)));
         }
         segs.push((3, loc));
-        segs.push((
-            9,
-            vec![
-                Span::styled(
-                    self.model.clone().unwrap_or_else(|| "no model".into()),
-                    theme.fg(Token::Agent),
-                ),
-                Span::styled(" · ", muted),
-                Span::styled(self.mode.as_str().to_owned(), theme.fg(Token::Accent)),
-            ],
+        let mut model = vec![Span::styled(
+            self.model.clone().unwrap_or_else(|| "no model".into()),
+            theme.fg(Token::Agent),
+        )];
+        if let Some(effort) = &self.effort {
+            model.push(Span::styled(" · ", muted));
+            model.push(Span::styled(effort.clone(), theme.fg(Token::Keyword)));
+        }
+        model.push(Span::styled(" · ", muted));
+        model.push(Span::styled(
+            self.mode.as_str().to_owned(),
+            theme.fg(Token::Accent),
         ));
+        segs.push((9, model));
         let mcp_at = segs.len();
         if let Some(label) = self.mcp_label() {
             segs.push((9, vec![Span::styled(label, theme.fg(Token::Error))]));
@@ -708,6 +721,18 @@ mod tests {
             l,
             "~/CODE/harness  main │ sonnet · auto-edit │ ctx ▓▓▓▓▓▓▓▓ 98% │ ↑182k ↓14k cache 93% │ $0.84 │ verify ✔ │ ◐ 3 agents │ ⧉ gpu-box"
         );
+    }
+
+    #[test]
+    fn footer_shows_the_reasoning_effort_after_the_model() {
+        let theme = Theme::default();
+        let mut s = sample();
+        s.set_effort(Some("effort low".into()));
+        let l = text(&s.line(&theme, &Spinner::new(false), 200));
+        assert!(l.contains("│ sonnet · effort low · auto-edit │"), "{l}");
+        s.set_effort(None);
+        let l = text(&s.line(&theme, &Spinner::new(false), 200));
+        assert!(l.contains("│ sonnet · auto-edit │"), "{l}");
     }
 
     #[test]

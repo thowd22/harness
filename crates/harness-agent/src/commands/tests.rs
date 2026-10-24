@@ -82,6 +82,7 @@ fn every_builtin_has_a_description_and_argument_help() {
             "resume",
             "rename",
             "model",
+            "effort",
             "mode",
             "agents",
             "workflows",

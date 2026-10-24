@@ -508,3 +508,25 @@ fn verifier_feedback_and_handoffs_are_not_requests() {
     assert!(!is_harness_text("<tool_resultish> parsing"));
     assert!(is_harness_text("  <web_content url=\"x\">"));
 }
+
+#[test]
+fn effort_override_is_saved_and_old_sessions_have_none() {
+    use harness_config::agents::Effort;
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::new(dir.path());
+    let mut h =
+        SessionHandle::start(store.clone(), SessionMeta::new("/p", "coder", "fake/m", "")).unwrap();
+    let id = h.meta().id.clone();
+    // No override: the key is not written at all.
+    let raw = std::fs::read_to_string(dir.path().join(&id).join("session.json")).unwrap();
+    assert!(!raw.contains("effort"), "{raw}");
+    h.set_effort(Some(Effort::Low)).unwrap();
+    assert_eq!(store.load(&id).unwrap().effort, Some(Effort::Low));
+    let raw = std::fs::read_to_string(dir.path().join(&id).join("session.json")).unwrap();
+    assert!(
+        raw.contains("\"effort\": \"low\"") || raw.contains("\"effort\":\"low\""),
+        "{raw}"
+    );
+    h.set_effort(None).unwrap();
+    assert_eq!(store.load(&id).unwrap().effort, None);
+}

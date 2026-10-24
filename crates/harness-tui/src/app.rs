@@ -264,6 +264,9 @@ pub enum CoreEvent {
     },
     /// The effective mode changed (e.g. the agent tightened it).
     Mode(Mode),
+    /// The main agent's reasoning effort for the status line
+    /// (`effort low`, `no reasoning`; `None` hides it).
+    Effort(Option<String>),
     /// Open (or refresh) the `/memory` browser.
     Memory(MemoryData),
     /// Search results for the memory browser.
@@ -1149,6 +1152,7 @@ impl App {
                 self.map.set_host_badge(&host, &badge, token)
             }
             CoreEvent::Mode(m) => self.chat.status_mut().set_mode(m),
+            CoreEvent::Effort(e) => self.chat.status_mut().set_effort(e),
             CoreEvent::Memory(data) => match &mut self.screen {
                 Some(Screen::Memory(m)) => m.browser.set_data(data),
                 _ => {

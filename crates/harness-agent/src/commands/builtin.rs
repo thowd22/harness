@@ -16,6 +16,8 @@ pub enum Builtin {
     Rename,
     /// `/model [model]`.
     Model,
+    /// `/effort [default|low|medium|high]`.
+    Effort,
     /// `/mode [ask|auto-edit|auto]`.
     Mode,
     /// `/agents`.
@@ -56,12 +58,13 @@ pub enum Builtin {
 
 impl Builtin {
     /// Every built-in, in help order.
-    pub const ALL: [Builtin; 23] = [
+    pub const ALL: [Builtin; 24] = [
         Builtin::Help,
         Builtin::New,
         Builtin::Resume,
         Builtin::Rename,
         Builtin::Model,
+        Builtin::Effort,
         Builtin::Mode,
         Builtin::Agents,
         Builtin::Workflows,
@@ -90,6 +93,7 @@ impl Builtin {
             Self::Resume => "resume",
             Self::Rename => "rename",
             Self::Model => "model",
+            Self::Effort => "effort",
             Self::Mode => "mode",
             Self::Agents => "agents",
             Self::Workflows => "workflows",
@@ -124,6 +128,7 @@ impl Builtin {
             Self::Resume => "Resume a saved session: pick one, or name it",
             Self::Rename => "Rename this session",
             Self::Model => "Show or switch the model for this session",
+            Self::Effort => "Show or set the reasoning effort for this session's agent",
             Self::Mode => "Show or switch the approval mode",
             Self::Agents => "List agents and switch to one",
             Self::Workflows => "List workflows and their arguments",
@@ -161,6 +166,11 @@ impl Builtin {
             Self::Model => {
                 vec![ArgSpec::optional("model").with_help("model alias or provider/model")]
             }
+            Self::Effort => vec![
+                ArgSpec::optional("effort")
+                    .with_help("reasoning effort; default restores the agent's or model's own")
+                    .with_choices(&["default", "low", "medium", "high"]),
+            ],
             Self::Mode => vec![
                 ArgSpec::optional("mode")
                     .with_help("approval mode")
