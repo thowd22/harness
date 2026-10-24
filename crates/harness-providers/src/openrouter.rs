@@ -264,6 +264,17 @@ impl OpenRouterProvider {
 
     /// The JSON body that [`Provider::stream`] would send for `request`.
     pub fn request_body(&self, request: &ChatRequest) -> Value {
+        if request.thinking.is_some()
+            && self
+                .model_info(&request.model)
+                .is_some_and(|m| !m.supports_reasoning)
+        {
+            // A model the catalog lists without `reasoning`: sending the
+            // object could fail the request, so it is left out.
+            let mut plain = request.clone();
+            plain.thinking = None;
+            return request::build_body(&plain, &self.options);
+        }
         request::build_body(request, &self.options)
     }
 
@@ -449,7 +460,7 @@ impl Provider for OpenRouterProvider {
             models::check_tools(&info, !request.tools.is_empty())?;
         }
         let body = self.request_body(&request);
-        let reasoning_requested = request.thinking.is_some();
+        let reasoning_requested = body.get("reasoning").is_some();
         Ok(transport::open_stream(
             self.client.clone(),
             CHAT_PATH,
@@ -777,6 +788,24 @@ mod tests {
                 assert!(n <= request::MAX_CACHE_BREAKPOINTS, "{n} breakpoints");
             }
         }
+    }
+
+    #[test]
+    fn reasoning_is_left_out_for_catalog_models_that_do_not_reason() {
+        let p = provider("http://127.0.0.1:9");
+        let infos = [
+            json!({"id": "a/thinks", "supported_parameters": ["tools", "reasoning"]}),
+            json!({"id": "b/plain", "supported_parameters": ["tools", "temperature"]}),
+        ];
+        p.set_models(infos.iter().filter_map(ModelInfo::from_json));
+        let mut r = request();
+        r.model = "a/thinks".into();
+        assert_eq!(p.request_body(&r)["reasoning"], json!({"effort": "high"}));
+        r.model = "b/plain".into();
+        assert!(p.request_body(&r).get("reasoning").is_none());
+        // A model missing from the catalog keeps the reasoning object.
+        r.model = "c/unknown".into();
+        assert_eq!(p.request_body(&r)["reasoning"], json!({"effort": "high"}));
     }
 
     #[tokio::test]
