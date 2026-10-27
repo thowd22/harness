@@ -12,6 +12,8 @@ mode = auto-edit                 ; ask | auto-edit | auto
 identity_prompt = on             ; on | off: the built-in identity prompt layer
 session_summary_model = off      ; off | a cheap model: names and describes sessions (docs/sessions.md)
 todo_nudge_after = 3             ; remind agents to plan with todo after N model calls; 0 = off
+update_check = on                ; on | off: the TUI checks GitHub for a newer release (docs/update-check.md)
+update_check_interval = 24h      ; at most one update check per interval
 
 [provider.anthropic]
 api_key_cmd = pass show anthropic

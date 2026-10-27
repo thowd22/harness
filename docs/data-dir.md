@@ -19,6 +19,7 @@ throwaway data directory, and tests use it to stay off your real one.
   remote-cache/     remote helper binaries and per-host sync state
   logs/             daily log files (see docs/logging.md)
   model-lists/      cached live model lists for the model catalog (see docs/models.md)
+  update-check.json last TUI update check and the dismissed version (see docs/update-check.md)
   auth/             Sign in with ChatGPT token store, created on first sign-in (see docs/providers-openai.md)
     mcp/            OAuth tokens for remote MCP servers, one 0600 file per server (see docs/mcp.md)
 ```

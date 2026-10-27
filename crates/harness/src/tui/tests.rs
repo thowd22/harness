@@ -1674,6 +1674,7 @@ async fn login_mcp_authorizes_from_slash_palette_and_panel_buttons() {
 
 mod mcp;
 mod signin;
+mod update;
 
 /// `/jobs`: background bash jobs are listed with their state, their output
 /// opens and a running one stops (mouse and keyboard on the panel buttons);

@@ -43,6 +43,11 @@ diffs, hygiene reports, artifacts, memory browser data and map badges. Every
 turn is preceded by a shadow-git checkpoint, so `/undo` and the map's
 "restore checkpoint" (`r` on a node) can go back.
 
+After the session starts, the core checks GitHub for a newer release in
+the background (`[general] update_check`) and, when there is one, opens
+the update dialog with `CoreEvent::UpdateAvailable`; Esc answers with
+`UiRequest::DismissUpdate`. See [update-check.md](update-check.md).
+
 ## Event loop and terminal handling
 
 - Everything the UI reacts to arrives on one channel: key and mouse input,
@@ -244,7 +249,9 @@ dialog, the help overlay and the memory browser, each with the wheel and
 the arrow, page and Home/End keys, and a position indicator when it
 scrolls. The browser sign-in dialog scrolls with the wheel and
 PageUp/PageDown (its arrow keys and Tab move between the address field and
-the buttons), and keeps the address field in view.
+the buttons), and keeps the address field in view. The update dialog
+([update-check.md](update-check.md)) scrolls the same way while its
+buttons stay in view; it closes only with Esc.
 
 The layout test matrix (`crates/harness-tui/src/layout_matrix.rs`) checks
 these rules for every view: it renders each one with long-content

@@ -31,6 +31,7 @@ mod remote;
 mod remote_agent;
 mod sessions;
 mod tui;
+mod update;
 mod verify;
 mod wiring;
 mod workflow;

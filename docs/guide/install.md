@@ -31,6 +31,10 @@ Piping a script into a shell runs it as you, so
 It never uses sudo. The whole script is inside a `main` function called on
 its last line, so a download cut short runs nothing.
 
+To upgrade, run the same command again. The TUI tells you when a newer
+release is out and offers the command to copy; see
+[../update-check.md](../update-check.md).
+
 | Variable | Default | Meaning |
 |---|---|---|
 | `HARNESS_VERSION` | latest release | version to install, `0.2.0` or `v0.2.0` |

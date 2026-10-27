@@ -823,7 +823,7 @@ impl SignInModal {
 
 /// `s` cut into pieces of at most `w` columns (for links and commands,
 /// which must not be reflowed at spaces or shortened).
-fn chunks(s: &str, w: usize) -> Vec<String> {
+pub(crate) fn chunks(s: &str, w: usize) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut cw = 0;

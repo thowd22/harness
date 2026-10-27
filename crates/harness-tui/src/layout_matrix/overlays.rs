@@ -1,6 +1,6 @@
 //! Overlays: the text panel, toasts and the notification history, approval
 //! cards and the ini confirmation, the login modal, the browser sign-in
-//! modal, the key help, the selection bar and the memory card and browser.
+//! modal, the update dialog, the key help, the selection bar and the memory card and browser.
 
 use super::*;
 use crate::approval::{ApprovalAction, ApprovalPanel, IniConfirm};
@@ -13,6 +13,7 @@ use crate::notify::{Level, Notifications};
 use crate::panel::{Panel, PanelButton};
 use crate::signin::{SignInAction, SignInModal, SignInPrompt};
 use crate::theme::Theme;
+use crate::update::{UpdateAction, UpdateModal, UpdateNotice};
 use harness_events::schema::{EventKind, MemoryAction, RunEvent, RunId};
 use harness_policy::approvals::{ApprovalPrompt, ApprovalRequest};
 use harness_policy::rules::{Action, Decision, Layer, MatchedRule, Verdict};
@@ -424,6 +425,44 @@ fn sign_in_modal_wraps_and_scrolls() {
         let mut tokens = fx.all();
         tokens.extend(["copy ssh command", "Address", "close", "copy code"]);
         assert_reachable("sign-in", &frames, &tokens);
+    });
+}
+
+#[test]
+fn update_dialog_wraps_and_scrolls() {
+    matrix("update", |w, h, check| {
+        let mut fx = Fx::new();
+        let theme = Theme::default();
+        let mut t = term(w, h);
+        let mut it: Interaction<UpdateAction> = Interaction::new();
+        let mut m = UpdateModal::new(UpdateNotice {
+            current: fx.word("current"),
+            latest: fx.word("latest"),
+            url: fx.url("notes"),
+            command: format!("curl -fsSL {} | bash", fx.url("install")),
+        });
+        let mut frames = Vec::new();
+        m.scroll(-10_000);
+        for _ in 0..60 {
+            let mut hits = it.begin_frame();
+            let mut links = Vec::new();
+            let buf = frame(&mut t, |f| {
+                m.render(f, f.area(), &theme, &mut hits, &|a| a, &mut links)
+            });
+            it.end_frame(hits);
+            if !check {
+                return;
+            }
+            let s = checked("update", &buf);
+            if frames.last() == Some(&s) {
+                break;
+            }
+            frames.push(s);
+            m.scroll(1);
+        }
+        let mut tokens = fx.all();
+        tokens.extend(["copy install command", "copy link", "Esc close"]);
+        assert_reachable("update", &frames, &tokens);
     });
 }
 

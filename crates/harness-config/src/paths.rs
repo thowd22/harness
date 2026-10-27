@@ -323,6 +323,12 @@ impl DataDir {
     pub fn model_lists(&self) -> PathBuf {
         self.root.join("model-lists")
     }
+    /// `update-check.json`: when the TUI last asked GitHub for the latest
+    /// release, what it found and which version the user dismissed. Written
+    /// by the interactive TUI only.
+    pub fn update_check(&self) -> PathBuf {
+        self.root.join("update-check.json")
+    }
     /// `auth/`: the Sign in with ChatGPT token store
     /// (`harness_providers::chatgpt::store`). Created, mode `0700`, on the
     /// first sign-in; always a protected path.

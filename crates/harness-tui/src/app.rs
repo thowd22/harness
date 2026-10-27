@@ -85,6 +85,7 @@ use crate::signin::{
 };
 use crate::status::StatusLine;
 use crate::theme::{ColorDepth, Theme, ThemeError, Token};
+use crate::update::{UpdateAction, UpdateModal, UpdateNotice, UpdateOutcome};
 
 /// Spinner frame interval while something runs.
 pub const TICK_INTERVAL: Duration = Duration::from_millis(80);
@@ -337,6 +338,9 @@ pub enum CoreEvent {
         /// The outcome.
         result: Result<String, String>,
     },
+    /// A newer harness release is out: open the update dialog (it closes
+    /// only with Esc, answered with [`UiRequest::DismissUpdate`]).
+    UpdateAvailable(UpdateNotice),
     /// The MCP servers that failed, by name (empty: none). The status
     /// line shows a compact indicator that opens `/mcp`.
     McpStatus {
@@ -435,6 +439,9 @@ pub enum UiRequest {
     },
     /// Stop a running browser sign-in (the user cancelled it).
     SignInCancel(String),
+    /// The user closed the update dialog for this version: do not offer
+    /// it again.
+    DismissUpdate(String),
     /// The user quit.
     Quit,
 }
@@ -613,6 +620,12 @@ struct SignInScreen {
     interaction: Interaction<SignInAction>,
 }
 
+/// The update dialog and its hit map.
+struct UpdateScreen {
+    modal: UpdateModal,
+    interaction: Interaction<UpdateAction>,
+}
+
 /// The `/model` picker and its hit map.
 struct ModelScreen {
     picker: ModelPicker,
@@ -673,6 +686,7 @@ pub struct App {
     sessions: Option<Box<SessionScreen>>,
     login: Option<Box<LoginScreen>>,
     sign_in: Option<Box<SignInScreen>>,
+    update: Option<Box<UpdateScreen>>,
     /// Hyperlinks drawn in the last frame, written over its cells.
     links: Vec<Hyperlink>,
     goals: Goals,
@@ -747,6 +761,7 @@ impl App {
             sessions: None,
             login: None,
             sign_in: None,
+            update: None,
             links: Vec::new(),
             goals: Goals::new(),
             goalbar,
@@ -981,6 +996,11 @@ impl App {
         self.sign_in.as_ref().map(|l| &l.modal)
     }
 
+    /// The open update dialog.
+    pub fn update_dialog(&self) -> Option<&UpdateModal> {
+        self.update.as_ref().map(|u| &u.modal)
+    }
+
     /// The hyperlinks of the last frame ([`Hyperlink::sequence`] draws
     /// them over its cells).
     pub fn hyperlinks(&self) -> &[Hyperlink] {
@@ -1091,6 +1111,10 @@ impl App {
         if let Some(l) = &mut self.login {
             let out = l.modal.paste(&text);
             return self.login_outcome(out);
+        }
+        if self.update.is_some() {
+            // The dialog has no text field.
+            return;
         }
         if let Some(m) = &mut self.models {
             m.picker.paste(&text);
@@ -1269,6 +1293,12 @@ impl App {
             CoreEvent::SignIn(prompt) => {
                 self.sign_in = Some(Box::new(SignInScreen {
                     modal: SignInModal::new(prompt),
+                    interaction: Interaction::new(),
+                }));
+            }
+            CoreEvent::UpdateAvailable(notice) => {
+                self.update = Some(Box::new(UpdateScreen {
+                    modal: UpdateModal::new(notice),
                     interaction: Interaction::new(),
                 }));
             }
@@ -1680,6 +1710,28 @@ impl App {
         self.dirty = true;
     }
 
+    /// Input for the open update dialog.
+    fn update_event(&mut self, ev: &Event) {
+        let Some(u) = &mut self.update else {
+            return;
+        };
+        let out = match ev {
+            Event::Key(k) => u.modal.handle_key(k, &mut u.interaction),
+            Event::Mouse(m) => u.modal.handle_mouse(m, &mut u.interaction),
+            _ => UpdateOutcome::Ignored,
+        };
+        match out {
+            UpdateOutcome::Copy { what, text } => self.copy_effect(what, text),
+            UpdateOutcome::Dismiss => {
+                let version = u.modal.notice().latest.clone();
+                self.update = None;
+                self.request(UiRequest::DismissUpdate(version));
+            }
+            UpdateOutcome::Ignored | UpdateOutcome::Changed => {}
+        }
+        self.dirty = true;
+    }
+
     fn login_outcome(&mut self, out: LoginOutcome) {
         match out {
             LoginOutcome::Close => self.login = None,
@@ -1891,6 +1943,7 @@ impl App {
         let picker = self.models.is_some() || self.sessions.is_some();
         let overlay = self.login.is_some()
             || self.sign_in.is_some()
+            || self.update.is_some()
             || self.chat.palette().is_open()
             || self.goal_focused;
         if action == Some(Action::Select) && (covered || picker) && !overlay {
@@ -1901,6 +1954,9 @@ impl App {
         }
         if self.login.is_some() {
             return self.login_event(&Event::Key(*k));
+        }
+        if self.update.is_some() {
+            return self.update_event(&Event::Key(*k));
         }
         if self.models.is_some() {
             return self.models_event(&Event::Key(*k));
@@ -2067,7 +2123,8 @@ impl App {
     /// Whether `(x, y)` is on a clickable element of the open `/model` or
     /// `/resume` picker.
     fn picker_row_at(&self, x: u16, y: u16) -> bool {
-        if self.help_open || self.login.is_some() || self.sign_in.is_some() {
+        if self.help_open || self.login.is_some() || self.sign_in.is_some() || self.update.is_some()
+        {
             return false;
         }
         if let Some(m) = &self.models {
@@ -2084,6 +2141,9 @@ impl App {
         }
         if self.login.is_some() && !self.help_open {
             return self.login_event(&Event::Mouse(*m));
+        }
+        if self.update.is_some() && !self.help_open {
+            return self.update_event(&Event::Mouse(*m));
         }
         if self.models.is_some() && !self.help_open {
             return self.models_event(&Event::Mouse(*m));
@@ -2222,6 +2282,23 @@ impl App {
                 .render(frame, area, &theme, &mut picker_hits, &|a: SessionAction| a);
             m.interaction.end_frame(picker_hits);
         }
+        // The update dialog goes over the pickers, under the sign-in
+        // modals.
+        self.links.clear();
+        if let Some(u) = &mut self.update {
+            let mut hits = u.interaction.begin_frame();
+            u.modal.render(
+                frame,
+                area,
+                &theme,
+                &mut hits,
+                &|a: UpdateAction| a,
+                &mut self.links,
+            );
+            if u.interaction.end_frame(hits) {
+                self.dirty = true;
+            }
+        }
         // The login modal goes over the picker.
         if let Some(l) = &mut self.login {
             let mut login_hits = l.interaction.begin_frame();
@@ -2230,7 +2307,10 @@ impl App {
             l.interaction.end_frame(login_hits);
         }
         // The sign-in modal goes over the `/login` modal that started it.
-        self.links.clear();
+        if self.login.is_some() || self.sign_in.is_some() {
+            // The update dialog's links are covered.
+            self.links.clear();
+        }
         if let Some(l) = &mut self.sign_in {
             let mut hits = l.interaction.begin_frame();
             l.modal.render(
@@ -2252,6 +2332,7 @@ impl App {
             || self.sessions.is_some()
             || self.login.is_some()
             || self.sign_in.is_some()
+            || self.update.is_some()
         {
             let h = 4.min(area.height);
             let at = Rect {

@@ -115,6 +115,8 @@ fn setup() -> Result<Setup, String> {
     // sandbox the screens do not depend on the host (no Landlock warnings on
     // macOS or older kernels covering the cards).
     cfg.sandbox.enabled = false;
+    // Scripted data: never ask GitHub for a newer release.
+    cfg.general.update_check = false;
     let data = DataDir::from_config(&cfg)
         .open()
         .map_err(|e| e.to_string())?;

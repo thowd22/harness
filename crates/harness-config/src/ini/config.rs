@@ -237,6 +237,14 @@ pub struct General {
     /// (`todo_nudge_after`). The reminder repeats at most this often and
     /// stops once a task exists. Default 3; 0 turns it off.
     pub todo_nudge_after: u32,
+    /// Check GitHub for a newer harness release when the interactive TUI
+    /// starts (`update_check`). Headless commands never check. Default
+    /// true.
+    pub update_check: bool,
+    /// How long the last update check stays fresh: the TUI asks GitHub at
+    /// most this often (`update_check_interval`). Default 24h.
+    #[serde(serialize_with = "ser_duration")]
+    pub update_check_interval: Duration,
 }
 
 /// `[provider.<id>]`. Use [`ProviderConfig::resolve_api_key`] to obtain the key.
@@ -642,6 +650,8 @@ impl Config {
                 identity_prompt: true,
                 session_summary_model: None,
                 todo_nudge_after: 3,
+                update_check: true,
+                update_check_interval: Duration::from_secs(24 * 3600),
             },
             providers: BTreeMap::new(),
             models: BTreeMap::new(),
@@ -844,6 +854,8 @@ fn read_general(r: &mut SectionReader<'_>, g: &mut General) {
     set!(g.model_list_ttl, r.duration("model_list_ttl"));
     set!(g.identity_prompt, on_off(r, "identity_prompt"));
     set!(g.todo_nudge_after, r.uint("todo_nudge_after"));
+    set!(g.update_check, on_off(r, "update_check"));
+    set!(g.update_check_interval, r.duration("update_check_interval"));
     if let Some(v) = r.string("session_summary_model") {
         let v = v.trim();
         g.session_summary_model = (!v.is_empty() && v != "off").then(|| v.to_owned());
@@ -1332,6 +1344,25 @@ mod tests {
         let c = load("[general]\nmodel_list_ttl = 6h\n").unwrap();
         assert_eq!(c.general.model_list_ttl, Duration::from_secs(6 * 3600));
         assert!(load("[general]\nmodel_list_ttl = soon\n").is_err());
+    }
+
+    #[test]
+    fn update_check_defaults_to_on_daily_and_can_be_turned_off() {
+        let c = load("").unwrap();
+        assert!(c.general.update_check);
+        assert_eq!(c.general.update_check_interval, Duration::from_secs(86_400));
+        for off in ["off", "false"] {
+            let c = load(&format!("[general]\nupdate_check = {off}\n")).unwrap();
+            assert!(!c.general.update_check, "{off}");
+        }
+        let c = load("[general]\nupdate_check = on\nupdate_check_interval = 7d\n");
+        assert!(c.is_err(), "days are not a duration unit");
+        let c = load("[general]\nupdate_check_interval = 168h\n").unwrap();
+        assert_eq!(
+            c.general.update_check_interval,
+            Duration::from_secs(7 * 86_400)
+        );
+        assert!(load("[general]\nupdate_check = maybe\n").is_err());
     }
 
     #[test]
