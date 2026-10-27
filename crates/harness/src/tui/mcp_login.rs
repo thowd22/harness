@@ -5,19 +5,17 @@
 //! `/login mcp` opens a panel listing the remote servers with their
 //! authorization state and an `authorize <name>` button each (clickable,
 //! and reachable with Tab and Enter like every panel button).
-//! `/login mcp <name>`, a button or a palette entry starts the flow; a
-//! toast shows the authorization URL (in case the browser does not open)
-//! and then the outcome. Tokens never reach the UI or events.
-
-use std::sync::Arc;
+//! `/login mcp <name>`, a button or a palette entry starts the flow in
+//! the background ([`super::signin`]): the sign-in modal shows the
+//! authorization link (and takes the pasted address when the browser is on
+//! another machine), and a toast reports the outcome. Tokens never reach
+//! the UI or events.
 
 use harness_config::ini::{Config, McpTransport};
-use harness_providers::chatgpt::Browser;
-use harness_tui::app::{AppEvent, CoreEvent};
+use harness_tui::app::CoreEvent;
 use harness_tui::notify::Level;
 use harness_tui::palette::{EntryKind, PaletteEntry};
 use harness_tui::panel::PanelButton;
-use tokio::sync::mpsc;
 
 use super::Driver;
 
@@ -27,6 +25,8 @@ pub const BUTTON_PREFIX: &str = "mcp.login:";
 pub const PALETTE_PREFIX: &str = "mcp.login.";
 /// Title of the panel.
 pub const TITLE: &str = "MCP authorization";
+/// Sign-in id prefix (`mcp.<name>`).
+pub const SIGN_IN_PREFIX: &str = "mcp.";
 
 /// Remote (HTTP) servers of `cfg`, by name.
 fn remote_servers(cfg: &Config) -> Vec<(&str, &harness_config::ini::McpServer)> {
@@ -100,29 +100,6 @@ pub(super) async fn open(d: &mut Driver, server: Option<&str>) {
     }
 }
 
-/// Shows the URL in a toast, then opens the real browser.
-struct ToastBrowser {
-    tx: mpsc::Sender<AppEvent>,
-    inner: Arc<dyn Browser>,
-    server: String,
-}
-
-impl Browser for ToastBrowser {
-    fn open(&self, url: &str) -> Result<(), String> {
-        let _ = self.tx.try_send(AppEvent::Core(CoreEvent::Notify {
-            level: Level::Info,
-            title: format!("authorize MCP server {}", self.server),
-            body: Some(format!(
-                "Opening your browser. If it does not open, visit: {url}"
-            )),
-        }));
-        if let Err(e) = self.inner.open(url) {
-            tracing::warn!(error = %e, "could not open a browser");
-        }
-        Ok(())
-    }
-}
-
 /// Runs the flow for `server` in the background.
 pub(super) async fn start(d: &mut Driver, server: &str) {
     let cfg = config(d);
@@ -138,37 +115,34 @@ pub(super) async fn start(d: &mut Driver, server: &str) {
             )
             .await;
     }
-    let (tx, path, server) = (d.tx.clone(), d.login_path.clone(), server.to_owned());
-    let browser = ToastBrowser {
-        tx: tx.clone(),
-        inner: d.browser.clone(),
-        server: server.clone(),
+    let (path, owned) = (d.login_path.clone(), server.to_owned());
+    let device = d.sign_ins.env.is_remote();
+    super::signin::start(
+        d,
+        &format!("{SIGN_IN_PREFIX}{server}"),
+        format!("Authorize MCP server {server}"),
+        move |browser, mut paste| async move {
+            crate::login::mcp::authorize(&path, &owned, &browser, &mut paste, device).await
+        },
+    );
+}
+
+/// The flow for `server` ended: toast the outcome and refresh the panel.
+pub(super) async fn done(d: &mut Driver, server: &str, result: &Result<String, String>) {
+    let (level, title, body) = match result {
+        Ok(m) => (Level::Success, format!("MCP server {server} authorized"), m),
+        Err(e) => (
+            Level::Error,
+            format!("MCP authorization failed: {server}"),
+            e,
+        ),
     };
-    d.background.push(tokio::spawn(async move {
-        let result = crate::login::mcp::authorize(&path, &server, &browser).await;
-        let (level, title, body) = match result {
-            Ok(m) => (Level::Success, format!("MCP server {server} authorized"), m),
-            Err(e) => (
-                Level::Error,
-                format!("MCP authorization failed: {server}"),
-                e,
-            ),
-        };
-        let _ = tx
-            .send(AppEvent::Core(CoreEvent::Notify {
-                level,
-                title,
-                body: Some(body),
-            }))
-            .await;
-        let cfg = harness_config::ini::load_file(&path).ok();
-        if let Some(cfg) = cfg {
-            let _ = tx
-                .send(AppEvent::Core(CoreEvent::PanelText {
-                    title: TITLE.into(),
-                    lines: lines(&cfg),
-                }))
-                .await;
-        }
-    }));
+    d.notify(level, &title, Some(body.clone())).await;
+    if let Ok(cfg) = harness_config::ini::load_file(&d.login_path) {
+        d.send(CoreEvent::PanelText {
+            title: TITLE.into(),
+            lines: lines(&cfg),
+        })
+        .await;
+    }
 }

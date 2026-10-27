@@ -52,6 +52,10 @@ pub struct ClientRegistration {
     /// Dynamic registration only: the registered loopback redirect URI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redirect_uri: Option<String>,
+    /// Dynamic registration only: the device grant (RFC 8628) was
+    /// registered too.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub device_grant: bool,
 }
 
 /// Stored tokens.
@@ -279,6 +283,7 @@ mod tests {
                 client_secret: Some(Token::new("cs-secret")),
                 kind: Registration::Dynamic,
                 redirect_uri: Some("http://127.0.0.1:5/callback".into()),
+                device_grant: false,
             },
             scopes: vec!["read".into()],
             step_up_scopes: Vec::new(),

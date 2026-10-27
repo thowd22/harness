@@ -508,8 +508,12 @@ fn handle(st: &Mutex<State>, signer: &TestSigner, base: &str, req: MockRequest) 
 #[derive(Debug, Clone, Default)]
 pub struct MockBrowser {
     opened: Arc<Mutex<Vec<String>>>,
+    redirects: Arc<Mutex<Vec<String>>>,
     /// Replace the callback's `state` with this value (a forged callback).
     pub forge_state: Option<String>,
+    /// A browser on another machine: the redirect to the loopback callback
+    /// is recorded ([`MockBrowser::next_redirect`]) but never followed.
+    pub remote: bool,
 }
 
 impl MockBrowser {
@@ -526,9 +530,32 @@ impl MockBrowser {
         }
     }
 
+    /// A browser on another machine (see [`MockBrowser::remote`]).
+    pub fn remote() -> Self {
+        Self {
+            remote: true,
+            ..Self::default()
+        }
+    }
+
     /// Every URL opened so far.
     pub fn opened(&self) -> Vec<String> {
         self.opened.lock().expect("lock").clone()
+    }
+
+    /// Waits up to 10s for the next loopback address a remote browser was
+    /// sent to: what the user would copy from the address bar.
+    pub async fn next_redirect(&self) -> String {
+        for _ in 0..1000 {
+            if let Some(r) = {
+                let mut r = self.redirects.lock().expect("lock");
+                (!r.is_empty()).then(|| r.remove(0))
+            } {
+                return r;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("the browser was never redirected");
     }
 }
 
@@ -536,6 +563,7 @@ impl Browser for MockBrowser {
     fn open(&self, url: &str) -> Result<(), String> {
         self.opened.lock().expect("lock").push(url.to_owned());
         let (url, forge) = (url.to_owned(), self.forge_state.clone());
+        let (remote, redirects) = (self.remote, self.redirects.clone());
         tokio::spawn(async move {
             let client = reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
@@ -563,6 +591,10 @@ impl Browser for MockBrowser {
                     .map(|(k, v)| (k.as_str(), v.as_str()))
                     .collect();
                 location = format!("{base}?{}", super::form_encode(&refs));
+            }
+            if remote {
+                redirects.lock().expect("lock").push(location);
+                return;
             }
             let _ = client.get(&location).send().await;
         });

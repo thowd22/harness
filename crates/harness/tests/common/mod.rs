@@ -37,9 +37,12 @@ pub fn workspace_root() -> PathBuf {
 /// Points every config, data and cache location the `harness` binary
 /// could use at `root`: `HARNESS_CONFIG` (`root/harness.ini`), `HOME` and
 /// the XDG base directories, and drops variables that could redirect it
-/// elsewhere. Every test that runs the binary goes through this.
+/// elsewhere. Every test that runs the binary goes through this. The TUI's
+/// update check is pointed at a closed local port, so the suite never asks
+/// GitHub (tests that check it point it at a mock instead).
 pub fn hermetic(c: &mut Command, root: &Path) {
-    c.env("HARNESS_CONFIG", root.join("harness.ini"))
+    c.env("HARNESS_UPDATE_API", "http://127.0.0.1:9")
+        .env("HARNESS_CONFIG", root.join("harness.ini"))
         .env("HOME", root)
         .env("XDG_CONFIG_HOME", root.join("xdg-config"))
         .env("XDG_DATA_HOME", root.join("xdg-data"))

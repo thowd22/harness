@@ -220,6 +220,68 @@ an API key later removes `auth`, so the key is in effect again. See
 | OpenAI | API key, or Sign in with ChatGPT (`harness login openai --chatgpt`, or method 4 in the menu): uses your ChatGPT plan and sets `auth = chatgpt`. See [providers-openai.md](providers-openai.md#sign-in-with-chatgpt). |
 | OpenRouter | API key. |
 
+### Signing in from a remote or headless machine
+
+Sign in with ChatGPT and MCP OAuth (`harness login mcp <name>`) are browser
+sign-ins: the browser ends on a loopback address,
+`http://127.0.0.1:<port>/…`, where harness listens. Over SSH, or on a
+machine without a display, the browser runs on another machine (for
+example your Windows PC, connected with PowerShell, Windows Terminal or
+PuTTY), and its `127.0.0.1` is that machine, not the one harness runs on.
+
+harness notices this and does not try to open a browser where nobody can
+see it: an SSH session (`$SSH_CONNECTION`, `$SSH_TTY`), Linux or BSD
+without `$DISPLAY` or `$WAYLAND_DISPLAY`, and WSL. Set `$BROWSER` to open
+links your own way anyway. It then shows:
+
+- the sign-in link in full, on a line of its own (never cut). In a terminal
+  it is also an OSC 8 hyperlink, so terminals that support it open it with
+  a click (Windows Terminal, iTerm2, WezTerm, kitty, GNOME Terminal and
+  others). In the TUI the link wraps inside the sign-in dialog, every row
+  links to the whole link, and `[ copy link ]` or ctrl+y copies it with
+  OSC 52, which reaches your local clipboard over SSH. In `harness login`,
+  type `c` and Enter to copy it the same way.
+- what to do after signing in: open the link on any machine, approve, and
+  the browser goes to the `127.0.0.1` address, which does not load there.
+  Copy that whole address from the address bar and paste it into harness
+  (the terminal prompt in `harness login`, the *Address* field in the TUI).
+  harness checks it like a real callback: the `state` must be this
+  attempt's (and for MCP the `iss` must be the authorization server), the
+  code is exchanged with this attempt's PKCE verifier, and a wrong paste is
+  answered with the reason so you can paste again. Pasting only the code
+  also works when nothing else needs checking: for ChatGPT after the first
+  sign-in (the first one needs the whole address, which carries the client
+  id OpenAI issues), and for MCP servers that do not sign their answer
+  with `iss`.
+- over SSH, the port-forwarding alternative, with the exact command for
+  this sign-in, to run on the machine with the browser before opening the
+  link:
+
+  ```sh
+  ssh -N -L 1455:127.0.0.1:1455 dev@10.0.0.2
+  ```
+
+  The port is the one this sign-in listens on (ChatGPT prefers 1455; MCP
+  uses a free port each time), and the host is the address your SSH client
+  connected to, so use your usual host name or alias if it differs. With
+  the tunnel open, the browser's redirect reaches harness and the sign-in
+  finishes by itself. OpenSSH ships with Windows 10 and later; in PuTTY,
+  add the tunnel under Connection > SSH > Tunnels (source port `1455`,
+  destination `127.0.0.1:1455`).
+
+On WSL 2, a Windows browser usually reaches the WSL listener on
+`127.0.0.1` directly, so opening the link in Windows is enough.
+
+Device authorization (a code typed on another device, nothing pasted back)
+is used for MCP servers whose authorization server advertises it; see
+[signing in with a code](mcp.md#signing-in-with-a-code-device-flow). Sign in
+with ChatGPT does not offer it: OpenAI documents only the browser flow for
+apps like harness. An abandoned
+sign-in ends after 5 minutes; cancelling it (Esc in the TUI, Ctrl+C in the
+terminal) closes the listener at once. Pasted codes and tokens are never
+logged, put in events or shown: the TUI shows only the part of a pasted
+address before `?`.
+
 ### In the TUI: `/login`
 
 `/login` (also in the command palette as "Add, check and save an API key
@@ -228,9 +290,12 @@ choice. The modal walks through the same steps as `harness login`:
 
 1. choose the provider (Up / Down or Tab, Enter, or click it),
 2. choose how harness gets the key: paste it, a command, or a variable;
-   for OpenAI also *Sign in with ChatGPT*, which skips step 3, opens the
-   browser and waits for the sign-in (Enter or `[ try again ]` restarts it
-   after a failure),
+   for OpenAI also *Sign in with ChatGPT*, which skips step 3 and opens the
+   sign-in dialog with the link (and the browser, when there is one here;
+   see [signing in from a remote or headless
+   machine](#signing-in-from-a-remote-or-headless-machine)). The sign-in
+   runs in the background; Esc in the dialog cancels it. Enter or
+   `[ try again ]` restarts it after a failure,
 3. type or paste the value. An API key is shown only as `•` characters;
    a command or variable name is shown as typed (the variable is prefilled
    with the provider's usual one, such as `OPENROUTER_API_KEY`),

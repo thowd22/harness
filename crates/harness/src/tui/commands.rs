@@ -527,37 +527,50 @@ async fn builtin(d: &mut Driver, b: Builtin, cmd: &Command) {
 
 /// A credential submitted in the `/login` modal: verify it, save it, make
 /// the provider use it, and answer the modal. The key is added to the
-/// redactor whatever the outcome, and never goes into an event.
+/// redactor whatever the outcome, and never goes into an event. Sign in
+/// with ChatGPT runs in the background ([`super::signin`]).
 pub(super) async fn login(d: &mut Driver, sub: &harness_tui::login::LoginSubmission) {
     let req = sub.request();
+    if matches!(
+        req.credential,
+        harness_config::ini::edit::Credential::ChatGpt
+    ) {
+        return super::signin::start_chatgpt(d, sub);
+    }
     if let harness_config::ini::edit::Credential::ApiKey(k) = &req.credential {
         remember_secret(d, k.expose());
     }
     let env = |k: &str| std::env::var(k).ok();
     let result = crate::login::apply(&d.login_path, req, d.login_verifier.as_ref(), &env).await;
-    if result.is_ok() {
-        // Pick the new credential up for the next session and the picker.
-        match harness_config::ini::load_file(&d.login_path) {
-            Ok(cfg) => {
-                if let Some(p) = cfg.providers.get(req.provider) {
-                    if let Ok(Some(key)) = p.resolve_api_key() {
-                        remember_secret(d, key.expose());
-                    }
-                    d.cfg.providers.insert(req.provider.to_owned(), p.clone());
+    after_login(d, req.provider, &result).await;
+    d.send(CoreEvent::LoginResult(result)).await;
+}
+
+/// After a login of `provider`: pick the new credential up for the next
+/// session and the model picker.
+pub(super) async fn after_login(d: &mut Driver, provider: &str, result: &Result<String, String>) {
+    if result.is_err() {
+        return;
+    }
+    match harness_config::ini::load_file(&d.login_path) {
+        Ok(cfg) => {
+            if let Some(p) = cfg.providers.get(provider) {
+                if let Ok(Some(key)) = p.resolve_api_key() {
+                    remember_secret(d, key.expose());
                 }
-                d.models = None;
+                d.cfg.providers.insert(provider.to_owned(), p.clone());
             }
-            Err(e) => {
-                d.notify(
-                    Level::Warning,
-                    "login",
-                    Some(format!("saved, but harness.ini did not reload: {e}")),
-                )
-                .await
-            }
+            d.models = None;
+        }
+        Err(e) => {
+            d.notify(
+                Level::Warning,
+                "login",
+                Some(format!("saved, but harness.ini did not reload: {e}")),
+            )
+            .await
         }
     }
-    d.send(CoreEvent::LoginResult(result)).await;
 }
 
 /// Adds `secret` to the redactor used by new sessions.

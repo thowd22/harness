@@ -1,6 +1,6 @@
 //! Overlays: the text panel, toasts and the notification history, approval
-//! cards and the ini confirmation, the login modal, the key help, the
-//! selection bar and the memory card and browser.
+//! cards and the ini confirmation, the login modal, the browser sign-in
+//! modal, the update dialog, the key help, the selection bar and the memory card and browser.
 
 use super::*;
 use crate::approval::{ApprovalAction, ApprovalPanel, IniConfirm};
@@ -11,7 +11,9 @@ use crate::login::{LoginAction, LoginModal};
 use crate::memory::browser::{BrowserAction, CommitRow, FileRow, MemoryBrowser, MemoryData};
 use crate::notify::{Level, Notifications};
 use crate::panel::{Panel, PanelButton};
+use crate::signin::{SignInAction, SignInModal, SignInPrompt};
 use crate::theme::Theme;
+use crate::update::{UpdateAction, UpdateModal, UpdateNotice};
 use harness_events::schema::{EventKind, MemoryAction, RunEvent, RunId};
 use harness_policy::approvals::{ApprovalPrompt, ApprovalRequest};
 use harness_policy::rules::{Action, Decision, Layer, MatchedRule, Verdict};
@@ -350,6 +352,122 @@ fn login_modal_wraps_and_scrolls() {
             "use your ChatGPT plan; opens the browser, sets auth = chatgpt",
         ]);
         assert_reachable("login", &frames, &tokens);
+    });
+}
+
+#[test]
+fn sign_in_modal_wraps_and_scrolls() {
+    matrix("sign-in", |w, h, check| {
+        let mut fx = Fx::new();
+        let theme = Theme::default();
+        let mut t = term(w, h);
+        let mut it: Interaction<SignInAction> = Interaction::new();
+        let mut frames = Vec::new();
+        let draw = |m: &mut SignInModal,
+                    it: &mut Interaction<SignInAction>,
+                    t: &mut Terminal<TestBackend>| {
+            let mut out = Vec::new();
+            m.scroll(-10_000);
+            for _ in 0..60 {
+                let mut hits = it.begin_frame();
+                let mut links = Vec::new();
+                let buf = frame(t, |f| {
+                    m.render(f, f.area(), &theme, &mut hits, &|a| a, &mut links)
+                });
+                it.end_frame(hits);
+                if !check {
+                    return out;
+                }
+                let s = checked("sign-in", &buf);
+                if out.last() == Some(&s) {
+                    break;
+                }
+                out.push(s);
+                m.scroll(1);
+            }
+            out
+        };
+        let mut m = SignInModal::new(SignInPrompt {
+            id: "mcp.x".into(),
+            title: fx.prose("title"),
+            url: fx.url("link"),
+            forward: Some(format!("ssh -N -L 1455:127.0.0.1:1455 {}", fx.word("host"))),
+            no_browser: Some(fx.word("why")),
+            device: None,
+        });
+        frames.extend(draw(&mut m, &mut it, &mut t));
+        // A refused paste with a long reason, then a long failure.
+        m.paste("http://127.0.0.1:1455/auth/callback?code=c&state=s");
+        m.activate(SignInAction::Submit);
+        m.answer(Err(fx.prose("refused")));
+        frames.extend(draw(&mut m, &mut it, &mut t));
+        m.finish(Err(fx.prose("err")));
+        frames.extend(draw(&mut m, &mut it, &mut t));
+        // A device authorization: two links and a code.
+        let code = crate::signin::DeviceCode {
+            user_code: zeroize::Zeroizing::new(fx.word("usercode")),
+            verification_uri: fx.url("page"),
+            verification_uri_complete: Some(zeroize::Zeroizing::new(fx.url("complete"))),
+            expires_in: 600,
+        };
+        let mut m = SignInModal::new(SignInPrompt {
+            id: "mcp.y".into(),
+            title: fx.prose("devtitle"),
+            url: code.link().to_owned(),
+            forward: None,
+            no_browser: Some(fx.word("devwhy")),
+            device: Some(code),
+        });
+        frames.extend(draw(&mut m, &mut it, &mut t));
+        if !check {
+            return;
+        }
+        let mut tokens = fx.all();
+        tokens.extend(["copy ssh command", "Address", "close", "copy code"]);
+        assert_reachable("sign-in", &frames, &tokens);
+    });
+}
+
+#[test]
+fn update_dialog_wraps_and_scrolls() {
+    matrix("update", |w, h, check| {
+        let mut fx = Fx::new();
+        let theme = Theme::default();
+        let mut t = term(w, h);
+        let mut it: Interaction<UpdateAction> = Interaction::new();
+        let mut m = UpdateModal::new(UpdateNotice {
+            current: fx.word("current"),
+            latest: fx.word("latest"),
+            url: fx.url("notes"),
+            command: format!("curl -fsSL {} | bash", fx.url("install")),
+        });
+        let mut frames = Vec::new();
+        m.scroll(-10_000);
+        for _ in 0..60 {
+            let mut hits = it.begin_frame();
+            let mut links = Vec::new();
+            let buf = frame(&mut t, |f| {
+                m.render(f, f.area(), &theme, &mut hits, &|a| a, &mut links)
+            });
+            it.end_frame(hits);
+            if !check {
+                return;
+            }
+            let s = checked("update", &buf);
+            if frames.last() == Some(&s) {
+                break;
+            }
+            frames.push(s);
+            m.scroll(1);
+        }
+        let mut tokens = fx.all();
+        tokens.extend([
+            "copy install command",
+            "copy link",
+            "[ close ]",
+            "Esc close",
+        ]);
+        assert_reachable("update", &frames, &tokens);
     });
 }
 
@@ -815,6 +933,44 @@ mod affordances {
         app.handle(AppEvent::Terminal(key("down")));
         let text = app_draw(&mut app, &mut t);
         assert!(text.contains("▸ Use a command"), "{text}");
+    }
+
+    #[test]
+    fn sign_in_scrolls_by_wheel_and_page_keys() {
+        let (mut app, mut t) = app(40, 14);
+        app.handle(AppEvent::Core(CoreEvent::SignIn(
+            crate::signin::SignInPrompt {
+                id: "chatgpt".into(),
+                title: "Sign in with ChatGPT".into(),
+                url: format!("https://auth.example/authorize?{}", "x".repeat(200)),
+                forward: Some("ssh -N -L 1455:127.0.0.1:1455 dev@10.0.0.2".into()),
+                no_browser: Some("this is an SSH session".into()),
+                device: None,
+            },
+        )));
+        // It opens with the address field in view.
+        let text = app_draw(&mut app, &mut t);
+        assert!(text.contains("Address ›"), "{text}");
+        let start = position(&text, "─ ");
+        // Keyboard: PageUp goes back to the top.
+        for _ in 0..10 {
+            app.handle(AppEvent::Terminal(key("pgup")));
+            app_draw(&mut app, &mut t);
+        }
+        let text = app_draw(&mut app, &mut t);
+        assert!(position(&text, "─ ").starts_with("1-"), "{text}");
+        assert!(text.contains("Sign in with ChatGPT"), "{text}");
+        // Mouse: the wheel scrolls down again.
+        let (x, y) = find_text(t.backend().buffer(), "Sign in with").unwrap();
+        app.handle(AppEvent::Terminal(wheel_down(x, y)));
+        let text = app_draw(&mut app, &mut t);
+        assert!(!position(&text, "─ ").starts_with("1-"), "{text}");
+        // PageDown back to the field.
+        for _ in 0..10 {
+            app.handle(AppEvent::Terminal(key("pgdn")));
+            app_draw(&mut app, &mut t);
+        }
+        assert_eq!(position(&app_draw(&mut app, &mut t), "─ "), start);
     }
 
     #[test]

@@ -140,6 +140,10 @@ pub struct AuthServer {
     /// The authorization response carries `iss` (RFC 9207).
     #[serde(default)]
     pub authorization_response_iss_parameter_supported: bool,
+    /// Device Authorization endpoint (RFC 8628), if the server offers the
+    /// device grant.
+    #[serde(default)]
+    pub device_authorization_endpoint: Option<String>,
 }
 
 /// Sends an unauthenticated MCP request (`server/discover`) to `url` and
@@ -341,6 +345,7 @@ pub async fn auth_server(http: &reqwest::Client, issuer: &str) -> Result<AuthSer
         for e in [&meta.authorization_endpoint, &meta.token_endpoint]
             .into_iter()
             .chain(meta.registration_endpoint.as_ref())
+            .chain(meta.device_authorization_endpoint.as_ref())
         {
             if !secure_endpoint(e) {
                 return Err(AuthError::Discovery(format!(

@@ -11,6 +11,43 @@ to built-in prompts, agents, workflows and `harness.ini` defaults.
 
 ## Unreleased
 
+### Added
+
+- Browser sign-in works when the browser is on another machine (SSH,
+  no display, WSL): Sign in with ChatGPT and MCP OAuth no longer try to open
+  a local browser there. They show the sign-in link in full (an OSC 8
+  hyperlink; copy it with `[ copy link ]`/ctrl+y in the TUI or `c` in
+  `harness login`) and take the address the browser ends on, pasted back
+  into harness, with the same `state`, `iss` and PKCE checks as a real
+  callback. Over SSH they also show the exact `ssh -L` port-forward command.
+  In the TUI both sign-ins run in the background in a new sign-in dialog
+  (keyboard and mouse), and Esc cancels them and closes the loopback
+  listener. See
+  [docs/providers.md](docs/providers.md#signing-in-from-a-remote-or-headless-machine).
+  No default changed.
+- MCP OAuth signs in with a code (the device authorization grant, RFC 8628)
+  when harness runs over SSH, without a display or in WSL and the server's
+  authorization server advertises a `device_authorization_endpoint`:
+  `harness login mcp <name>` and `/login mcp <name>` show a link and a short
+  code to approve on any device (copy them with `c`/`u` in the CLI,
+  `[ copy link ]`/`[ copy code ]` in the TUI) and poll until you approve,
+  honouring `interval`, `slow_down`, `access_denied` and expiry; Esc
+  cancels. Other servers and desktop sessions keep the browser, paste-back
+  and `ssh -L` flow; a server that refuses the device grant falls back to
+  it. See [docs/mcp.md](docs/mcp.md#signing-in-with-a-code-device-flow).
+  No default changed.
+- harness tells you when a new release is out: when the TUI starts it
+  checks the latest GitHub release in the background (one plain GET, at
+  most once a day, silent when offline or rate-limited) and, if it is
+  newer than the running build, shows a dialog with both versions, the
+  release-notes link and the `curl … install.sh | bash` command, with a
+  Copy button (keyboard and mouse; OSC 52, so it works over SSH). It waits
+  until the chat input is empty and no turn is running, so it never takes
+  keys meant for a prompt. Esc or `[ close ]` closes it, and a dismissed
+  version is not shown again until a newer one ships.
+  `[general] update_check = off` turns it off; `harness run`, `wf run`,
+  `bench` and `eval` never check. See [docs/update-check.md](docs/update-check.md).
+
 ## [0.4.0] - 2026-10-24
 
 ### Added
@@ -678,3 +715,9 @@ fingerprint. CI fails until the entry exists; `cargo test -p harness-eval
     arm, so a harder eval comes first. (TASK-161.7)
   Prompts and tool descriptions are unchanged.
   defaults-fingerprint: 46b4cecb7b8e
+- New `[general] update_check` setting, default `on`, and
+  `update_check_interval`, default `24h`: the interactive TUI asks GitHub
+  for the latest harness release in the background at startup, at most
+  once per interval, and offers a newer one in a dialog with the install
+  command. Headless commands never check. Prompts are unchanged. (TASK-164)
+  defaults-fingerprint: d38458c654e8

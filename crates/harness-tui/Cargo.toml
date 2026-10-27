@@ -14,6 +14,7 @@ workspace = true
 [dependencies]
 crossterm.workspace = true
 ratatui.workspace = true
+zeroize.workspace = true
 tracing.workspace = true
 harness-config.workspace = true
 harness-events.workspace = true

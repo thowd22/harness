@@ -29,9 +29,11 @@ pub mod palette;
 pub mod panel;
 pub mod selection;
 pub mod session_picker;
+pub mod signin;
 pub mod status;
 pub mod terminal;
 pub mod theme;
+pub mod update;
 
 #[cfg(test)]
 mod layout_matrix;

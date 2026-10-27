@@ -17,5 +17,6 @@ pub mod probe;
 pub mod provider;
 pub mod registry;
 pub mod retry;
+pub mod signin;
 pub mod sse;
 pub mod timing;

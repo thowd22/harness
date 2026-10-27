@@ -1,17 +1,20 @@
 //! The browser authorization (`harness login mcp <name>`): discovery,
 //! client registration, authorization code with PKCE and a loopback
-//! redirect, and the code exchange.
+//! redirect, and the code exchange; or, when the browser is elsewhere and
+//! the server offers it, the device grant ([`super::device`]).
 
 use std::time::Duration;
 
 use harness_config::ini::{McpServer, McpTransport};
 use harness_providers::chatgpt::pkce::{Pkce, random_token};
+use harness_providers::signin::{PasteReceiver, check_state, next_paste, param};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+use super::device::{self, DEVICE_GRANT, Started};
 use super::discovery::{self, AuthServer, Challenge};
-use super::session::{TokenFailure, forget_cached, token_call, tokens_from};
+use super::session::{TokenFailure, TokenResponse, forget_cached, token_call, tokens_from};
 use super::store::{ClientRegistration, McpAuthRecord, McpTokenStore, Registration};
 use super::{
     AUTHORIZE_TIMEOUT, AuthError, Browser, CALLBACK_PATH, CLIENT_NAME, Token, canonical_resource,
@@ -37,6 +40,13 @@ pub struct Authorize {
     pub port: u16,
     /// How long to wait for the browser.
     pub timeout: Duration,
+    /// Use the device grant (RFC 8628) when the authorization server
+    /// advertises it ([`Authorize::with_device_grant`]).
+    pub device_grant: bool,
+    /// The length of one of the server's seconds when polling for a
+    /// device grant (`interval`, `slow_down`, `expires_in`). One second;
+    /// tests shorten it.
+    pub poll_unit: Duration,
 }
 
 /// What a successful authorization established.
@@ -69,7 +79,27 @@ impl Authorize {
             store,
             port: 0,
             timeout: AUTHORIZE_TIMEOUT,
+            device_grant: false,
+            poll_unit: Duration::from_secs(1),
         })
+    }
+
+    /// Prefers the device grant (RFC 8628) when the authorization server
+    /// advertises a `device_authorization_endpoint`: for a browser on
+    /// another machine ([`harness_providers::signin::Environment::is_remote`]),
+    /// where the loopback redirect cannot come back. The user code goes to
+    /// [`Browser::show_device_code`]; nothing is pasted. Servers without the
+    /// endpoint, or that refuse the grant for this client, get the loopback
+    /// flow.
+    pub fn with_device_grant(mut self, on: bool) -> Self {
+        self.device_grant = on;
+        self
+    }
+
+    /// Sets [`Authorize::poll_unit`].
+    pub fn with_poll_unit(mut self, unit: Duration) -> Self {
+        self.poll_unit = unit;
+        self
     }
 
     /// Waits at most `timeout` for the browser.
@@ -82,6 +112,20 @@ impl Authorize {
     /// authorization URL, wait for the callback, exchange the code and
     /// save the tokens.
     pub async fn run(&self, browser: &dyn Browser) -> Result<Authorized, AuthError> {
+        let (_keep, mut paste) = harness_providers::signin::paste_channel();
+        self.run_with(browser, &mut paste).await
+    }
+
+    /// [`Authorize::run`] that also takes the callback pasted by the user
+    /// (see [`harness_providers::signin`]) when the browser is on another
+    /// machine. A paste gets the same `state` and `iss` checks as a real
+    /// callback; a bare code is taken only when the server does not send
+    /// `iss`.
+    pub async fn run_with(
+        &self,
+        browser: &dyn Browser,
+        paste: &mut PasteReceiver,
+    ) -> Result<Authorized, AuthError> {
         let resource = canonical_resource(&self.url)
             .ok_or_else(|| AuthError::Discovery(format!("`{}` is not a valid URL", self.url)))?;
         if !secure_endpoint(&self.url) {
@@ -102,7 +146,13 @@ impl Authorize {
             .load(&self.server)?
             .filter(|r| r.issuer == meta.issuer);
 
-        let (listener, client) = self.client(&http, &meta, previous.as_ref()).await?;
+        let device_endpoint = meta
+            .device_authorization_endpoint
+            .clone()
+            .filter(|_| self.device_grant);
+        let (listener, client) = self
+            .client(&http, &meta, previous.as_ref(), device_endpoint.is_some())
+            .await?;
         let port = listener
             .local_addr()
             .map_err(|e| AuthError::Port(e.to_string()))?
@@ -117,7 +167,7 @@ impl Authorize {
         );
         // Save the registration first, so a cancelled attempt does not
         // register again next time; tokens for the same URL are kept.
-        let mut record = McpAuthRecord {
+        let record = McpAuthRecord {
             resource: resource.clone(),
             resource_indicator: prm.resource.clone(),
             issuer: meta.issuer.clone(),
@@ -138,9 +188,36 @@ impl Authorize {
         };
         self.store.save(&self.server, &record)?;
 
+        let scope_param = scopes.join(" ");
+        if let Some(endpoint) = &device_endpoint {
+            match device::request(&http, endpoint, &client, &scope_param, &prm.resource).await? {
+                Started::Code(pending) => {
+                    drop(listener);
+                    browser.show_device_code(&pending.shown).map_err(|e| {
+                        AuthError::Browser(e, pending.shown.verification_uri.clone())
+                    })?;
+                    let t = device::poll(
+                        &http,
+                        &meta.token_endpoint,
+                        &client,
+                        &prm.resource,
+                        &pending,
+                        self.poll_unit,
+                        self.timeout,
+                    )
+                    .await?;
+                    return self.save_tokens(t, record, &meta, client, scopes);
+                }
+                Started::Refused { code } => tracing::info!(
+                    server = %self.server,
+                    error = %code,
+                    "device authorization refused; using the browser redirect"
+                ),
+            }
+        }
+
         let state = random_token(32);
         let pkce = Pkce::new();
-        let scope_param = scopes.join(" ");
         let mut query: Vec<(&str, &str)> = vec![
             ("response_type", "code"),
             ("client_id", client.client_id.as_str()),
@@ -167,9 +244,24 @@ impl Authorize {
             .open(&url)
             .map_err(|e| AuthError::Browser(e, url.clone()))?;
 
-        let params = tokio::time::timeout(self.timeout, accept_callback(&listener, &state, &meta))
-            .await
-            .map_err(|_| AuthError::Timeout(self.timeout))??;
+        let pasted = next_paste(paste, |p| {
+            check_state(p, &state)?;
+            if param(p, "state").is_none() && meta.authorization_response_iss_parameter_supported {
+                return Err("this server signs its answer with the issuer; paste the whole address from the browser's address bar, not just the code".into());
+            }
+            Ok(())
+        });
+        let params = tokio::time::timeout(self.timeout, async {
+            tokio::select! {
+                r = accept_callback(&listener, &state, &meta) => r,
+                p = pasted => {
+                    // A bare code has nothing more to check.
+                    if p.len() == 1 { Ok(p) } else { check_callback(p, &meta) }
+                }
+            }
+        })
+        .await
+        .map_err(|_| AuthError::Timeout(self.timeout))??;
         let code = params
             .iter()
             .find(|(k, _)| k == "code")
@@ -197,6 +289,18 @@ impl Authorize {
                 TokenFailure::OAuth { code, message } => AuthError::OAuth { code, message },
                 TokenFailure::Network(m) => AuthError::Network(m),
             })?;
+        self.save_tokens(t, record, &meta, client, scopes)
+    }
+
+    /// Stores the tokens of a successful authorization.
+    fn save_tokens(
+        &self,
+        t: TokenResponse,
+        mut record: McpAuthRecord,
+        meta: &AuthServer,
+        client: ClientRegistration,
+        scopes: Vec<String>,
+    ) -> Result<Authorized, AuthError> {
         let tokens = tokens_from(t, None, &scopes, unix_now());
         let out = Authorized {
             issuer: meta.issuer.clone(),
@@ -253,6 +357,7 @@ impl Authorize {
         http: &reqwest::Client,
         meta: &AuthServer,
         previous: Option<&McpAuthRecord>,
+        device: bool,
     ) -> Result<(TcpListener, ClientRegistration), AuthError> {
         if let Some(id) = &self.client_id {
             return Ok((
@@ -262,6 +367,7 @@ impl Authorize {
                     client_secret: None,
                     kind: Registration::PreRegistered,
                     redirect_uri: None,
+                    device_grant: false,
                 },
             ));
         }
@@ -275,12 +381,15 @@ impl Authorize {
                     client_secret: None,
                     kind: Registration::MetadataDocument,
                     redirect_uri: None,
+                    device_grant: false,
                 },
             ));
         }
-        // Reuse an earlier dynamic registration when its port is free.
+        // Reuse an earlier dynamic registration when its port is free (and,
+        // for the device grant, when it registered that grant).
         if let Some(p) = previous
             && p.client.kind == Registration::Dynamic
+            && (p.client.device_grant || !device)
             && let Some(port) = p
                 .client
                 .redirect_uri
@@ -309,10 +418,16 @@ impl Authorize {
             .map_err(|e| AuthError::Port(e.to_string()))?
             .port();
         let redirect_uri = format!("http://127.0.0.1:{port}{CALLBACK_PATH}");
+        // The device grant is asked for only when it will be used, so the
+        // loopback registration stays as it always was.
+        let mut grant_types = vec!["authorization_code", "refresh_token"];
+        if device {
+            grant_types.push(DEVICE_GRANT);
+        }
         let body = json!({
             "client_name": CLIENT_NAME,
             "redirect_uris": [redirect_uri],
-            "grant_types": ["authorization_code", "refresh_token"],
+            "grant_types": grant_types,
             "response_types": ["code"],
             "token_endpoint_auth_method": "none",
             "application_type": "native",
@@ -360,6 +475,7 @@ impl Authorize {
                 client_secret: v["client_secret"].as_str().map(Token::new),
                 kind: Registration::Dynamic,
                 redirect_uri: Some(redirect_uri),
+                device_grant: device,
             },
         ))
     }
@@ -404,55 +520,59 @@ async fn accept_callback(
             .await;
             return Err(AuthError::StateMismatch);
         }
-        match get("iss") {
-            Some(iss) if iss != meta.issuer => {
-                respond(
-                    &mut sock,
-                    400,
-                    "Authorization failed. See harness for details.",
-                )
-                .await;
-                return Err(AuthError::IssuerMismatch(meta.issuer.clone()));
+        return match check_callback(params, meta) {
+            Ok(params) => {
+                respond(&mut sock, 200, PAGE_OK).await;
+                Ok(params)
             }
-            None if meta.authorization_response_iss_parameter_supported => {
-                respond(
-                    &mut sock,
-                    400,
-                    "Authorization failed. See harness for details.",
-                )
-                .await;
-                return Err(AuthError::IssuerMismatch(meta.issuer.clone()));
-            }
-            _ => {}
-        }
-        if let Some(err) = get("error") {
-            if err == "access_denied" {
+            Err(AuthError::Denied) => {
                 respond(
                     &mut sock,
                     200,
                     "Authorization was declined. Nothing was saved; you can close this tab.",
                 )
                 .await;
-                return Err(AuthError::Denied);
+                Err(AuthError::Denied)
             }
-            let e = AuthError::OAuth {
-                code: err.to_owned(),
-                message: get("error_description")
-                    .unwrap_or("")
-                    .chars()
-                    .take(200)
-                    .collect(),
-            };
-            respond(
-                &mut sock,
-                400,
-                "Authorization failed. See harness for details.",
-            )
-            .await;
-            return Err(e);
+            Err(e) => {
+                respond(
+                    &mut sock,
+                    400,
+                    "Authorization failed. See harness for details.",
+                )
+                .await;
+                Err(e)
+            }
+        };
+    }
+}
+
+/// Checks a callback whose `state` matched: its `iss` (RFC 9207) before
+/// anything else in it is used, then any OAuth error.
+fn check_callback(
+    params: Vec<(String, String)>,
+    meta: &AuthServer,
+) -> Result<Vec<(String, String)>, AuthError> {
+    match param(&params, "iss") {
+        Some(iss) if iss != meta.issuer => {
+            return Err(AuthError::IssuerMismatch(meta.issuer.clone()));
         }
-        respond(&mut sock, 200, PAGE_OK).await;
-        return Ok(params);
+        None if meta.authorization_response_iss_parameter_supported => {
+            return Err(AuthError::IssuerMismatch(meta.issuer.clone()));
+        }
+        _ => {}
+    }
+    match param(&params, "error") {
+        None => Ok(params),
+        Some("access_denied") => Err(AuthError::Denied),
+        Some(err) => Err(AuthError::OAuth {
+            code: err.to_owned(),
+            message: param(&params, "error_description")
+                .unwrap_or("")
+                .chars()
+                .take(200)
+                .collect(),
+        }),
     }
 }
 
