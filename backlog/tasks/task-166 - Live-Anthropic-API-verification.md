@@ -1,11 +1,11 @@
 ---
 id: TASK-166
 title: Live Anthropic API verification
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-27 20:55'
-updated_date: '2026-10-27 21:04'
+updated_date: '2026-10-27 22:15'
 labels: []
 dependencies: []
 priority: high
@@ -29,7 +29,7 @@ Several Anthropic features were only ever tested against local mock servers, bec
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Tests: automated tests cover every acceptance criterion (unit and/or integration as appropriate) and pass locally and in CI; no existing test is deleted, skipped, ignored or weakened to get a green run
+- [x] #1 Tests: automated tests cover every acceptance criterion (unit and/or integration as appropriate) and pass locally and in CI; no existing test is deleted, skipped, ignored or weakened to get a green run
 - [x] #2 Docs: user-facing behaviour is documented (docs/ and, if the design changed, the relevant backlog doc), public APIs have rustdoc, and any new config keys appear in the harness.ini reference
 - [x] #3 Loop guard respected: no more than 3 fix attempts per failing test or check; if still failing, stop, record attempts, output and hypothesis in implementation notes, and ask the user instead of looping
 - [x] #4 UI interaction: if this task makes anything visible in the TUI, every visible interactive element is clickable with the mouse and fully operable with the keyboard (arrows/Tab to focus, Enter to activate, Esc to back out), with tests for both input paths; tasks with no visible UI mark this N/A
@@ -59,4 +59,12 @@ Installed binary (harness 0.5.0), isolated HARNESS_CONFIG/HARNESS_DATA_DIR/XDG d
 - TUI (private tmux socket): glob + read tool calls, correct answer, cache 96-97% on later calls; /effort high turn streamed thinking (collapsed "thinking · 2 lines") and answered 0.05.
 Spend: all live calls were Haiku 5.5 (plus a few Haiku 4.5 calls in conformance and the memory eval); estimated under $0.10 total from the reported usage, far under the $3 cap.
 Offline gates: cargo fmt --check, clippy --workspace --all-targets -D warnings, nextest 2140 passed / 16 skipped (6 new ignored live tests), hermetic guard ok. No fix attempts hit the loop guard (the gzip test needed one diagnosis round). DoD #4 N/A: no UI changes.
+
+CI: run 40591852268 on e87df57 failed on ubuntu in an unrelated test, early_tool_start_keeps_results_and_event_order: glob listed b.txt/a.txt in a different order between the on and off runs (newest-first sort, files written back to back). Fixed in 8c685ee by giving both files one fixed mtime (assertions unchanged, 5/5 local runs). CI run 40592742975 on 8c685ee: all jobs green on Linux and macOS.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Verified the Anthropic provider against the real API with a temporary key. Existing live tests (provider smoke, conformance, memory eval) pass. New opt-in tests/anthropic_live.rs covers gzip bodies, thinking signatures across a tool loop (summarized and omitted), cache write/read for 5m/1h/mixed TTLs, pre-warm and count_tokens; login_verify gains a live Anthropic key check. The installed 0.5.0 binary completed a headless run and TUI turns (tool calls, caching, live thinking) with the key never written to disk. No product bugs found; documented that cargo run/test export SSL_CERT_* so gzip auto stays raw there. Live spend under $0.10. Also fixed an order-dependent flake in early_tool_start found by CI. CI green on 8c685ee.
+<!-- SECTION:FINAL_SUMMARY:END -->
