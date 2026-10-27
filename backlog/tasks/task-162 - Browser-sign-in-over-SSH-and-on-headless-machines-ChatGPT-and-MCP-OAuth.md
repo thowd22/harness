@@ -1,11 +1,11 @@
 ---
 id: TASK-162
 title: Browser sign-in over SSH and on headless machines (ChatGPT and MCP OAuth)
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-23 21:40'
-updated_date: '2026-10-26 21:47'
+updated_date: '2026-10-27 16:38'
 labels:
   - auth
   - login
@@ -42,7 +42,7 @@ Limit how many times you test and fix. If the same test, build or check still fa
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Tests: automated tests cover every acceptance criterion (unit and/or integration as appropriate) and pass locally and in CI; no existing test is deleted, skipped, ignored or weakened to get a green run
+- [x] #1 Tests: automated tests cover every acceptance criterion (unit and/or integration as appropriate) and pass locally and in CI; no existing test is deleted, skipped, ignored or weakened to get a green run
 - [x] #2 Docs: user-facing behaviour is documented (docs/ and, if the design changed, the relevant backlog doc), public APIs have rustdoc, and any new config keys appear in the harness.ini reference
 - [x] #3 Loop guard respected: no more than 3 fix attempts per failing test or check; if still failing, stop, record attempts, output and hypothesis in implementation notes, and ask the user instead of looping
 - [x] #4 UI interaction: if this task makes anything visible in the TUI, every visible interactive element is clickable with the mouse and fully operable with the keyboard (arrows/Tab to focus, Enter to activate, Esc to back out), with tests for both input paths; tasks with no visible UI mark this N/A
@@ -84,6 +84,8 @@ Slices 5-6 done (2026-10-26):
 - Flake found and fixed during the run: the TRACE log-capture test failed when run in parallel in the oauth binary (tracing callsite interest cached by other threads); moved to its own binary tests/oauth_no_leak.rs like harness-config's secrets_no_leak.rs.
 
 Validation (local, 2026-10-26): cargo fmt --check ok; cargo clippy --workspace --all-targets -D warnings ok; cargo nextest run --workspace --locked --profile ci: 2095 passed, 10 skipped; cargo test --workspace --locked --doc ok; scripts/hermetic-guard.sh ok (265 passed); scripts/bench-guard.sh ok. Smoke: real binary 'harness login openai --chatgpt' with SSH_CONNECTION set and no DISPLAY prints the full link on its own line, the paste instructions and 'ssh -N -L 1455:127.0.0.1:1455 dev@10.0.0.2'. CI not run yet: nothing is committed or pushed (DoD #1 left unchecked until CI passes).
+
+CI green on PR #4 (https://github.com/thowd22/harness/pull/4, run 40541715239, commit 7053589): rustfmt, cargo-deny, clippy and test on ubuntu-latest and macos-latest all pass. Follow-up for the MCP device grant: TASK-165.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
