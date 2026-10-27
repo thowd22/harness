@@ -242,7 +242,9 @@ file list and diff, the inspector and its context view, run history, the
 goal bar pane, panels, the notification history, approvals, the login
 dialog, the help overlay and the memory browser, each with the wheel and
 the arrow, page and Home/End keys, and a position indicator when it
-scrolls.
+scrolls. The browser sign-in dialog scrolls with the wheel and
+PageUp/PageDown (its arrow keys and Tab move between the address field and
+the buttons), and keeps the address field in view.
 
 The layout test matrix (`crates/harness-tui/src/layout_matrix.rs`) checks
 these rules for every view: it renders each one with long-content

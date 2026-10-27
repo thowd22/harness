@@ -115,7 +115,12 @@ auth = chatgpt            ; set by the login; api_key (default) | chatgpt
 
 1. harness listens on `127.0.0.1:1455` (later sign-ins may use another free
    port) and opens the system browser (`$BROWSER`, `xdg-open`, `open` or
-   `start`). The URL is also printed, in case no browser opens.
+   `start`). The URL is also printed in full, in case no browser opens.
+   Over SSH or without a display no browser is opened; you open the link on
+   another machine and paste the address it ends on back into harness, or
+   forward the port with the `ssh -L` command harness shows (see
+   [signing in from a remote or headless
+   machine](providers.md#signing-in-from-a-remote-or-headless-machine)).
 2. The authorization request carries a fresh `state`, `nonce` and PKCE
    `S256` challenge, the per-installation `ext_agent_host_id`
    (`urn:uuid:…`, created once), and the scopes
@@ -133,7 +138,9 @@ auth = chatgpt            ; set by the login; api_key (default) | chatgpt
    sign-in fails with a message saying so, no tokens are stored, and you can
    sign in again and allow it, or use an API key.
 6. Declining in the browser, a callback with the wrong `state`, or no
-   answer within 5 minutes ends the sign-in without saving anything.
+   answer within 5 minutes ends the sign-in without saving anything. A
+   pasted address with the wrong `state` is refused with the reason, and
+   you can paste again.
 
 ### Where the tokens live
 

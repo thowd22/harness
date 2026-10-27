@@ -24,6 +24,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use harness_providers::chatgpt::pkce::challenge_for;
 use serde_json::{Value, json};
@@ -561,12 +562,39 @@ fn token(s: &mut State, n: u64, req: &MockRequest) -> Reply {
 #[derive(Debug, Default, Clone)]
 pub struct MockBrowser {
     opened: Arc<Mutex<Vec<String>>>,
+    redirects: Arc<Mutex<Vec<String>>>,
+    /// A browser on another machine: the redirect to the loopback callback
+    /// is recorded ([`MockBrowser::next_redirect`]) but never followed.
+    pub remote: bool,
 }
 
 impl MockBrowser {
     /// A new browser.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A browser on another machine (see [`MockBrowser::remote`]).
+    pub fn remote() -> Self {
+        Self {
+            remote: true,
+            ..Self::default()
+        }
+    }
+
+    /// Waits up to 10s for the next loopback address a remote browser was
+    /// sent to: what the user would copy from the address bar.
+    pub async fn next_redirect(&self) -> String {
+        for _ in 0..1000 {
+            if let Some(r) = {
+                let mut r = self.redirects.lock().expect("lock");
+                (!r.is_empty()).then(|| r.remove(0))
+            } {
+                return r;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the browser was never redirected");
     }
 
     /// Every URL opened so far.
@@ -579,6 +607,7 @@ impl Browser for MockBrowser {
     fn open(&self, url: &str) -> Result<(), String> {
         self.opened.lock().expect("lock").push(url.to_owned());
         let url = url.to_owned();
+        let (remote, redirects) = (self.remote, self.redirects.clone());
         tokio::spawn(async move {
             let client = reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
@@ -588,6 +617,10 @@ impl Browser for MockBrowser {
                 return;
             };
             if let Some(location) = resp.headers().get("location").and_then(|v| v.to_str().ok()) {
+                if remote {
+                    redirects.lock().expect("lock").push(location.to_owned());
+                    return;
+                }
                 let _ = client.get(location).send().await;
             }
         });

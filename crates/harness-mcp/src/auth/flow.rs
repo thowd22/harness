@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use harness_config::ini::{McpServer, McpTransport};
 use harness_providers::chatgpt::pkce::{Pkce, random_token};
+use harness_providers::signin::{PasteReceiver, check_state, next_paste, param};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -82,6 +83,20 @@ impl Authorize {
     /// authorization URL, wait for the callback, exchange the code and
     /// save the tokens.
     pub async fn run(&self, browser: &dyn Browser) -> Result<Authorized, AuthError> {
+        let (_keep, mut paste) = harness_providers::signin::paste_channel();
+        self.run_with(browser, &mut paste).await
+    }
+
+    /// [`Authorize::run`] that also takes the callback pasted by the user
+    /// (see [`harness_providers::signin`]) when the browser is on another
+    /// machine. A paste gets the same `state` and `iss` checks as a real
+    /// callback; a bare code is taken only when the server does not send
+    /// `iss`.
+    pub async fn run_with(
+        &self,
+        browser: &dyn Browser,
+        paste: &mut PasteReceiver,
+    ) -> Result<Authorized, AuthError> {
         let resource = canonical_resource(&self.url)
             .ok_or_else(|| AuthError::Discovery(format!("`{}` is not a valid URL", self.url)))?;
         if !secure_endpoint(&self.url) {
@@ -167,9 +182,24 @@ impl Authorize {
             .open(&url)
             .map_err(|e| AuthError::Browser(e, url.clone()))?;
 
-        let params = tokio::time::timeout(self.timeout, accept_callback(&listener, &state, &meta))
-            .await
-            .map_err(|_| AuthError::Timeout(self.timeout))??;
+        let pasted = next_paste(paste, |p| {
+            check_state(p, &state)?;
+            if param(p, "state").is_none() && meta.authorization_response_iss_parameter_supported {
+                return Err("this server signs its answer with the issuer; paste the whole address from the browser's address bar, not just the code".into());
+            }
+            Ok(())
+        });
+        let params = tokio::time::timeout(self.timeout, async {
+            tokio::select! {
+                r = accept_callback(&listener, &state, &meta) => r,
+                p = pasted => {
+                    // A bare code has nothing more to check.
+                    if p.len() == 1 { Ok(p) } else { check_callback(p, &meta) }
+                }
+            }
+        })
+        .await
+        .map_err(|_| AuthError::Timeout(self.timeout))??;
         let code = params
             .iter()
             .find(|(k, _)| k == "code")
@@ -404,55 +434,59 @@ async fn accept_callback(
             .await;
             return Err(AuthError::StateMismatch);
         }
-        match get("iss") {
-            Some(iss) if iss != meta.issuer => {
-                respond(
-                    &mut sock,
-                    400,
-                    "Authorization failed. See harness for details.",
-                )
-                .await;
-                return Err(AuthError::IssuerMismatch(meta.issuer.clone()));
+        return match check_callback(params, meta) {
+            Ok(params) => {
+                respond(&mut sock, 200, PAGE_OK).await;
+                Ok(params)
             }
-            None if meta.authorization_response_iss_parameter_supported => {
-                respond(
-                    &mut sock,
-                    400,
-                    "Authorization failed. See harness for details.",
-                )
-                .await;
-                return Err(AuthError::IssuerMismatch(meta.issuer.clone()));
-            }
-            _ => {}
-        }
-        if let Some(err) = get("error") {
-            if err == "access_denied" {
+            Err(AuthError::Denied) => {
                 respond(
                     &mut sock,
                     200,
                     "Authorization was declined. Nothing was saved; you can close this tab.",
                 )
                 .await;
-                return Err(AuthError::Denied);
+                Err(AuthError::Denied)
             }
-            let e = AuthError::OAuth {
-                code: err.to_owned(),
-                message: get("error_description")
-                    .unwrap_or("")
-                    .chars()
-                    .take(200)
-                    .collect(),
-            };
-            respond(
-                &mut sock,
-                400,
-                "Authorization failed. See harness for details.",
-            )
-            .await;
-            return Err(e);
+            Err(e) => {
+                respond(
+                    &mut sock,
+                    400,
+                    "Authorization failed. See harness for details.",
+                )
+                .await;
+                Err(e)
+            }
+        };
+    }
+}
+
+/// Checks a callback whose `state` matched: its `iss` (RFC 9207) before
+/// anything else in it is used, then any OAuth error.
+fn check_callback(
+    params: Vec<(String, String)>,
+    meta: &AuthServer,
+) -> Result<Vec<(String, String)>, AuthError> {
+    match param(&params, "iss") {
+        Some(iss) if iss != meta.issuer => {
+            return Err(AuthError::IssuerMismatch(meta.issuer.clone()));
         }
-        respond(&mut sock, 200, PAGE_OK).await;
-        return Ok(params);
+        None if meta.authorization_response_iss_parameter_supported => {
+            return Err(AuthError::IssuerMismatch(meta.issuer.clone()));
+        }
+        _ => {}
+    }
+    match param(&params, "error") {
+        None => Ok(params),
+        Some("access_denied") => Err(AuthError::Denied),
+        Some(err) => Err(AuthError::OAuth {
+            code: err.to_owned(),
+            message: param(&params, "error_description")
+                .unwrap_or("")
+                .chars()
+                .take(200)
+                .collect(),
+        }),
     }
 }
 

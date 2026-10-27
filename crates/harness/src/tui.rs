@@ -15,6 +15,7 @@ mod effort;
 mod jobs;
 mod mcp;
 mod mcp_login;
+mod signin;
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -228,6 +229,8 @@ struct Driver {
     error_action: Option<harness_events::schema::ErrorAction>,
     /// MCP servers of the session: `/mcp`, prompts, resources.
     mcp: mcp::McpUi,
+    /// Running browser sign-ins (ChatGPT, MCP OAuth).
+    sign_ins: signin::SignIns,
 }
 
 impl Driver {
@@ -267,6 +270,7 @@ impl Driver {
             browser: Arc::new(harness_providers::chatgpt::SystemBrowser),
             error_action: None,
             mcp: mcp::McpUi::default(),
+            sign_ins: signin::SignIns::default(),
         }
     }
 
@@ -530,6 +534,8 @@ impl Driver {
             UiRequest::SetModel(name) => commands::model(self, Some(&name)).await,
             UiRequest::Resume(id) => commands::resume(self, &id).await,
             UiRequest::Login(sub) => commands::login(self, &sub).await,
+            UiRequest::SignInPaste { id, text } => signin::paste(self, &id, &text).await,
+            UiRequest::SignInCancel(id) => signin::cancel(self, &id),
         }
         true
     }
@@ -537,8 +543,10 @@ impl Driver {
     async fn run(mut self, mut requests: mpsc::UnboundedReceiver<UiRequest>) {
         // MCP prompts run in the background; their text arrives here.
         let mut mcp_turns = self.mcp.take_turns();
+        let mut sign_ins = self.sign_ins.take_done();
         loop {
             tokio::select! {
+                Some(f) = sign_ins.recv() => signin::finished(&mut self, f).await,
                 r = requests.recv() => match r {
                     Some(r) => if !self.request(r).await { break },
                     None => break,
@@ -558,6 +566,7 @@ impl Driver {
         for b in self.background.drain(..) {
             b.abort();
         }
+        self.sign_ins.abort_all();
         self.finish_core().await;
     }
 }

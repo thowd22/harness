@@ -16,6 +16,7 @@ use super::{
     PLAN_SCOPE, SCOPES, SIGN_IN_TIMEOUT, TERMINAL_REFRESH_CODES, form_encode, parse_query,
     unix_now,
 };
+use crate::signin::{PasteReceiver, check_state, next_paste, param};
 
 /// Opens the authorization URL for the user.
 pub trait Browser: Send + Sync {
@@ -268,6 +269,20 @@ impl SignIn {
     /// authorization URL, wait for the callback, exchange the code, verify
     /// the ID token and the plan scope, and save the tokens.
     pub async fn run(&self, browser: &dyn Browser) -> Result<Account, ChatGptError> {
+        let (_keep, mut paste) = crate::signin::paste_channel();
+        self.run_with(browser, &mut paste).await
+    }
+
+    /// [`SignIn::run`] that also takes the callback pasted by the user
+    /// (see [`crate::signin`]) when the browser is on another machine. A
+    /// paste must carry this attempt's `state` (a bare code has none and is
+    /// bound by PKCE); the first sign-in needs the whole address, which
+    /// carries the issued `client_id`.
+    pub async fn run_with(
+        &self,
+        browser: &dyn Browser,
+        paste: &mut PasteReceiver,
+    ) -> Result<Account, ChatGptError> {
         let host_id = self.store.host_id()?;
         let record = self.store.load()?;
         let registered = record.client_id.clone();
@@ -306,9 +321,24 @@ impl SignIn {
             .open(&url)
             .map_err(|e| ChatGptError::Browser(e, url.clone()))?;
 
-        let callback = tokio::time::timeout(self.timeout, accept_callback(&listener, &state))
-            .await
-            .map_err(|_| ChatGptError::Timeout(self.timeout))??;
+        let pasted = next_paste(paste, |p| {
+            check_state(p, &state)?;
+            if registered.is_none()
+                && param(p, "client_id").is_none()
+                && param(p, "error").is_none()
+            {
+                return Err("the first sign-in needs the whole address from the browser's address bar (it carries the client id OpenAI issued), not just the code".into());
+            }
+            Ok(())
+        });
+        let callback = tokio::time::timeout(self.timeout, async {
+            tokio::select! {
+                r = accept_callback(&listener, &state) => r,
+                params = pasted => callback_error(Callback { params }),
+            }
+        })
+        .await
+        .map_err(|_| ChatGptError::Timeout(self.timeout))??;
 
         // The issued client id is saved before the exchange, so a later
         // attempt reuses it even if this code expires.
@@ -433,30 +463,42 @@ async fn accept_callback(listener: &TcpListener, state: &str) -> Result<Callback
             .await;
             return Err(ChatGptError::StateMismatch);
         }
-        if let Some(err) = cb.get("error") {
-            let err = err.to_owned();
-            if err == "access_denied" {
+        return match callback_error(cb) {
+            Ok(cb) => {
+                respond(&mut sock, 200, PAGE_OK).await;
+                Ok(cb)
+            }
+            Err(ChatGptError::Denied) => {
                 respond(
                     &mut sock,
                     200,
                     "Sign-in was declined. Nothing was saved; you can close this tab.",
                 )
                 .await;
-                return Err(ChatGptError::Denied);
+                Err(ChatGptError::Denied)
             }
-            respond(&mut sock, 400, "Sign-in failed. See harness for details.").await;
-            return Err(ChatGptError::OAuth {
-                code: err,
-                message: cb
-                    .get("error_description")
-                    .unwrap_or("")
-                    .chars()
-                    .take(200)
-                    .collect(),
-            });
-        }
-        respond(&mut sock, 200, PAGE_OK).await;
-        return Ok(cb);
+            Err(e) => {
+                respond(&mut sock, 400, "Sign-in failed. See harness for details.").await;
+                Err(e)
+            }
+        };
+    }
+}
+
+/// The OAuth error a callback carries, if any.
+fn callback_error(cb: Callback) -> Result<Callback, ChatGptError> {
+    match cb.get("error") {
+        None => Ok(cb),
+        Some("access_denied") => Err(ChatGptError::Denied),
+        Some(err) => Err(ChatGptError::OAuth {
+            code: err.to_owned(),
+            message: cb
+                .get("error_description")
+                .unwrap_or("")
+                .chars()
+                .take(200)
+                .collect(),
+        }),
     }
 }
 

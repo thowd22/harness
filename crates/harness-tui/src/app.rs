@@ -80,6 +80,9 @@ use crate::palette::{EntryKind, Invocation, PaletteEntry};
 use crate::panel::{Panel, PanelButton, PanelOutput};
 use crate::selection::{self, Chrome, KeyOutcome, MouseOutcome, Scroll, Selector, TextRegion};
 use crate::session_picker::{SessionAction, SessionOutcome, SessionPicker, SessionRow};
+use crate::signin::{
+    CHATGPT_ID, Hyperlink, PastedText, SignInAction, SignInModal, SignInOutcome, SignInPrompt,
+};
 use crate::status::StatusLine;
 use crate::theme::{ColorDepth, Theme, ThemeError, Token};
 
@@ -316,6 +319,24 @@ pub enum CoreEvent {
     /// The outcome of a [`UiRequest::Login`]: a one-line summary or an
     /// actionable error. Never contains the key.
     LoginResult(Result<String, String>),
+    /// A browser sign-in started: open the sign-in modal with its link.
+    SignIn(SignInPrompt),
+    /// The running sign-in's answer to a [`UiRequest::SignInPaste`]:
+    /// taken, or why not (the user can paste again).
+    SignInAnswer {
+        /// The sign-in.
+        id: String,
+        /// The answer.
+        result: Result<(), String>,
+    },
+    /// A browser sign-in ended: a one-line summary or an error. Never
+    /// contains a code or token.
+    SignInDone {
+        /// The sign-in.
+        id: String,
+        /// The outcome.
+        result: Result<String, String>,
+    },
     /// The MCP servers that failed, by name (empty: none). The status
     /// line shows a compact indicator that opens `/mcp`.
     McpStatus {
@@ -404,6 +425,16 @@ pub enum UiRequest {
     /// Verify and save a credential entered in the `/login` modal; answer
     /// with [`CoreEvent::LoginResult`].
     Login(LoginSubmission),
+    /// Hand an address pasted in the sign-in modal to the running sign-in;
+    /// answer with [`CoreEvent::SignInAnswer`].
+    SignInPaste {
+        /// The sign-in.
+        id: String,
+        /// What was pasted.
+        text: PastedText,
+    },
+    /// Stop a running browser sign-in (the user cancelled it).
+    SignInCancel(String),
     /// The user quit.
     Quit,
 }
@@ -576,6 +607,12 @@ struct LoginScreen {
     interaction: Interaction<LoginAction>,
 }
 
+/// The browser sign-in modal and its hit map.
+struct SignInScreen {
+    modal: SignInModal,
+    interaction: Interaction<SignInAction>,
+}
+
 /// The `/model` picker and its hit map.
 struct ModelScreen {
     picker: ModelPicker,
@@ -635,6 +672,9 @@ pub struct App {
     models: Option<Box<ModelScreen>>,
     sessions: Option<Box<SessionScreen>>,
     login: Option<Box<LoginScreen>>,
+    sign_in: Option<Box<SignInScreen>>,
+    /// Hyperlinks drawn in the last frame, written over its cells.
+    links: Vec<Hyperlink>,
     goals: Goals,
     goalbar: GoalBar,
     goal_pane: Option<Rect>,
@@ -706,6 +746,8 @@ impl App {
             models: None,
             sessions: None,
             login: None,
+            sign_in: None,
+            links: Vec::new(),
             goals: Goals::new(),
             goalbar,
             goal_pane: None,
@@ -934,6 +976,17 @@ impl App {
         self.login.as_ref().map(|l| &l.modal)
     }
 
+    /// The open browser sign-in modal.
+    pub fn sign_in(&self) -> Option<&SignInModal> {
+        self.sign_in.as_ref().map(|l| &l.modal)
+    }
+
+    /// The hyperlinks of the last frame ([`Hyperlink::sequence`] draws
+    /// them over its cells).
+    pub fn hyperlinks(&self) -> &[Hyperlink] {
+        &self.links
+    }
+
     /// The open `/model` picker.
     pub fn model_picker(&self) -> Option<&ModelPicker> {
         self.models.as_ref().map(|m| &m.picker)
@@ -1031,6 +1084,10 @@ impl App {
             return;
         }
         self.dirty = true;
+        if let Some(l) = &mut self.sign_in {
+            let out = l.modal.paste(&text);
+            return self.sign_in_outcome(out);
+        }
         if let Some(l) = &mut self.login {
             let out = l.modal.paste(&text);
             return self.login_outcome(out);
@@ -1209,6 +1266,31 @@ impl App {
                     .chat
                     .notify(Level::Error, "login", Some(e), Instant::now()),
             },
+            CoreEvent::SignIn(prompt) => {
+                self.sign_in = Some(Box::new(SignInScreen {
+                    modal: SignInModal::new(prompt),
+                    interaction: Interaction::new(),
+                }));
+            }
+            CoreEvent::SignInAnswer { id, result } => {
+                if let Some(l) = &mut self.sign_in
+                    && l.modal.id() == id
+                {
+                    l.modal.answer(result);
+                }
+            }
+            CoreEvent::SignInDone { id, result } => {
+                if let Some(l) = &mut self.sign_in
+                    && l.modal.id() == id
+                {
+                    if id == CHATGPT_ID && self.login.is_some() {
+                        // The `/login` modal shows the outcome.
+                        self.sign_in = None;
+                    } else {
+                        l.modal.finish(result);
+                    }
+                }
+            }
             CoreEvent::LoginResult(result) => match &mut self.login {
                 Some(l) => l.modal.finish(result),
                 // Closed while the key was checked: say how it went.
@@ -1558,6 +1640,46 @@ impl App {
         self.login_outcome(out);
     }
 
+    /// Input for the open sign-in modal.
+    fn sign_in_event(&mut self, ev: &Event) {
+        let Some(l) = &mut self.sign_in else {
+            return;
+        };
+        let out = match ev {
+            Event::Key(k) => l.modal.handle_key(k, &mut l.interaction),
+            Event::Mouse(mouse) => match l.interaction.handle_mouse(mouse) {
+                Some(Dispatch::Activate(a)) => l.modal.activate(a),
+                // A stray click outside must not throw a sign-in away.
+                Some(Dispatch::Back) if l.modal.is_finished() => SignInOutcome::Close,
+                Some(Dispatch::Scroll { lines, .. }) => l.modal.scroll(lines),
+                _ => SignInOutcome::Ignored,
+            },
+            _ => SignInOutcome::Ignored,
+        };
+        self.sign_in_outcome(out);
+    }
+
+    fn sign_in_outcome(&mut self, out: SignInOutcome) {
+        let Some(id) = self.sign_in.as_ref().map(|l| l.modal.id().to_owned()) else {
+            return;
+        };
+        match out {
+            SignInOutcome::Copy { what, text } => self.copy_effect(what, text),
+            SignInOutcome::Paste(text) => self.request(UiRequest::SignInPaste { id, text }),
+            SignInOutcome::Cancel => {
+                self.sign_in = None;
+                if id == CHATGPT_ID {
+                    // The `/login` modal was waiting for this sign-in.
+                    self.login = None;
+                }
+                self.request(UiRequest::SignInCancel(id));
+            }
+            SignInOutcome::Close => self.sign_in = None,
+            SignInOutcome::Ignored | SignInOutcome::Changed => {}
+        }
+        self.dirty = true;
+    }
+
     fn login_outcome(&mut self, out: LoginOutcome) {
         match out {
             LoginOutcome::Close => self.login = None,
@@ -1767,9 +1889,15 @@ impl App {
         // Over the pickers too: a press on a picker row picks it, so the
         // keyboard is how to copy a row's text.
         let picker = self.models.is_some() || self.sessions.is_some();
-        let overlay = self.login.is_some() || self.chat.palette().is_open() || self.goal_focused;
+        let overlay = self.login.is_some()
+            || self.sign_in.is_some()
+            || self.chat.palette().is_open()
+            || self.goal_focused;
         if action == Some(Action::Select) && (covered || picker) && !overlay {
             return self.start_key_selection();
+        }
+        if self.sign_in.is_some() {
+            return self.sign_in_event(&Event::Key(*k));
         }
         if self.login.is_some() {
             return self.login_event(&Event::Key(*k));
@@ -1939,7 +2067,7 @@ impl App {
     /// Whether `(x, y)` is on a clickable element of the open `/model` or
     /// `/resume` picker.
     fn picker_row_at(&self, x: u16, y: u16) -> bool {
-        if self.help_open || self.login.is_some() {
+        if self.help_open || self.login.is_some() || self.sign_in.is_some() {
             return false;
         }
         if let Some(m) = &self.models {
@@ -1951,6 +2079,9 @@ impl App {
     }
 
     fn route_mouse(&mut self, m: &MouseEvent) {
+        if self.sign_in.is_some() && !self.help_open {
+            return self.sign_in_event(&Event::Mouse(*m));
+        }
         if self.login.is_some() && !self.help_open {
             return self.login_event(&Event::Mouse(*m));
         }
@@ -2098,10 +2229,30 @@ impl App {
                 .render(frame, area, &theme, &mut login_hits, &|a: LoginAction| a);
             l.interaction.end_frame(login_hits);
         }
+        // The sign-in modal goes over the `/login` modal that started it.
+        self.links.clear();
+        if let Some(l) = &mut self.sign_in {
+            let mut hits = l.interaction.begin_frame();
+            l.modal.render(
+                frame,
+                area,
+                &theme,
+                &mut hits,
+                &|a: SignInAction| a,
+                &mut self.links,
+            );
+            if l.interaction.end_frame(hits) {
+                self.dirty = true;
+            }
+        }
         // Over a modal only the newest toast shows (e.g. "copied selection"
         // after a drag inside a picker), at the bottom right where it hides
         // the modal's help line rather than the rows being worked on.
-        if self.models.is_some() || self.sessions.is_some() || self.login.is_some() {
+        if self.models.is_some()
+            || self.sessions.is_some()
+            || self.login.is_some()
+            || self.sign_in.is_some()
+        {
             let h = 4.min(area.height);
             let at = Rect {
                 y: area.bottom() - h,
@@ -2510,6 +2661,11 @@ where
     }
     if app.is_dirty() && !app.should_quit() {
         terminal.draw(|f| app.render(f)).map_err(draw_err)?;
+        // Links go over the cells just drawn (ratatui cells cannot hold
+        // OSC 8).
+        for link in app.hyperlinks() {
+            control.write_osc(&link.sequence())?;
+        }
     }
     Ok(())
 }

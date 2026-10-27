@@ -11,6 +11,21 @@ to built-in prompts, agents, workflows and `harness.ini` defaults.
 
 ## Unreleased
 
+### Added
+
+- Browser sign-in works when the browser is on another machine (SSH,
+  no display, WSL): Sign in with ChatGPT and MCP OAuth no longer try to open
+  a local browser there. They show the sign-in link in full (an OSC 8
+  hyperlink; copy it with `[ copy link ]`/ctrl+y in the TUI or `c` in
+  `harness login`) and take the address the browser ends on, pasted back
+  into harness, with the same `state`, `iss` and PKCE checks as a real
+  callback. Over SSH they also show the exact `ssh -L` port-forward command.
+  In the TUI both sign-ins run in the background in a new sign-in dialog
+  (keyboard and mouse), and Esc cancels them and closes the loopback
+  listener. See
+  [docs/providers.md](docs/providers.md#signing-in-from-a-remote-or-headless-machine).
+  No default changed.
+
 ## [0.4.0] - 2026-10-24
 
 ### Added

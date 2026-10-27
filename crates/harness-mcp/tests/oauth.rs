@@ -476,3 +476,107 @@ async fn oauth_refuses_cleartext_http_to_remote_hosts() {
         .unwrap_err();
     assert!(matches!(e, AuthError::Discovery(_)), "{e}");
 }
+
+/// Pastes `text` into a running authorization and returns its answer.
+async fn paste(tx: &harness_providers::signin::PasteSender, text: &str) -> Result<(), String> {
+    let (p, reply) = harness_providers::signin::Paste::new(text);
+    tx.send(p).unwrap();
+    reply.await.unwrap()
+}
+
+#[tokio::test]
+async fn a_remote_browser_finishes_by_pasting_the_address() {
+    let s = setup(MockConfig::default()).await;
+    let browser = MockBrowser::remote();
+    let (tx, mut rx) = harness_providers::signin::paste_channel();
+    let flow = s.authorize();
+    let user = async {
+        let address = browser.next_redirect().await;
+        // A bare code cannot carry the issuer this server signs with.
+        let code = param(&address, "code").unwrap();
+        let e = paste(&tx, &code).await.unwrap_err();
+        assert!(e.contains("whole address"), "{e}");
+        let e = paste(&tx, &address.replace("state=", "state=old"))
+            .await
+            .unwrap_err();
+        assert!(e.contains("another sign-in attempt"), "{e}");
+        assert!(s.mock.requests_to("/token").is_empty());
+        assert_eq!(paste(&tx, &address).await, Ok(()));
+    };
+    let (done, ()) = tokio::join!(flow.run_with(&browser, &mut rx), user);
+    let done = done.unwrap();
+    assert_eq!(done.registration, Registration::Dynamic);
+    let token = &s.mock.requests_to("/token")[0];
+    assert!(token.param("code_verifier").is_some());
+    assert_eq!(
+        token.param("redirect_uri"),
+        param(&browser.opened()[0], "redirect_uri")
+    );
+    assert!(s.stored_access().is_some());
+    assert!(s.handle().list_tools().await.is_ok());
+}
+
+#[tokio::test]
+async fn a_pasted_address_from_another_issuer_is_refused() {
+    let s = setup(MockConfig {
+        wrong_callback_iss: Some("https://evil.example".into()),
+        ..MockConfig::default()
+    })
+    .await;
+    let browser = MockBrowser::remote();
+    let (tx, mut rx) = harness_providers::signin::paste_channel();
+    let flow = s.authorize();
+    let user = async {
+        let address = browser.next_redirect().await;
+        assert_eq!(paste(&tx, &address).await, Ok(()));
+    };
+    let (r, ()) = tokio::join!(flow.run_with(&browser, &mut rx), user);
+    assert!(matches!(r.unwrap_err(), AuthError::IssuerMismatch(_)));
+    assert!(s.mock.requests_to("/token").is_empty());
+    assert!(s.stored_access().is_none());
+}
+
+#[tokio::test]
+async fn an_abandoned_authorization_times_out() {
+    let s = setup(MockConfig::default()).await;
+    let (_tx, mut rx) = harness_providers::signin::paste_channel();
+    let e = s
+        .authorize()
+        .with_timeout(Duration::from_millis(300))
+        .run_with(&MockBrowser::remote(), &mut rx)
+        .await
+        .unwrap_err();
+    assert!(matches!(e, AuthError::Timeout(_)), "{e}");
+    assert!(s.stored_access().is_none());
+}
+
+#[tokio::test]
+async fn the_port_forward_carries_the_browser_back() {
+    let s = setup(MockConfig::default()).await;
+    let browser = MockBrowser::remote();
+    let (_tx, mut rx) = harness_providers::signin::paste_channel();
+    let flow = s.authorize();
+    let user = async {
+        let address = browser.next_redirect().await;
+        let port = harness_providers::signin::redirect_port(&browser.opened()[0]).unwrap();
+        // `ssh -L port:127.0.0.1:port`, with the browser's end on another
+        // port because both ends share this machine in the test.
+        let tunnel = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local = tunnel.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut a, _)) = tunnel.accept().await {
+                tokio::spawn(async move {
+                    if let Ok(mut b) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+                        let _ = tokio::io::copy_bidirectional(&mut a, &mut b).await;
+                    }
+                });
+            }
+        });
+        let through = address.replace(&format!(":{port}/"), &format!(":{local}/"));
+        let page = reqwest::get(&through).await.unwrap();
+        assert!(page.status().is_success());
+    };
+    let (r, ()) = tokio::join!(flow.run_with(&browser, &mut rx), user);
+    r.unwrap();
+    assert!(s.stored_access().is_some());
+}

@@ -132,7 +132,11 @@ What `harness login mcp <name>` does:
    fresh `state`, the `resource` parameter (RFC 8707) and a redirect to
    `http://127.0.0.1:<port>/callback`. The terminal prints the URL too, in
    case the browser does not open. The answer's `state` and `iss` are
-   checked before the code is used.
+   checked before the code is used. Over SSH or without a display no
+   browser is opened: open the link on another machine and paste the
+   address it ends on back into harness, or forward the port with the
+   `ssh -L` command harness shows (see [signing in from a remote or
+   headless machine](providers.md#signing-in-from-a-remote-or-headless-machine)).
 5. It exchanges the code for tokens, stores them and sets `auth = oauth` in
    the section.
 
@@ -166,7 +170,7 @@ with ChatGPT tokens:
 **Runs never open a browser.** A TUI turn, `harness run`, a workflow or an
 eval that needs a server without valid tokens fails with "needs OAuth
 authorization ...; run `harness login mcp <name>` (in the TUI: /login mcp
-<name>) first". Authorize once on a machine with a browser before running
+<name>) first". Authorize once (over SSH too, see step 4) before running
 headless jobs.
 
 `harness logout mcp <name>` deletes the stored tokens and registration
@@ -176,7 +180,11 @@ In the TUI, `/login mcp` opens a panel that lists the remote servers and
 whether they are authorized, with an **authorize** button for each (click
 it, or Tab to it and press Enter). `/login mcp <name>` and the palette
 entries **Authorize MCP server: <name>** start the flow straight away. The
-flow runs in the background; a toast shows the URL and then the result.
+flow runs in the background. A sign-in dialog shows the link in full
+(`[ copy link ]` or ctrl+y copies it), the *Address* field for pasting the
+address the browser ends on, the `ssh -L` command over SSH
+(`[ copy ssh command ]`), and then the result; a toast reports the result
+too. Esc or `[ cancel ]` stops the flow; a click outside the dialog does not.
 
 Static tokens keep working: with `auth = none` (the default), set
 `header.Authorization` (inline, `_cmd` or `_env`) as before. A server that

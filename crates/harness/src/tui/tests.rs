@@ -45,6 +45,8 @@ struct Harness {
     rx: mpsc::Receiver<AppEvent>,
     prompts: mpsc::Receiver<PromptEnvelope>,
     seen: Vec<AppEvent>,
+    /// Finished browser sign-ins, handled as the driver loop does.
+    sign_ins: mpsc::UnboundedReceiver<super::signin::Finished>,
 }
 
 impl Harness {
@@ -83,11 +85,17 @@ impl Harness {
         })
         .await
         .unwrap();
+        // A desktop session: sign-ins open the (mock) browser here.
+        d.sign_ins.env = harness_providers::signin::Environment::from_env(&|k| {
+            (k == "DISPLAY").then(|| ":0".to_owned())
+        });
+        let sign_ins = d.sign_ins.take_done();
         Harness {
             d,
             rx,
             prompts,
             seen: Vec::new(),
+            sign_ins,
         }
     }
 
@@ -106,8 +114,19 @@ impl Harness {
             if let Some(i) = self.seen.iter().position(&mut pred) {
                 return &self.seen[i];
             }
-            match tokio::time::timeout_at(deadline, self.rx.recv()).await {
-                Ok(Some(ev)) => self.seen.push(ev),
+            let next = tokio::time::timeout_at(deadline, async {
+                tokio::select! {
+                    ev = self.rx.recv() => Some(ev),
+                    Some(f) = self.sign_ins.recv() => {
+                        super::signin::finished(&mut self.d, f).await;
+                        None
+                    }
+                }
+            })
+            .await;
+            match next {
+                Ok(Some(Some(ev))) => self.seen.push(ev),
+                Ok(None) => {}
                 _ => panic!("event not seen; got {:?}", self.seen),
             }
         }
@@ -1579,8 +1598,20 @@ async fn login_mcp_authorizes_from_slash_palette_and_panel_buttons() {
     let req = requests.try_recv().expect("Enter activates the button");
     assert_eq!(req, UiRequest::PanelAction("mcp.login:docs".into()));
     h.d.request(req).await;
-    h.until(|e| matches!(e, AppEvent::Core(CoreEvent::Notify { title, .. }) if title == "authorize MCP server docs"))
-        .await;
+    // The sign-in modal gets the link; the local browser opens on a
+    // desktop.
+    match h
+        .until(|e| matches!(e, AppEvent::Core(CoreEvent::SignIn(p)) if p.id == "mcp.docs"))
+        .await
+    {
+        AppEvent::Core(CoreEvent::SignIn(p)) => {
+            assert_eq!(p.title, "Authorize MCP server docs");
+            assert!(p.url.contains("code_challenge="), "{}", p.url);
+            assert_eq!(p.no_browser, None);
+            assert_eq!(p.forward, None);
+        }
+        _ => unreachable!(),
+    }
     match h
         .until(|e| matches!(e, AppEvent::Core(CoreEvent::Notify { title, .. }) if title.contains("docs authorized") || title.contains("failed")))
         .await
@@ -1642,6 +1673,7 @@ async fn login_mcp_authorizes_from_slash_palette_and_panel_buttons() {
 }
 
 mod mcp;
+mod signin;
 
 /// `/jobs`: background bash jobs are listed with their state, their output
 /// opens and a running one stops (mouse and keyboard on the panel buttons);

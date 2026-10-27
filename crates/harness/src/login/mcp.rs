@@ -12,8 +12,9 @@ use std::path::Path;
 use harness_config::ini::edit;
 use harness_config::ini::{McpAuth, McpTransport};
 use harness_mcp::auth::{Authorize, Browser};
+use harness_providers::signin::{Environment, PasteReceiver, paste_channel};
 
-use super::{Prompt, TerminalBrowser, config_at};
+use super::{Prompt, SignInView, TerminalBrowser, config_at, drive_sign_in};
 
 /// Usage of `harness login mcp` and `harness logout mcp`.
 pub const USAGE: &str = "\
@@ -30,10 +31,15 @@ browser: a server that needs authorization fails with a message naming this
 command. logout mcp deletes the stored tokens and registration after
 confirmation (--yes skips it).";
 
-/// Authorizes `[mcp.<server>]` from the file at `path` in `browser`, then
-/// sets `auth = oauth`. Returns a one-line summary or an actionable error;
-/// neither contains a token.
-pub async fn authorize(path: &Path, server: &str, browser: &dyn Browser) -> Result<String, String> {
+/// Authorizes `[mcp.<server>]` from the file at `path` in `browser` (or
+/// with a callback pasted into `paste`), then sets `auth = oauth`. Returns
+/// a one-line summary or an actionable error; neither contains a token.
+pub async fn authorize(
+    path: &Path,
+    server: &str,
+    browser: &dyn Browser,
+    paste: &mut PasteReceiver,
+) -> Result<String, String> {
     let cfg = config_at(path)?;
     let Some(s) = cfg.mcp.get(server) else {
         return Err(format!(
@@ -57,7 +63,7 @@ pub async fn authorize(path: &Path, server: &str, browser: &dyn Browser) -> Resu
     let store = crate::wiring::mcp_token_store(&cfg);
     let done = Authorize::new(server, s, store.clone())
         .map_err(|e| e.to_string())?
-        .run(browser)
+        .run_with(browser, paste)
         .await
         .map_err(|e| e.to_string())?;
     let mut set = String::new();
@@ -88,7 +94,9 @@ pub async fn authorize(path: &Path, server: &str, browser: &dyn Browser) -> Resu
 pub async fn login_main(
     args: &[String],
     path: &Path,
+    prompt: &mut dyn Prompt,
     browser: &dyn Browser,
+    env: &(dyn Fn(&str) -> Option<String> + Sync),
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> i32 {
@@ -102,24 +110,30 @@ pub async fn login_main(
             return 2;
         }
     };
-    let (tx, mut urls) = tokio::sync::mpsc::unbounded_channel();
+    let what = format!("authorize MCP server {server}");
+    let view = SignInView {
+        what: &what,
+        env: Environment::from_env(env),
+        links: prompt.hyperlinks(),
+    };
+    let (tx, urls) = tokio::sync::mpsc::unbounded_channel();
     let shown = TerminalBrowser {
         shown: tx,
         inner: browser,
+        open: view.env.opens_browser(),
     };
-    let running = authorize(path, server, &shown);
-    tokio::pin!(running);
-    let result = loop {
-        tokio::select! {
-            r = &mut running => break r,
-            Some(url) = urls.recv() => {
-                let _ = writeln!(
-                    err,
-                    "Opening your browser to authorize MCP server {server}. If it does not open, visit:\n  {url}\nWaiting for the browser…"
-                );
-            }
-        }
-    };
+    let (paste, mut pasted) = paste_channel();
+    let lines = prompt.paste_lines();
+    let result = drive_sign_in(
+        authorize(path, server, &shown, &mut pasted),
+        urls,
+        lines,
+        paste,
+        &view,
+        env,
+        err,
+    )
+    .await;
     match result {
         Ok(summary) => {
             let _ = writeln!(out, "{summary}");
@@ -254,10 +268,39 @@ mod tests {
         }
     }
 
+    /// No terminal: nothing can be typed.
+    struct NoInput;
+
+    impl Prompt for NoInput {
+        fn interactive(&self) -> bool {
+            false
+        }
+        fn secret(&mut self, _: &str) -> std::io::Result<Option<harness_config::secrets::Secret>> {
+            Ok(None)
+        }
+        fn line(&mut self, _: &str) -> std::io::Result<Option<String>> {
+            Ok(None)
+        }
+    }
+
+    /// A desktop session with a display.
+    fn desktop(k: &str) -> Option<String> {
+        (k == "DISPLAY").then(|| ":0".to_owned())
+    }
+
     async fn login(s: &Setup, args: &[&str]) -> (i32, String, String) {
         let args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        let code = login_main(&args, &s.path, &MockBrowser::new(), &mut out, &mut err).await;
+        let code = login_main(
+            &args,
+            &s.path,
+            &mut NoInput,
+            &MockBrowser::new(),
+            &desktop,
+            &mut out,
+            &mut err,
+        )
+        .await;
         (
             code,
             String::from_utf8(out).unwrap(),
@@ -389,5 +432,44 @@ mod tests {
         );
         assert_eq!(code, 0);
         assert!(!crate::wiring::mcp_token_store(&cfg).has_tokens("docs"));
+    }
+
+    #[tokio::test]
+    async fn over_ssh_a_pasted_address_authorizes() {
+        use crate::login::chatgpt_tests::{Shared, Typing, over_ssh};
+        let s = setup(MockConfig::default(), "").await;
+        let (typed, lines) = tokio::sync::mpsc::unbounded_channel();
+        let mut prompt = Typing(Some(lines));
+        let local = MockBrowser::new();
+        let err = Shared::default();
+        let mut err_w = err.clone();
+        let mut out = Vec::new();
+        let args = vec!["docs".to_owned()];
+        let login = login_main(
+            &args,
+            &s.path,
+            &mut prompt,
+            &local,
+            &over_ssh,
+            &mut out,
+            &mut err_w,
+        );
+        let user = async {
+            let url = err.url("/authorize?").await;
+            let elsewhere = MockBrowser::remote();
+            elsewhere.open(&url).unwrap();
+            typed.send(elsewhere.next_redirect().await).unwrap();
+        };
+        let (code, ()) = tokio::join!(login, user);
+        let err = err.text();
+        assert_eq!(code, 0, "{err}");
+        assert!(local.opened().is_empty(), "no local browser over SSH");
+        assert!(err.contains("to authorize MCP server docs"), "{err}");
+        assert!(err.contains("ssh -N -L "), "{err}");
+        assert!(err.contains("dev@10.0.0.2"), "{err}");
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("authorized MCP server docs"), "{out}");
+        let cfg = harness_config::ini::load_file(&s.path).unwrap();
+        assert!(cfg.mcp["docs"].uses_oauth());
     }
 }
