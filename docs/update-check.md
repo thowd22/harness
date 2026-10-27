@@ -19,20 +19,23 @@ command that installs it:
 │ curl -fsSL https://raw.githubusercontent.com/thowd22/harness/main/ │
 │ install.sh | bash                                                  │
 │                                                                    │
-│ [ copy install command ]  [ copy link ]                            │
-│ Tab move · Enter copy · Esc close                                  │
+│ [ copy install command ]  [ copy link ]  [ close ]                 │
+│ Tab move · Enter select · Esc close                                │
 ╰────────────────────────────────────────────────────────────────────╯
 ```
 
 - **Copy.** `[ copy install command ]` has the focus when the dialog
   opens, so Enter copies the command. Tab and the arrow keys move to
-  `[ copy link ]`. Both buttons are clickable. Copies use the same
+  `[ copy link ]` and `[ close ]`. Every button is clickable. Copies use the same
   clipboard as every other copy action (`[ui] clipboard`, OSC 52 by
   default), so they also work over SSH. The release-notes link is an OSC 8
   hyperlink in terminals that support it.
-- **Closing.** Only Esc closes the dialog. Other keys, pastes and clicks
-  outside it do nothing, so typing that was meant for the chat cannot
-  dismiss it by accident. A version you closed is not offered again; the
+- **When it appears.** The dialog waits until the chat input is empty
+  and no turn is running, so it never opens while you type a prompt or
+  takes the keys meant for it. If you start typing before the check
+  answers, it appears after you send the prompt and the turn ends.
+- **Closing.** Esc or `[ close ]` closes the dialog. Other keys, pastes
+  and clicks outside it do nothing. A version you closed is not offered again; the
   next newer release is.
 - **Over other dialogs.** A sign-in or `/login` dialog that opens later goes
   on top of it and gets the keys until it closes.

@@ -1,5 +1,5 @@
 //! Update dialog tests: what it shows, keyboard and mouse paths on the
-//! dialog alone and inside the app, and that only Esc closes it.
+//! dialog alone and inside the app, and that only Esc or `[ close ]` closes it.
 
 use crossterm::event::Event;
 use ratatui::Terminal;
@@ -8,9 +8,11 @@ use tokio::sync::mpsc;
 
 use super::*;
 use crate::app::{App, AppConfig, AppEvent, CoreEvent, Effect, UiRequest};
+use crate::demo::events::{EventBuilder, NodeSpec};
 use crate::interaction::testing::{
     buffer_text, click, find_text, key, keys, styled_snapshot, type_text, wheel_down,
 };
+use harness_events::schema::NodeStatus;
 
 const COMMAND: &str =
     "curl -fsSL https://raw.githubusercontent.com/thowd22/harness/main/install.sh | bash";
@@ -116,6 +118,7 @@ fn shows_both_versions_the_release_notes_link_and_the_install_command() {
         "curl -fsSL https://raw.githubusercontent.com/thowd22/harness/main/insta",
         "[ copy install command ]",
         "[ copy link ]",
+        "[ close ]",
         HINT,
     ] {
         assert!(text.contains(s), "{s}:\n{text}");
@@ -150,12 +153,14 @@ fn narrow_dialogs_cut_the_link_and_command_without_shortening_them() {
 }
 
 #[test]
-fn keyboard_tab_and_enter_copy_and_only_esc_closes() {
+fn keyboard_tab_and_enter_copy_and_only_esc_or_close_closes() {
     let mut m = Modal::new(100, 30);
     assert_eq!(m.key("enter"), copy_command());
     assert_eq!(m.key("tab"), UpdateOutcome::Changed);
     assert_eq!(m.focused(), Some(COPY_LINK_ID));
     assert_eq!(m.key("enter"), copy_link());
+    m.key("tab");
+    assert_eq!(m.focused(), Some(CLOSE_ID));
     // Tab wraps; the arrows and shift+tab move too.
     m.key("tab");
     assert_eq!(m.focused(), Some(COPY_COMMAND_ID));
@@ -177,6 +182,10 @@ fn keyboard_tab_and_enter_copy_and_only_esc_closes() {
         assert_eq!(m.key(k), UpdateOutcome::Ignored, "{k}");
     }
     assert_eq!(m.key("esc"), UpdateOutcome::Dismiss);
+    // Enter on `[ close ]` closes as Esc does.
+    m.key("shift+tab");
+    assert_eq!(m.focused(), Some(CLOSE_ID));
+    assert_eq!(m.key("enter"), UpdateOutcome::Dismiss);
 }
 
 #[test]
@@ -190,6 +199,7 @@ fn mouse_clicks_the_buttons_and_clicks_outside_do_nothing() {
     assert_eq!(m.send(click(0, 0)), UpdateOutcome::Ignored);
     assert_eq!(m.send(click(99, 29)), UpdateOutcome::Ignored);
     assert_eq!(m.click_text("Release notes:"), UpdateOutcome::Ignored);
+    assert_eq!(m.click_text("[ close ]"), UpdateOutcome::Dismiss);
 }
 
 #[test]
@@ -268,7 +278,6 @@ impl Ui {
 #[test]
 fn app_copies_through_the_clipboard_by_keyboard_and_mouse() {
     let mut ui = Ui::new();
-    ui.send(type_text("draft"));
     ui.open();
     assert!(ui.text().contains("Update available"), "{}", ui.text());
     assert_eq!(ui.app.hyperlinks().len(), 1);
@@ -301,12 +310,48 @@ fn app_copies_through_the_clipboard_by_keyboard_and_mouse() {
     ui.send(type_text("xyz"));
     ui.app
         .handle(AppEvent::Terminal(Event::Paste("pasted".into())));
-    assert_eq!(ui.app.draft(), "draft");
+    assert_eq!(ui.app.draft(), "");
     assert!(ui.requests().is_empty());
 }
 
 #[test]
-fn app_closes_the_dialog_only_with_esc_and_records_the_dismissal() {
+fn app_waits_until_the_chat_input_is_empty_and_idle() {
+    // Typed text: the dialog waits, and the keys keep reaching the input.
+    let mut ui = Ui::new();
+    ui.send(type_text("dra"));
+    ui.open();
+    assert!(ui.app.update_dialog().is_none());
+    assert!(!ui.text().contains("Update available"), "{}", ui.text());
+    ui.send(type_text("ft"));
+    assert_eq!(ui.app.draft(), "draft");
+    assert!(ui.app.update_dialog().is_none());
+    // Emptying the input shows it.
+    ui.send(keys("backspace backspace backspace backspace backspace"));
+    assert_eq!(ui.app.draft(), "");
+    assert!(ui.app.update_dialog().is_some());
+    assert!(ui.text().contains("Update available"), "{}", ui.text());
+
+    // A running turn: the dialog waits until the turn ends.
+    let mut ui = Ui::new();
+    let mut run = EventBuilder::new();
+    run.run_started("chat", None).start(NodeSpec::step("main"));
+    for e in run.events() {
+        ui.app.handle(AppEvent::Run(Box::new(e.clone())));
+    }
+    assert!(ui.app.is_running());
+    ui.open();
+    assert!(ui.app.update_dialog().is_none());
+    let seen = run.events().len();
+    run.finish("main", NodeStatus::Succeeded, None);
+    for e in &run.events()[seen..] {
+        ui.app.handle(AppEvent::Run(Box::new(e.clone())));
+    }
+    assert!(!ui.app.is_running());
+    assert!(ui.app.update_dialog().is_some());
+}
+
+#[test]
+fn app_closes_the_dialog_only_with_esc_or_close_and_records_the_dismissal() {
     let mut ui = Ui::new();
     ui.open();
     // Other keys, and clicks outside the dialog or on its text, leave it
@@ -323,6 +368,16 @@ fn app_closes_the_dialog_only_with_esc_and_records_the_dismissal() {
     assert!(ui.app.update_dialog().is_none());
     assert!(!ui.text().contains("Update available"), "{}", ui.text());
     assert!(ui.app.hyperlinks().is_empty());
+    assert_eq!(
+        ui.requests(),
+        vec![UiRequest::DismissUpdate("0.5.0".into())]
+    );
+
+    // The mouse: `[ close ]`.
+    let mut ui = Ui::new();
+    ui.open();
+    ui.click_text("[ close ]");
+    assert!(ui.app.update_dialog().is_none());
     assert_eq!(
         ui.requests(),
         vec![UiRequest::DismissUpdate("0.5.0".into())]

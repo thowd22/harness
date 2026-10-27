@@ -16,17 +16,17 @@
 //!        │ curl -fsSL https://raw.githubusercontent.com/thow │
 //!        │ d22/harness/main/install.sh | bash                │
 //!        │                                                   │
-//!        │ [ copy install command ]  [ copy link ]           │
-//!        │ Tab move · Enter copy · Esc close                 │
+//!        │ [ copy install command ]  [ copy link ]  [ close ] │
+//!        │ Tab move · Enter select · Esc close               │
 //!        ╰───────────────────────────────────────────────────╯
 //! ```
 //!
 //! The link and the command are cut into rows at the dialog width, never
-//! shortened; the link's rows are OSC 8 hyperlinks ([`Hyperlink`]). Both
-//! buttons are clickable and reachable with Tab and the arrows; Enter
+//! shortened; the link's rows are OSC 8 hyperlinks ([`Hyperlink`]). Every
+//! button is clickable and reachable with Tab and the arrows; Enter
 //! activates the focused one (the copy-command button has the focus when
 //! the dialog opens). Copies go through the app's clipboard (OSC 52, so
-//! they work over SSH). The dialog closes only with Esc
+//! they work over SSH). The dialog closes only with Esc or `[ close ]`
 //! ([`UpdateOutcome::Dismiss`], which the core records so the version is
 //! not offered again); other keys and clicks outside it do nothing.
 
@@ -46,12 +46,14 @@ use crate::theme::{Theme, Token};
 pub const COPY_COMMAND_ID: &str = "update.copy_command";
 /// Element id of the copy-link button.
 pub const COPY_LINK_ID: &str = "update.copy_link";
+/// Element id of the close button.
+pub const CLOSE_ID: &str = "update.close";
 /// Widest dialog.
 pub const MAX_WIDTH: u16 = 76;
 /// Dialog title.
 pub const TITLE: &str = " Update available ";
 /// The key help line.
-pub const HINT: &str = "Tab move · Enter copy · Esc close";
+pub const HINT: &str = "Tab move · Enter select · Esc close";
 
 /// A newer release, as the core found it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +75,8 @@ pub enum UpdateAction {
     CopyCommand,
     /// Copy the release-notes link.
     CopyLink,
+    /// Close the dialog, as Esc does.
+    Close,
 }
 
 /// What the app should do after an input.
@@ -89,7 +93,8 @@ pub enum UpdateOutcome {
         /// What to copy.
         text: String,
     },
-    /// Esc: close the dialog and do not offer this version again.
+    /// Esc or `[ close ]`: close the dialog and do not offer this version
+    /// again.
     Dismiss,
 }
 
@@ -177,6 +182,7 @@ impl UpdateModal {
                 what: "release notes link",
                 text: self.notice.url.clone(),
             },
+            UpdateAction::Close => UpdateOutcome::Dismiss,
         }
     }
 
@@ -257,6 +263,7 @@ impl UpdateModal {
                 UpdateAction::CopyCommand,
             ),
             (COPY_LINK_ID, "[ copy link ]", UpdateAction::CopyLink),
+            (CLOSE_ID, "[ close ]", UpdateAction::Close),
         ];
         let mut placed = Vec::new();
         let (mut bx, mut brow) = (0usize, 0usize);

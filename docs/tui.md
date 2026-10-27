@@ -251,7 +251,7 @@ scrolls. The browser sign-in dialog scrolls with the wheel and
 PageUp/PageDown (its arrow keys and Tab move between the address field and
 the buttons), and keeps the address field in view. The update dialog
 ([update-check.md](update-check.md)) scrolls the same way while its
-buttons stay in view; it closes only with Esc.
+buttons stay in view; it closes only with Esc or its `[ close ]` button.
 
 The layout test matrix (`crates/harness-tui/src/layout_matrix.rs`) checks
 these rules for every view: it renders each one with long-content

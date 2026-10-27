@@ -338,8 +338,9 @@ pub enum CoreEvent {
         /// The outcome.
         result: Result<String, String>,
     },
-    /// A newer harness release is out: open the update dialog (it closes
-    /// only with Esc, answered with [`UiRequest::DismissUpdate`]).
+    /// A newer harness release is out: open the update dialog once the
+    /// chat input is empty and no turn is running (it closes with Esc or
+    /// its close button, answered with [`UiRequest::DismissUpdate`]).
     UpdateAvailable(UpdateNotice),
     /// The MCP servers that failed, by name (empty: none). The status
     /// line shows a compact indicator that opens `/mcp`.
@@ -687,6 +688,8 @@ pub struct App {
     login: Option<Box<LoginScreen>>,
     sign_in: Option<Box<SignInScreen>>,
     update: Option<Box<UpdateScreen>>,
+    /// A newer release the core found, waiting for the chat to be idle.
+    pending_update: Option<UpdateNotice>,
     /// Hyperlinks drawn in the last frame, written over its cells.
     links: Vec<Hyperlink>,
     goals: Goals,
@@ -762,6 +765,7 @@ impl App {
             login: None,
             sign_in: None,
             update: None,
+            pending_update: None,
             links: Vec::new(),
             goals: Goals::new(),
             goalbar,
@@ -1094,6 +1098,27 @@ impl App {
             }
             AppEvent::Shutdown => self.quit = true,
         }
+        self.show_pending_update();
+    }
+
+    /// Opens the update dialog the core found, once nothing is typed in the
+    /// chat input and no turn is running, so it never takes keys meant for
+    /// a prompt.
+    fn show_pending_update(&mut self) {
+        if self.pending_update.is_none()
+            || self.update.is_some()
+            || self.is_running()
+            || !self.chat.input().is_empty()
+        {
+            return;
+        }
+        if let Some(notice) = self.pending_update.take() {
+            self.update = Some(Box::new(UpdateScreen {
+                modal: UpdateModal::new(notice),
+                interaction: Interaction::new(),
+            }));
+            self.dirty = true;
+        }
     }
 
     /// A bracketed paste: the palette (over any view) or a screen's text
@@ -1296,12 +1321,7 @@ impl App {
                     interaction: Interaction::new(),
                 }));
             }
-            CoreEvent::UpdateAvailable(notice) => {
-                self.update = Some(Box::new(UpdateScreen {
-                    modal: UpdateModal::new(notice),
-                    interaction: Interaction::new(),
-                }));
-            }
+            CoreEvent::UpdateAvailable(notice) => self.pending_update = Some(notice),
             CoreEvent::SignInAnswer { id, result } => {
                 if let Some(l) = &mut self.sign_in
                     && l.modal.id() == id

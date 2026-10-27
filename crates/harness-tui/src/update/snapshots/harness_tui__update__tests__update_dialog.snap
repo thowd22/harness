@@ -22,8 +22,8 @@ expression: styled_snapshot(m.term.backend().buffer())
             │ curl -fsSL https://raw.githubusercontent.com/thowd22/harness/main/instal │
             │ l.sh | bash                                                              │
             │                                                                          │
-            │ [ copy install command ]  [ copy link ]                                  │
-            │ Tab move · Enter copy · Esc close                                        │
+            │ [ copy install command ]  [ copy link ]  [ close ]                       │
+            │ Tab move · Enter select · Esc close                                      │
             ╰──────────────────────────────────────────────────────────────────────────╯
 
 
@@ -85,11 +85,13 @@ expression: styled_snapshot(m.term.backend().buffer())
 20 14-37: fg=Rgb(189, 147, 249) bg=Rgb(40, 42, 54)
 20 38-39: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 20 40-52: fg=Rgb(189, 147, 249) bg=Rgb(40, 42, 54)
-20 53-86: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
+20 53-54: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
+20 55-63: fg=Rgb(189, 147, 249) bg=Rgb(40, 42, 54)
+20 64-86: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 20 87-87: fg=Rgb(189, 147, 249) bg=Rgb(40, 42, 54) mod=BOLD
 21 12-12: fg=Rgb(189, 147, 249) bg=Rgb(40, 42, 54) mod=BOLD
 21 13-13: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
-21 14-46: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
-21 47-86: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
+21 14-48: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
+21 49-86: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 21 87-87: fg=Rgb(189, 147, 249) bg=Rgb(40, 42, 54) mod=BOLD
 22 12-87: fg=Rgb(189, 147, 249) bg=Rgb(40, 42, 54) mod=BOLD

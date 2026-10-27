@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-10-24 01:55'
-updated_date: '2026-10-27 17:10'
+updated_date: '2026-10-27 17:30'
 labels:
   - feature
   - tui
@@ -27,9 +27,10 @@ Users don't find out when a new harness release ships, so they keep running old 
 - [x] #1 On interactive (TUI) startup harness checks the latest GitHub release of thowd22/harness in the background, without delaying the first frame. Offline, rate-limited or failed checks are silent and logged only
 - [x] #2 When the latest release is newer than the running version (semver compare; pre-releases ignored unless the running build is a pre-release), a dialog shows current and new version, a link to the release notes, and the curl install command
 - [x] #3 The dialog has a Copy button that copies the install command to the clipboard (with the existing clipboard/OSC 52 path, so it works over SSH), clickable with the mouse and reachable by keyboard (Tab/Enter)
-- [x] #4 The dialog only closes with Esc; other keys and clicks outside it do not dismiss it
-- [x] #5 The result is cached in the data dir so the check runs at most once per configurable interval (default 24h) and a dismissed version is not shown again until a newer one appears
-- [x] #6 An ini setting turns the check off (for example [general] update_check = false), and headless commands (harness run, wf run, bench, eval) and the test suite never make the request
+- [x] #4 The result is cached in the data dir so the check runs at most once per configurable interval (default 24h) and a dismissed version is not shown again until a newer one appears
+- [x] #5 An ini setting turns the check off (for example [general] update_check = false), and headless commands (harness run, wf run, bench, eval) and the test suite never make the request
+- [x] #6 The dialog closes only with Esc or its `[ close ]` button (clickable and reachable with Tab/Enter; both record the dismissal); other keys and clicks outside it do not dismiss it
+- [x] #7 The dialog opens only when the chat input is empty and no turn is running, so it never takes keys typed for a prompt; a notice that arrives while typing or during a turn waits until then
 <!-- AC:END -->
 
 ## Definition of Done
@@ -58,6 +59,10 @@ Users don't find out when a new harness release ships, so they keep running old 
 Implemented: [general] update_check (default on) + update_check_interval (default 24h); DataDir::update_check() = <data_dir>/update-check.json; crates/harness/src/update.rs (semver, newest stable/any release, JSON cache with checked_at/stable/any/dismissed, plain GET via harness_providers HttpClient, failures logged under harness::update); crates/harness-tui/src/update.rs UpdateModal (Esc-only close, Tab/arrows/Enter, clickable buttons, OSC 8 link, scroll); app wiring CoreEvent::UpdateAvailable / UiRequest::DismissUpdate; Driver::spawn_update_check called only from tui::run (ui-demo sets update_check = false). HARNESS_UPDATE_API env overrides the API base; tests/common hermetic() points it at 127.0.0.1:9 so binary tests never reach GitHub. Docs: docs/update-check.md, data-dir.md, tui.md, guide/harness-ini.md, guide/install.md, doc-2, CHANGELOG (Added + Defaults entry with new fingerprint d38458c654e8).
 
 Validation (local): cargo fmt --check ok; cargo clippy --workspace --all-targets -D warnings ok; cargo nextest run --workspace --locked --profile ci: 2118 passed, 10 skipped; cargo test --workspace --doc ok; scripts/hermetic-guard.sh ok (278 passed, nothing written to HOME/XDG); scripts/bench-guard.sh ok (3.25 ms/call, 10.7 ms session start); defaults_changelog ok. No fix loops needed beyond adjusting two new test assertions. DoD #1 left unchecked until CI runs.
+
+User decision 2026-10-27: AC #4 changed from "only Esc" to "Esc or a [ close ] button" (mouse-only users could not close it), and the dialog now waits until the chat input is empty and no turn is running (keys typed during startup were lost). Implemented in App::show_pending_update (crates/harness-tui/src/app.rs) and UpdateAction::Close; tests: update::tests::keyboard_tab_and_enter_copy_and_only_esc_or_close_closes, mouse_clicks_the_buttons_and_clicks_outside_do_nothing, app_closes_the_dialog_only_with_esc_or_close_and_records_the_dismissal, app_waits_until_the_chat_input_is_empty_and_idle; snapshot update_dialog re-accepted after review (only the new button and hint changed). Docs: docs/update-check.md, docs/tui.md, CHANGELOG. Also merged with TASK-165 (one test needed SignInPrompt.device).
+
+Merged-tree validation (TASK-162+164+165): fmt, clippy -D warnings, nextest CI profile 2137 passed / 10 skipped, doctests, hermetic-guard, bench-guard all ok.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

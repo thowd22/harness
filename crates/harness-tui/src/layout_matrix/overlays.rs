@@ -461,7 +461,12 @@ fn update_dialog_wraps_and_scrolls() {
             m.scroll(1);
         }
         let mut tokens = fx.all();
-        tokens.extend(["copy install command", "copy link", "Esc close"]);
+        tokens.extend([
+            "copy install command",
+            "copy link",
+            "[ close ]",
+            "Esc close",
+        ]);
         assert_reachable("update", &frames, &tokens);
     });
 }

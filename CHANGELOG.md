@@ -41,8 +41,10 @@ to built-in prompts, agents, workflows and `harness.ini` defaults.
   most once a day, silent when offline or rate-limited) and, if it is
   newer than the running build, shows a dialog with both versions, the
   release-notes link and the `curl … install.sh | bash` command, with a
-  Copy button (keyboard and mouse; OSC 52, so it works over SSH). Esc closes
-  it, and a dismissed version is not shown again until a newer one ships.
+  Copy button (keyboard and mouse; OSC 52, so it works over SSH). It waits
+  until the chat input is empty and no turn is running, so it never takes
+  keys meant for a prompt. Esc or `[ close ]` closes it, and a dismissed
+  version is not shown again until a newer one ships.
   `[general] update_check = off` turns it off; `harness run`, `wf run`,
   `bench` and `eval` never check. See [docs/update-check.md](docs/update-check.md).
 
