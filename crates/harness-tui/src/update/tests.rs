@@ -340,6 +340,7 @@ fn app_a_sign_in_modal_goes_over_the_dialog() {
             url: "https://auth.example.com/authorize?x=1".into(),
             forward: None,
             no_browser: None,
+            device: None,
         },
     )));
     ui.draw();
