@@ -25,6 +25,15 @@ to built-in prompts, agents, workflows and `harness.ini` defaults.
   listener. See
   [docs/providers.md](docs/providers.md#signing-in-from-a-remote-or-headless-machine).
   No default changed.
+- harness tells you when a new release is out: when the TUI starts it
+  checks the latest GitHub release in the background (one plain GET, at
+  most once a day, silent when offline or rate-limited) and, if it is
+  newer than the running build, shows a dialog with both versions, the
+  release-notes link and the `curl … install.sh | bash` command, with a
+  Copy button (keyboard and mouse; OSC 52, so it works over SSH). Esc closes
+  it, and a dismissed version is not shown again until a newer one ships.
+  `[general] update_check = off` turns it off; `harness run`, `wf run`,
+  `bench` and `eval` never check. See [docs/update-check.md](docs/update-check.md).
 
 ## [0.4.0] - 2026-10-24
 
@@ -693,3 +702,9 @@ fingerprint. CI fails until the entry exists; `cargo test -p harness-eval
     arm, so a harder eval comes first. (TASK-161.7)
   Prompts and tool descriptions are unchanged.
   defaults-fingerprint: 46b4cecb7b8e
+- New `[general] update_check` setting, default `on`, and
+  `update_check_interval`, default `24h`: the interactive TUI asks GitHub
+  for the latest harness release in the background at startup, at most
+  once per interval, and offers a newer one in a dialog with the install
+  command. Headless commands never check. Prompts are unchanged. (TASK-164)
+  defaults-fingerprint: d38458c654e8

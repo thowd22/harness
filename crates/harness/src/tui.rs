@@ -231,6 +231,8 @@ struct Driver {
     mcp: mcp::McpUi,
     /// Running browser sign-ins (ChatGPT, MCP OAuth).
     sign_ins: signin::SignIns,
+    /// The GitHub API base of the update check (tests use a mock).
+    update_api: String,
 }
 
 impl Driver {
@@ -271,7 +273,40 @@ impl Driver {
             error_action: None,
             mcp: mcp::McpUi::default(),
             sign_ins: signin::SignIns::default(),
+            update_api: crate::update::GITHUB_API.to_owned(),
         }
+    }
+
+    /// Starts the update check in the background, unless `[general]
+    /// update_check` is off. Only [`run`] calls it, after the session has
+    /// started: headless commands, `ui-demo` and in-process tests never
+    /// check. A newer release opens the update dialog
+    /// ([`CoreEvent::UpdateAvailable`]); failures are only logged.
+    fn spawn_update_check(&mut self) {
+        if !self.cfg.general.update_check {
+            return;
+        }
+        let check = crate::update::Check {
+            api: self.update_api.clone(),
+            file: self.data.update_check(),
+            interval: self.cfg.general.update_check_interval,
+            current: crate::update::CURRENT.to_owned(),
+        };
+        let tx = self.tx.clone();
+        self.background.push(tokio::spawn(async move {
+            let Some(u) = crate::update::check(&check, crate::update::unix_now()).await else {
+                return;
+            };
+            let notice = harness_tui::update::UpdateNotice {
+                current: u.current,
+                latest: u.latest.version,
+                url: u.latest.url,
+                command: crate::update::INSTALL_COMMAND.to_owned(),
+            };
+            let _ = tx
+                .send(AppEvent::Core(CoreEvent::UpdateAvailable(notice)))
+                .await;
+        }));
     }
 
     async fn send(&self, c: CoreEvent) {
@@ -536,6 +571,9 @@ impl Driver {
             UiRequest::Login(sub) => commands::login(self, &sub).await,
             UiRequest::SignInPaste { id, text } => signin::paste(self, &id, &text).await,
             UiRequest::SignInCancel(id) => signin::cancel(self, &id),
+            UiRequest::DismissUpdate(version) => {
+                crate::update::dismiss(&self.data.update_check(), &version)
+            }
         }
         true
     }
@@ -607,6 +645,10 @@ pub async fn run(
         eprintln!("harness: {e}");
         return exit::ERROR;
     }
+    // A newer release? Asked in the background; the first frame does not
+    // wait for it.
+    driver.update_api = crate::update::api_base();
+    driver.spawn_update_check();
     // About daily, when there was activity: consolidate memory.
     commands::dream(&mut driver, false).await;
     let blobs = driver.h.as_ref().map(|h| h.blobs.clone()).expect("started");

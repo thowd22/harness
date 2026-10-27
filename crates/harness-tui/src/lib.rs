@@ -33,6 +33,7 @@ pub mod signin;
 pub mod status;
 pub mod terminal;
 pub mod theme;
+pub mod update;
 
 #[cfg(test)]
 mod layout_matrix;
