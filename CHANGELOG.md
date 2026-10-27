@@ -11,6 +11,8 @@ to built-in prompts, agents, workflows and `harness.ini` defaults.
 
 ## Unreleased
 
+## [0.5.1] - 2026-10-27
+
 ### Fixed
 
 - A request with the wrong `state` sent to the sign-in's loopback port (a
