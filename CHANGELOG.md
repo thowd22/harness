@@ -11,6 +11,8 @@ to built-in prompts, agents, workflows and `harness.ini` defaults.
 
 ## Unreleased
 
+## [0.5.0] - 2026-10-27
+
 ### Added
 
 - Browser sign-in works when the browser is on another machine (SSH,
