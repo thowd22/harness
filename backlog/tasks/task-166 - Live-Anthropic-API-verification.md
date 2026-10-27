@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-27 20:55'
-updated_date: '2026-10-27 22:15'
+updated_date: '2026-10-27 22:48'
 labels: []
 dependencies: []
 priority: high
@@ -61,6 +61,17 @@ Spend: all live calls were Haiku 5.5 (plus a few Haiku 4.5 calls in conformance 
 Offline gates: cargo fmt --check, clippy --workspace --all-targets -D warnings, nextest 2140 passed / 16 skipped (6 new ignored live tests), hermetic guard ok. No fix attempts hit the loop guard (the gzip test needed one diagnosis round). DoD #4 N/A: no UI changes.
 
 CI: run 40591852268 on e87df57 failed on ubuntu in an unrelated test, early_tool_start_keeps_results_and_event_order: glob listed b.txt/a.txt in a different order between the on and off runs (newest-first sort, files written back to back). Fixed in 8c685ee by giving both files one fixed mtime (assertions unchanged, 5/5 local runs). CI run 40592742975 on 8c685ee: all jobs green on Linux and macOS.
+
+Follow-up live checks (user asked whether all API features work), 8 more tests in anthropic_live.rs, all pass:
+- thinking_display=updates: beta header accepted, tool loop completes.
+- Haiku 4.5 budget thinking (thinking.type enabled): signed thinking round-trips through a tool loop.
+- Parallel tool calls: several tool_use blocks in one message, results returned together, answer uses them.
+- The API records each cache_ttl as requested (non-streamed body from build_body): 5m -> ephemeral_5m 25232 / 1h 0; 1h -> 1h 25229 / 5m 0; mixed -> 1h 12726 (tools+system) and 5m 12503 (message tail).
+- count_tokens accepts a gzip body (latch not tripped).
+- Effort low/medium/high on Haiku 5.5, and low on Sonnet 5.5 and Opus 5.5: accepted, correct answer, end_turn.
+- max_tokens 5 -> StopKind::MaxTokens.
+- Base64 PNG image input understood ("red").
+Not checkable live: redacted_thinking (cannot be triggered on demand), mid-stream overload/rate-limit retries and the gzip rejection fallback (the real API never produces them on request); these stay covered by mock tests. Extra spend about $0.01.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

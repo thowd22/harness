@@ -289,3 +289,261 @@ async fn count_tokens_matches_the_billed_input() {
     let diff = counted.abs_diff(billed);
     assert!(diff * 20 <= billed, "counted {counted}, billed {billed}");
 }
+
+/// Runs a read-tool loop to the end and checks the answer names `a.rs`.
+/// Every turn sends the previous assistant messages back unchanged, so the
+/// API checks each thinking signature. Returns the first response.
+async fn tool_loop(p: &AnthropicProvider, mut req: ChatRequest, what: &str) -> Response {
+    req.system =
+        Some("You are a coding agent. Use the read tool; never guess file contents.".into());
+    req.tools = vec![read_tool()];
+    req.messages.push(Message::user(
+        "Read src/a.rs and src/b.rs, then tell me which one defines more functions.",
+    ));
+    let mut first = None;
+    for turn in 1..=4 {
+        let r = call(p, req.clone(), &format!("{what} turn {turn}")).await;
+        if r.stop.kind != StopKind::ToolUse {
+            assert!(r.message.text().contains("a.rs"), "{:?}", r.message);
+            return first.unwrap_or(r);
+        }
+        let results: Vec<ContentBlock> = r
+            .message
+            .tool_uses()
+            .map(|(id, _, input)| {
+                let body = if input["path"].as_str().unwrap_or("").ends_with("a.rs") {
+                    "fn one() {}\nfn two() {}\nfn three() {}\n"
+                } else {
+                    "fn only() {}\n"
+                };
+                ContentBlock::tool_result(id, body, false)
+            })
+            .collect();
+        req.messages.push(r.message.clone());
+        req.messages.push(Message {
+            role: Role::User,
+            content: results,
+        });
+        first.get_or_insert(r);
+    }
+    panic!("{what}: no answer after 4 turns");
+}
+
+fn signed_reasoning(r: &Response) -> usize {
+    r.message
+        .content
+        .iter()
+        .filter(
+            |b| matches!(b, ContentBlock::Reasoning { signature: Some(s), .. } if !s.is_empty()),
+        )
+        .count()
+}
+
+#[tokio::test]
+#[ignore = "live: set HARNESS_LIVE_ANTHROPIC=1 and ANTHROPIC_API_KEY"]
+async fn thinking_display_updates_is_accepted_through_a_tool_loop() {
+    let Some(key) = key() else { return };
+    // `updates` adds the thinking-display-updates beta header; a header the
+    // API does not know fails the first call.
+    let p = provider(&key, |c| {
+        c.request.thinking_display = ThinkingDisplay::Updates
+    });
+    let mut req = ChatRequest::new(MODEL);
+    req.thinking = thinking(ReasoningEffort::High);
+    req.max_tokens = Some(4000);
+    tool_loop(&p, req, "updates").await;
+}
+
+#[tokio::test]
+#[ignore = "live: set HARNESS_LIVE_ANTHROPIC=1 and ANTHROPIC_API_KEY"]
+async fn budget_thinking_on_haiku_4_5_round_trips() {
+    let Some(key) = key() else { return };
+    let p = provider(&key, |_| {});
+    let mut req = ChatRequest::new("claude-haiku-4-5");
+    // An effort on a budget-style model becomes `budget_tokens` (low:
+    // 2048), and `max_tokens` is raised above it.
+    req.thinking = thinking(ReasoningEffort::Low);
+    req.max_tokens = Some(1000);
+    assert_eq!(p.build_body(&req).unwrap()["thinking"]["type"], "enabled");
+    let first = tool_loop(&p, req, "haiku-4-5 budget").await;
+    assert!(signed_reasoning(&first) > 0, "{:?}", first.message);
+}
+
+#[tokio::test]
+#[ignore = "live: set HARNESS_LIVE_ANTHROPIC=1 and ANTHROPIC_API_KEY"]
+async fn parallel_tool_calls_arrive_in_one_message_and_return_together() {
+    let Some(key) = key() else { return };
+    let p = provider(&key, |_| {});
+    let mut req = ChatRequest::new(MODEL);
+    req.system = Some(
+        "You are a coding agent. When several files are needed, call the read tool for all of \
+         them at once in a single response."
+            .into(),
+    );
+    req.tools = vec![read_tool()];
+    req.max_tokens = Some(1000);
+    req.messages.push(Message::user(
+        "Read x.txt, y.txt and z.txt in parallel, then reply with their contents joined by commas.",
+    ));
+    let first = call(&p, req.clone(), "parallel turn 1").await;
+    let calls: Vec<(String, String)> = first
+        .message
+        .tool_uses()
+        .map(|(id, _, input)| {
+            (
+                id.to_owned(),
+                input["path"].as_str().unwrap_or("").to_owned(),
+            )
+        })
+        .collect();
+    assert!(
+        calls.len() >= 2,
+        "expected parallel calls: {:?}",
+        first.message
+    );
+    req.messages.push(first.message.clone());
+    req.messages.push(Message {
+        role: Role::User,
+        content: calls
+            .iter()
+            .map(|(id, path)| {
+                ContentBlock::tool_result(id, path.trim_end_matches(".txt").to_uppercase(), false)
+            })
+            .collect(),
+    });
+    let second = call(&p, req, "parallel turn 2").await;
+    let text = second.message.text();
+    assert!(text.contains('X') && text.contains('Y'), "{text}");
+}
+
+#[tokio::test]
+#[ignore = "live: set HARNESS_LIVE_ANTHROPIC=1 and ANTHROPIC_API_KEY"]
+async fn the_api_records_each_cache_ttl_as_requested() {
+    let Some(key) = key() else { return };
+    // The streamed usage has no per-lifetime split, so this sends the body
+    // the provider builds without streaming and reads `cache_creation`.
+    let http = reqwest::Client::new();
+    for ttl in [CacheTtl::FiveMinutes, CacheTtl::OneHour, CacheTtl::Mixed] {
+        let p = provider(&key, |c| c.request.cache_ttl = ttl);
+        let mut req = ChatRequest::new(MODEL);
+        req.system = Some(long_system(&format!("raw-{ttl:?}")));
+        req.tools = vec![read_tool()];
+        req.max_tokens = Some(16);
+        req.messages.push(Message::user(long_system("tail")));
+        let mut body = p.build_body(&req).unwrap();
+        body["stream"] = json!(false);
+        let v: serde_json::Value = http
+            .post("https://api.anthropic.com/v1/messages")
+            .header("x-api-key", &key)
+            .header(
+                "anthropic-version",
+                harness_providers::anthropic::API_VERSION,
+            )
+            .json(&body)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let cc = &v["usage"]["cache_creation"];
+        eprintln!("{ttl:?}: cache_creation {cc}");
+        let five = cc["ephemeral_5m_input_tokens"].as_u64().unwrap_or(0);
+        let hour = cc["ephemeral_1h_input_tokens"].as_u64().unwrap_or(0);
+        match ttl {
+            CacheTtl::FiveMinutes => assert!(five > 1000 && hour == 0, "{v}"),
+            CacheTtl::OneHour => assert!(hour > 1000 && five == 0, "{v}"),
+            // 1h for tools and system, 5m for the message tail.
+            CacheTtl::Mixed => assert!(hour > 1000 && five > 1000, "{v}"),
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "live: set HARNESS_LIVE_ANTHROPIC=1 and ANTHROPIC_API_KEY"]
+async fn count_tokens_accepts_a_gzip_body() {
+    let Some(key) = key() else { return };
+    let latch = GzipLatch::new();
+    let p = provider(&key, |c| {
+        c.gzip = GzipRequests::Always;
+        c.gzip_latch = latch.clone();
+    });
+    let mut req = ChatRequest::new(MODEL);
+    req.system = Some(long_system("count-gzip"));
+    req.messages.push(Message::user("Reply with: ok"));
+    let n = p
+        .count_tokens(&req, &CancellationToken::new())
+        .await
+        .expect("count_tokens");
+    eprintln!("count_tokens (gzip): {n}");
+    assert!(n > 10_000, "{n}");
+    assert!(!latch.is_tripped(), "count_tokens rejected the gzip body");
+}
+
+#[tokio::test]
+#[ignore = "live: set HARNESS_LIVE_ANTHROPIC=1 and ANTHROPIC_API_KEY"]
+async fn every_effort_level_and_current_model_is_accepted() {
+    let Some(key) = key() else { return };
+    let p = provider(&key, |_| {});
+    let cases = [
+        (MODEL, ReasoningEffort::Low),
+        (MODEL, ReasoningEffort::Medium),
+        (MODEL, ReasoningEffort::High),
+        ("claude-sonnet-5-5", ReasoningEffort::Low),
+        ("claude-opus-5-5", ReasoningEffort::Low),
+    ];
+    for (model, effort) in cases {
+        let mut req = ChatRequest::new(model);
+        req.thinking = thinking(effort);
+        req.max_tokens = Some(2000);
+        req.messages.push(Message::user(
+            "What is 17 * 23? Reply with the number only.",
+        ));
+        let r = call(&p, req, &format!("{model} {effort:?}")).await;
+        assert!(r.message.text().contains("391"), "{:?}", r.message);
+        assert_eq!(r.stop.kind, StopKind::EndTurn);
+    }
+}
+
+#[tokio::test]
+#[ignore = "live: set HARNESS_LIVE_ANTHROPIC=1 and ANTHROPIC_API_KEY"]
+async fn a_short_max_tokens_stops_with_max_tokens() {
+    let Some(key) = key() else { return };
+    let p = provider(&key, |_| {});
+    let mut req = ChatRequest::new(MODEL);
+    req.max_tokens = Some(5);
+    req.messages
+        .push(Message::user("Count from 1 to 100, separated by spaces."));
+    let r = call(&p, req, "max_tokens").await;
+    assert_eq!(r.stop.kind, StopKind::MaxTokens, "{:?}", r.stop);
+}
+
+/// A 32x32 solid red PNG.
+const RED_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAKElEQVR4nO3NsQ0AAAzCMP5/un0CNkuZ41wybXsHAAAAAAAAAAAAxR4yw/wuPL6QkAAAAABJRU5ErkJggg==";
+
+#[tokio::test]
+#[ignore = "live: set HARNESS_LIVE_ANTHROPIC=1 and ANTHROPIC_API_KEY"]
+async fn image_input_is_understood() {
+    let Some(key) = key() else { return };
+    let p = provider(&key, |_| {});
+    let mut req = ChatRequest::new(MODEL);
+    req.max_tokens = Some(20);
+    req.messages.push(Message {
+        role: Role::User,
+        content: vec![
+            ContentBlock::Image {
+                source: harness_providers::model::ImageSource::Base64 {
+                    media_type: "image/png".into(),
+                    data: RED_PNG.into(),
+                },
+            },
+            ContentBlock::text("What colour is this image? One word."),
+        ],
+    });
+    let r = call(&p, req, "image").await;
+    assert!(
+        r.message.text().to_lowercase().contains("red"),
+        "{:?}",
+        r.message
+    );
+}
