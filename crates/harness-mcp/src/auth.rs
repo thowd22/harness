@@ -109,9 +109,6 @@ pub enum AuthError {
     /// The user declined on the consent page.
     #[error("authorization was declined in the browser; nothing was saved")]
     Denied,
-    /// The callback's `state` did not match this attempt.
-    #[error("the authorization callback did not match this attempt (state mismatch); try again")]
-    StateMismatch,
     /// The callback's `iss` did not match the authorization server (RFC 9207).
     #[error(
         "the authorization callback came from another issuer than `{0}` (possible mix-up attack); nothing was saved"

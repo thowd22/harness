@@ -169,13 +169,20 @@ async fn missing_plan_scope_fails_clearly_and_stores_no_tokens() {
 }
 
 #[tokio::test]
-async fn forged_state_is_rejected() {
+async fn forged_state_is_never_exchanged() {
+    // The forged callback is refused and the sign-in keeps waiting for the
+    // real one, which never comes here.
     let server = MockAuthServer::start(MockConfig::default()).await;
     let (_tmp, store) = store();
     let browser = MockBrowser::forging_state("attacker");
-    let err = sign_in(&server, &store).run(&browser).await.unwrap_err();
-    assert_eq!(err, ChatGptError::StateMismatch);
+    let err = sign_in(&server, &store)
+        .with_timeout(Duration::from_millis(500))
+        .run(&browser)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ChatGptError::Timeout(_)), "{err:?}");
     assert!(server.requests_to("/api/accounts/oauth/token").is_empty());
+    assert!(store.load().unwrap().tokens.is_none());
 }
 
 #[tokio::test]

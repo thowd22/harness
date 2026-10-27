@@ -443,7 +443,9 @@ async fn fetch_jwks(http: &reqwest::Client, url: &str) -> Result<Jwks, ChatGptEr
 const PAGE_OK: &str =
     "Signed in to harness with ChatGPT. You can close this tab and return to the terminal.";
 
-/// Accepts connections until one is the callback for `state`.
+/// Accepts connections until one is the callback for `state`. A callback
+/// with another `state` (a stale tab, or a forged request) is answered with
+/// an error page and the sign-in keeps waiting, as a wrong paste does.
 async fn accept_callback(listener: &TcpListener, state: &str) -> Result<Callback, ChatGptError> {
     loop {
         let (mut sock, _) = listener
@@ -468,7 +470,7 @@ async fn accept_callback(listener: &TcpListener, state: &str) -> Result<Callback
                 "This sign-in link is stale. Start again from harness.",
             )
             .await;
-            return Err(ChatGptError::StateMismatch);
+            continue;
         }
         return match callback_error(cb) {
             Ok(cb) => {

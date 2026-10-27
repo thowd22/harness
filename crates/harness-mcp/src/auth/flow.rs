@@ -490,7 +490,9 @@ async fn listen(port: u16) -> Result<TcpListener, AuthError> {
 const PAGE_OK: &str = "harness is now authorized for this MCP server. You can close this tab and return to the terminal.";
 
 /// Accepts connections until one is the callback for `state`, and checks
-/// its `iss` (RFC 9207) before anything else in it is used.
+/// its `iss` (RFC 9207) before anything else in it is used. A callback with
+/// another `state` (a stale tab, or a forged request) is answered with an
+/// error page and the authorization keeps waiting, as a wrong paste does.
 async fn accept_callback(
     listener: &TcpListener,
     state: &str,
@@ -518,7 +520,7 @@ async fn accept_callback(
                 "This authorization link is stale. Start again from harness.",
             )
             .await;
-            return Err(AuthError::StateMismatch);
+            continue;
         }
         return match check_callback(params, meta) {
             Ok(params) => {

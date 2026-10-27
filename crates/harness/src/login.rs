@@ -467,9 +467,13 @@ fn choose_method(
     err: &mut dyn Write,
 ) -> std::io::Result<Option<Method>> {
     let methods = Method::for_provider(provider);
+    let support = auth_support(provider);
     writeln!(err, "How should harness get the key?")?;
     for (i, m) in methods.iter().enumerate() {
-        writeln!(err, "  {}) {} ({})", i + 1, m.label(), m.detail())?;
+        match support {
+            Some(a) => writeln!(err, "  {}) {} ({})", i + 1, m.label(), m.detail(a))?,
+            None => writeln!(err, "  {}) {}", i + 1, m.label())?,
+        }
     }
     let n = methods.len();
     let hint = if n > 3 {

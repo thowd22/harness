@@ -205,3 +205,40 @@ async fn the_port_forward_carries_the_browser_back() {
     r.unwrap();
     assert!(store.load().unwrap().tokens.is_some());
 }
+
+/// Sends a GET for `address` straight to the loopback port and returns the
+/// whole response.
+async fn get(address: &str) -> String {
+    let rest = address.strip_prefix("http://127.0.0.1:").unwrap();
+    let (port, target) = rest.split_at(rest.find('/').unwrap());
+    let mut sock = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .unwrap();
+    sock.write_all(format!("GET {target} HTTP/1.1\r\nhost: 127.0.0.1\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut page = String::new();
+    sock.read_to_string(&mut page).await.unwrap();
+    page
+}
+
+#[tokio::test]
+async fn a_stale_callback_is_refused_and_the_sign_in_keeps_waiting() {
+    let server = MockAuthServer::start(MockConfig::default()).await;
+    let (_tmp, store) = store();
+    let browser = MockBrowser::remote();
+    let (_tx, mut rx) = paste_channel();
+    let flow = sign_in(&server, &store);
+    let user = async {
+        let address = browser.next_redirect().await;
+        let page = get(&address.replace("state=", "state=old")).await;
+        assert!(page.starts_with("HTTP/1.1 400"), "{page}");
+        assert!(page.contains("stale"), "{page}");
+        assert!(server.requests_to("/api/accounts/oauth/token").is_empty());
+        let page = get(&address).await;
+        assert!(page.starts_with("HTTP/1.1 200"), "{page}");
+    };
+    let (r, ()) = tokio::join!(flow.run_with(&browser, &mut rx), user);
+    r.unwrap();
+    assert!(store.load().unwrap().tokens.is_some());
+}

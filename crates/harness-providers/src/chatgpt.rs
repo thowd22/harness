@@ -204,9 +204,6 @@ pub enum ChatGptError {
         "signed in, but ChatGPT plan usage was not granted ({PLAN_SCOPE} is missing), so harness cannot use your plan. Run `{SIGN_IN_COMMAND}` again and allow plan usage, or use an OpenAI API key instead. No tokens were saved"
     )]
     PlanUsageNotGranted,
-    /// The callback's `state` did not match this attempt.
-    #[error("the sign-in callback did not match this attempt (state mismatch); try again")]
-    StateMismatch,
     /// The browser did not come back in time.
     #[error("no answer from the browser within {}s; run `{SIGN_IN_COMMAND}` to try again", .0.as_secs())]
     Timeout(Duration),

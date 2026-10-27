@@ -584,6 +584,27 @@ async fn the_port_forward_carries_the_browser_back() {
     assert!(s.stored_access().is_some());
 }
 
+#[tokio::test]
+async fn a_stale_callback_is_refused_and_the_authorization_keeps_waiting() {
+    let s = setup(MockConfig::default()).await;
+    let browser = MockBrowser::remote();
+    let (_tx, mut rx) = harness_providers::signin::paste_channel();
+    let flow = s.authorize();
+    let user = async {
+        let address = browser.next_redirect().await;
+        let page = reqwest::get(address.replace("state=", "state=old"))
+            .await
+            .unwrap();
+        assert_eq!(page.status().as_u16(), 400);
+        assert!(page.text().await.unwrap().contains("stale"));
+        let page = reqwest::get(&address).await.unwrap();
+        assert!(page.status().is_success());
+    };
+    let (r, ()) = tokio::join!(flow.run_with(&browser, &mut rx), user);
+    r.unwrap();
+    assert!(s.stored_access().is_some());
+}
+
 // TASK-165: the device authorization grant (RFC 8628) for servers that
 // advertise it, used when the browser is on another machine.
 

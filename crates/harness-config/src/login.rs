@@ -143,13 +143,17 @@ impl Method {
         }
     }
 
-    /// Menu detail.
-    pub fn detail(self) -> &'static str {
+    /// Menu detail; the examples name `provider`'s own command and
+    /// environment variable.
+    pub fn detail(self, provider: &AuthSupport) -> String {
         match self {
-            Self::ApiKey => "stored as api_key in harness.ini (mode 0600)",
-            Self::Command => "stored as api_key_cmd, e.g. `pass show anthropic`",
-            Self::Env => "stored as api_key_env, e.g. ANTHROPIC_API_KEY",
-            Self::ChatGpt => "use your ChatGPT plan; opens the browser, sets auth = chatgpt",
+            Self::ApiKey => "stored as api_key in harness.ini (mode 0600)".into(),
+            Self::Command => format!(
+                "stored as api_key_cmd, e.g. `pass show {}`",
+                provider.provider
+            ),
+            Self::Env => format!("stored as api_key_env, e.g. {}", provider.env_var),
+            Self::ChatGpt => "use your ChatGPT plan; opens the browser, sets auth = chatgpt".into(),
         }
     }
 
@@ -415,14 +419,18 @@ impl LoginFlow {
                     detail: a.methods.join(", "),
                 })
                 .collect(),
-            LoginStep::Method => self
-                .methods()
-                .iter()
-                .map(|m| LoginOption {
-                    label: m.label().into(),
-                    detail: m.detail().into(),
-                })
-                .collect(),
+            LoginStep::Method => {
+                let Some(p) = self.provider else {
+                    return Vec::new();
+                };
+                self.methods()
+                    .iter()
+                    .map(|m| LoginOption {
+                        label: m.label().into(),
+                        detail: m.detail(p),
+                    })
+                    .collect()
+            }
             _ => Vec::new(),
         }
     }
@@ -612,6 +620,23 @@ mod tests {
     fn typed(flow: &mut LoginFlow, s: &str) {
         for c in s.chars() {
             flow.handle(LoginKey::Char(c));
+        }
+    }
+
+    #[test]
+    fn method_examples_name_the_chosen_provider() {
+        for a in &AUTH_SUPPORT {
+            let f = LoginFlow::for_provider(a.provider).unwrap();
+            let details: Vec<String> = f.options().into_iter().map(|o| o.detail).collect();
+            assert!(
+                details[1].contains(&format!("pass show {}", a.provider)),
+                "{details:?}"
+            );
+            assert!(details[2].contains(a.env_var), "{details:?}");
+            if a.provider != "anthropic" {
+                assert!(!details.join(" ").contains("anthropic"), "{details:?}");
+                assert!(!details.join(" ").contains("ANTHROPIC"), "{details:?}");
+            }
         }
     }
 

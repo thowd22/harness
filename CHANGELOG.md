@@ -11,6 +11,16 @@ to built-in prompts, agents, workflows and `harness.ini` defaults.
 
 ## Unreleased
 
+### Fixed
+
+- A request with the wrong `state` sent to the sign-in's loopback port (a
+  stale browser tab, or someone else's request) no longer ends Sign in with
+  ChatGPT or MCP OAuth. It gets a "stale link" page, and the sign-in keeps
+  waiting for the real callback, as it already did for a wrong paste.
+- The `/login` and `harness login` method hints name the chosen provider's
+  own command and variable (`pass show openai`, `OPENAI_API_KEY`) instead
+  of always showing the Anthropic examples.
+
 ## [0.5.0] - 2026-10-27
 
 ### Added

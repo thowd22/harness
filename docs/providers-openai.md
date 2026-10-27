@@ -137,10 +137,11 @@ auth = chatgpt            ; set by the login; api_key (default) | chatgpt
    alone does not allow plan usage. If plan usage was not granted, the
    sign-in fails with a message saying so, no tokens are stored, and you can
    sign in again and allow it, or use an API key.
-6. Declining in the browser, a callback with the wrong `state`, or no
-   answer within 5 minutes ends the sign-in without saving anything. A
-   pasted address with the wrong `state` is refused with the reason, and
-   you can paste again.
+6. Declining in the browser, or no answer within 5 minutes, ends the
+   sign-in without saving anything. A callback or a pasted address with
+   the wrong `state` (a stale tab, or a request from someone else) is
+   refused with the reason, and the sign-in keeps waiting for the right
+   one.
 
 ### Where the tokens live
 
