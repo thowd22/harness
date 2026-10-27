@@ -1,11 +1,11 @@
 ---
 id: TASK-165
 title: 'MCP OAuth: device authorization grant (RFC 8628) for servers that advertise it'
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-27 16:31'
-updated_date: '2026-10-27 17:10'
+updated_date: '2026-10-27 17:37'
 labels:
   - auth
   - login
@@ -43,7 +43,7 @@ Limit how many times you test and fix. If the same test, build or check still fa
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Tests: automated tests cover every acceptance criterion (unit and/or integration as appropriate) and pass locally and in CI; no existing test is deleted, skipped, ignored or weakened to get a green run
+- [x] #1 Tests: automated tests cover every acceptance criterion (unit and/or integration as appropriate) and pass locally and in CI; no existing test is deleted, skipped, ignored or weakened to get a green run
 - [x] #2 Docs: user-facing behaviour is documented (docs/ and, if the design changed, the relevant backlog doc), public APIs have rustdoc, and any new config keys appear in the harness.ini reference
 - [x] #3 Loop guard respected: no more than 3 fix attempts per failing test or check; if still failing, stop, record attempts, output and hypothesis in implementation notes, and ask the user instead of looping
 - [x] #4 UI interaction: if this task makes anything visible in the TUI, every visible interactive element is clickable with the mouse and fully operable with the keyboard (arrows/Tab to focus, Enter to activate, Esc to back out), with tests for both input paths; tasks with no visible UI mark this N/A
@@ -90,10 +90,12 @@ Slice 6-7 done (2026-10-27):
 - Fallback decision: no paste-back while a code is shown (nothing to paste; typed text in the CLI is answered 'Nothing to paste'); automatic fallback to loopback + paste + ssh -L only when the device authorization request is refused with an OAuth 4xx error.
 
 Validation (local, 2026-10-27): cargo fmt --check ok; cargo clippy --workspace --all-targets -- -D warnings ok; cargo nextest run --workspace --locked --profile ci: 2113 passed, 10 skipped; cargo test --workspace --locked --doc ok; scripts/hermetic-guard.sh ok (269 passed); scripts/bench-guard.sh ok; cargo doc --no-deps for harness-mcp/providers/tui without warnings. No fix attempts were needed (every new test passed on its first run). CI not run yet (DoD #1 left unchecked).
+
+CI green on PR #4 (https://github.com/thowd22/harness/pull/4, run 40551316751, commit 78fa097, shared branch with TASK-162 and the other task): rustfmt, cargo-deny, clippy and test on ubuntu-latest and macos-latest all pass.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-MCP OAuth now uses the device authorization grant (RFC 8628) when harness runs over SSH, without a display or in WSL and the authorization server advertises device_authorization_endpoint: harness login mcp <name> and /login mcp <name> show the link (OSC 8, verification_uri_complete when given, plus the plain page) and the user code on lines of their own, with copy (CLI c/u via OSC 52; TUI [ copy link ]/ctrl+y, [ copy code ]/c), then poll the token endpoint honouring interval (default 5), slow_down (+5), authorization_pending, access_denied, expired_token/expires_in and the 5-minute timeout; Esc/[ cancel ] (TUI) or Ctrl+C stops polling. Tokens go to the existing MCP token store. Desktop sessions and servers without the endpoint keep the loopback, paste-back and ssh -L flow unchanged; a server that refuses the device grant falls back to it in the same run. Device codes, user codes and tokens never reach logs or events. Verified with new offline tests against the mock OAuth server (harness-mcp tests/oauth.rs: success, interval/slow_down gaps, denial, expiry, timeout, cancel, unchanged loopback, fallback, re-registration; oauth_no_leak.rs TRACE device test), CLI tests (SSH device flow, desktop keeps redirect), TUI modal keyboard/mouse/app tests and driver tests (success over SSH, cancel stops polling), and locally: fmt, clippy -D warnings, nextest --profile ci (2113 passed), doctests, hermetic and bench guards. CI pending until pushed (DoD #1 unchecked).
+MCP OAuth now uses the device authorization grant (RFC 8628) when harness runs over SSH, without a display or in WSL and the authorization server advertises device_authorization_endpoint: harness login mcp <name> and /login mcp <name> show the link (OSC 8, verification_uri_complete when given, plus the plain page) and the user code on lines of their own, with copy (CLI c/u via OSC 52; TUI [ copy link ]/ctrl+y, [ copy code ]/c), then poll the token endpoint honouring interval (default 5), slow_down (+5), authorization_pending, access_denied, expired_token/expires_in and the 5-minute timeout; Esc/[ cancel ] (TUI) or Ctrl+C stops polling. Tokens go to the existing MCP token store. Desktop sessions and servers without the endpoint keep the loopback, paste-back and ssh -L flow unchanged; a server that refuses the device grant falls back to it in the same run. Device codes, user codes and tokens never reach logs or events. Verified with new offline tests against the mock OAuth server (harness-mcp tests/oauth.rs: success, interval/slow_down gaps, denial, expiry, timeout, cancel, unchanged loopback, fallback, re-registration; oauth_no_leak.rs TRACE device test), CLI tests (SSH device flow, desktop keeps redirect), TUI modal keyboard/mouse/app tests and driver tests (success over SSH, cancel stops polling), and locally: fmt, clippy -D warnings, nextest --profile ci (2113 passed), doctests, hermetic and bench guards. CI green on PR #4 (run 40551316751).
 <!-- SECTION:FINAL_SUMMARY:END -->
