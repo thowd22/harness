@@ -41,6 +41,17 @@ fn run(ini: &str) -> (Vec<String>, String) {
     let env = Env::new(ini);
     std::fs::write(env.project.join("a.txt"), "alpha\n").unwrap();
     std::fs::write(env.project.join("b.txt"), "beta\n").unwrap();
+    // glob lists newest first; one fixed mtime keeps the order the same in
+    // both runs however fast the files were written.
+    let t = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    for f in ["a.txt", "b.txt"] {
+        std::fs::File::options()
+            .write(true)
+            .open(env.project.join(f))
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
+    }
     let script = env.script("s.yaml", SCRIPT);
     let o = env.run(&script, &["--json", "read", "the", "files"]);
     assert_eq!(o.status.code(), Some(0), "stderr: {}", stderr(&o));
