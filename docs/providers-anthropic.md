@@ -64,7 +64,9 @@ It is only used when Harness talks to the public API directly:
   path. A custom `base_url` (a gateway, a local proxy, another port) is
   never compressed.
 - No proxy is set (`HTTPS_PROXY`, `ALL_PROXY` and their lowercase forms)
-  and no custom CA bundle is set (`SSL_CERT_FILE`, `SSL_CERT_DIR`).
+  and no custom CA bundle is set (`SSL_CERT_FILE`, `SSL_CERT_DIR`). Cargo
+  sets both for the programs it starts, so under `cargo run` or
+  `cargo test` bodies are sent raw; the installed binary is not affected.
 
 `gzip_requests = off` in `[provider.anthropic]`, or the environment variable
 `HARNESS_GZIP_REQUEST_BODIES=0`, turns it off.

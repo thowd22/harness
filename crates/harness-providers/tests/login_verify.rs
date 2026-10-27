@@ -153,3 +153,27 @@ async fn live_openrouter_key_check() {
     .unwrap_err();
     assert!(matches!(err, ProviderError::Auth(_)), "{err:?}");
 }
+
+/// Live: `ANTHROPIC_API_KEY` is accepted and a bogus key is rejected.
+#[tokio::test]
+#[ignore = "live network; needs ANTHROPIC_API_KEY"]
+async fn live_anthropic_key_check() {
+    let Ok(key) = std::env::var("ANTHROPIC_API_KEY") else {
+        eprintln!("ANTHROPIC_API_KEY not set; skipping");
+        return;
+    };
+    let client = reqwest::Client::new();
+    verify_api_key(&client, "anthropic", &key, None, VERIFY_TIMEOUT)
+        .await
+        .unwrap();
+    let err = verify_api_key(
+        &client,
+        "anthropic",
+        "sk-ant-api03-not-a-real-key",
+        None,
+        VERIFY_TIMEOUT,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, ProviderError::Auth(_)), "{err:?}");
+}
