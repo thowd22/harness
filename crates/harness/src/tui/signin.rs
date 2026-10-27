@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use harness_providers::chatgpt::Browser;
 use harness_providers::signin::{
-    Environment, Instructions, Paste, PasteReceiver, PasteSender, paste_channel,
+    DeviceCode, Environment, Instructions, Paste, PasteReceiver, PasteSender, paste_channel,
 };
 use harness_tui::app::{AppEvent, CoreEvent};
 use harness_tui::signin::{CHATGPT_ID, PastedText, SignInPrompt};
@@ -94,7 +94,31 @@ impl Browser for ModalBrowser {
             url: url.to_owned(),
             forward: shown.forward,
             no_browser: shown.no_browser.map(str::to_owned),
+            device: None,
         }));
+        self.show(ev, url);
+        Ok(())
+    }
+
+    fn show_device_code(&self, code: &DeviceCode) -> Result<(), String> {
+        let ev = AppEvent::Core(CoreEvent::SignIn(SignInPrompt {
+            id: self.id.clone(),
+            title: self.title.clone(),
+            url: code.link().to_owned(),
+            // Nothing comes back to this machine: no port to forward.
+            forward: None,
+            no_browser: self.env.reason().map(str::to_owned),
+            device: Some(code.clone()),
+        }));
+        self.show(ev, code.link());
+        Ok(())
+    }
+}
+
+impl ModalBrowser {
+    /// Opens the modal with `ev`, and `url` in the system browser when it
+    /// can reach this machine.
+    fn show(&self, ev: AppEvent, url: &str) {
         // Waits for room in a busy channel rather than losing the link.
         let tx = self.tx.clone();
         tokio::spawn(async move {
@@ -105,7 +129,6 @@ impl Browser for ModalBrowser {
         {
             tracing::warn!(error = %e, "could not open a browser");
         }
-        Ok(())
     }
 }
 

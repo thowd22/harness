@@ -33,6 +33,12 @@
 //! is clickable. A click outside the dialog does nothing while the sign-in
 //! runs, so a stray click cannot throw it away.
 //!
+//! For a device authorization (RFC 8628, MCP servers that offer it when
+//! the browser is elsewhere) the dialog shows the verification link and
+//! the user code instead, with `[ copy link ]`, `[ copy code ]` (also `c`)
+//! and `[ cancel ]`; there is no address field, since nothing comes back
+//! to paste. Esc cancels, which stops the polling.
+//!
 //! The modal never touches the network: a submit returns
 //! [`SignInOutcome::Paste`], the core hands it to the running flow and
 //! answers with [`SignInModal::answer`], and reports the end with
@@ -41,6 +47,7 @@
 use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+pub use harness_providers::signin::DeviceCode;
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
@@ -58,6 +65,8 @@ pub const FIELD_ID: &str = "signin.field";
 pub const COPY_LINK_ID: &str = "signin.copy_link";
 /// Element id of the copy-ssh-command button.
 pub const COPY_COMMAND_ID: &str = "signin.copy_command";
+/// Element id of the copy-code button (device authorization).
+pub const COPY_CODE_ID: &str = "signin.copy_code";
 /// Element id of the submit button.
 pub const SUBMIT_ID: &str = "signin.submit";
 /// Element id of the cancel / close button.
@@ -69,19 +78,40 @@ pub const MAX_WIDTH: u16 = 76;
 /// Dialog title.
 pub const TITLE: &str = " Sign in ";
 
-/// What the core shows for a running browser sign-in.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// What the core shows for a running browser sign-in. `Debug` leaves out
+/// the link's query, which holds the state or the user code.
+#[derive(Clone, PartialEq, Eq)]
 pub struct SignInPrompt {
     /// Which sign-in ([`CHATGPT_ID`], `mcp.<server>`).
     pub id: String,
     /// Heading (`Sign in with ChatGPT`).
     pub title: String,
-    /// The authorization URL, in full.
+    /// The authorization URL, in full (for a device authorization, the
+    /// link to open: [`DeviceCode::link`]).
     pub url: String,
     /// The `ssh -L` command, over SSH.
     pub forward: Option<String>,
     /// Why no browser was opened here; `None` when one was.
     pub no_browser: Option<String>,
+    /// A device authorization (RFC 8628): show its code; nothing is pasted.
+    pub device: Option<DeviceCode>,
+}
+
+impl std::fmt::Debug for SignInPrompt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let url = self
+            .url
+            .split_once('?')
+            .map_or(self.url.as_str(), |(u, _)| u);
+        f.debug_struct("SignInPrompt")
+            .field("id", &self.id)
+            .field("title", &self.title)
+            .field("url", &format_args!("{url}?…"))
+            .field("forward", &self.forward)
+            .field("no_browser", &self.no_browser)
+            .field("device", &self.device)
+            .finish()
+    }
 }
 
 /// Text pasted into the modal. Shared, never copied; `Debug` hides it,
@@ -172,6 +202,8 @@ pub enum SignInAction {
     CopyLink,
     /// Copy the `ssh -L` command.
     CopyCommand,
+    /// Copy the device authorization's user code.
+    CopyCode,
     /// Submit the pasted address.
     Submit,
     /// Cancel the sign-in, or close the finished dialog.
@@ -247,6 +279,12 @@ impl SignInModal {
         &self.prompt
     }
 
+    /// Whether this is a device authorization (a code to confirm, nothing
+    /// to paste).
+    pub fn is_device(&self) -> bool {
+        self.prompt.device.is_some()
+    }
+
     /// Whether the sign-in has ended (the dialog only shows the outcome).
     pub fn is_finished(&self) -> bool {
         matches!(self.state, State::Done(_) | State::Failed(_))
@@ -308,6 +346,13 @@ impl SignInModal {
             KeyCode::Char('y') if ctrl => return self.activate(SignInAction::CopyLink),
             KeyCode::PageUp => return self.scroll(-5),
             KeyCode::PageDown => return self.scroll(5),
+            // A device authorization has no field: `c` copies the code.
+            KeyCode::Char('c' | 'C') if plain && self.is_device() && !self.is_finished() => {
+                return self.activate(SignInAction::CopyCode);
+            }
+            KeyCode::Char(_) | KeyCode::Backspace if self.is_device() => {
+                return SignInOutcome::Ignored;
+            }
             KeyCode::Char(c) if plain && !self.is_finished() => {
                 self.top = None;
                 self.input.push(c);
@@ -326,14 +371,16 @@ impl SignInModal {
             Some(Dispatch::Back) => self.activate(SignInAction::Cancel),
             Some(Dispatch::Scroll { lines, .. }) => self.scroll(lines),
             Some(Dispatch::Focus(_)) => SignInOutcome::Changed,
-            None if key.code == KeyCode::Enter => self.activate(SignInAction::Submit),
+            None if key.code == KeyCode::Enter && !self.is_device() => {
+                self.activate(SignInAction::Submit)
+            }
             None => SignInOutcome::Ignored,
         }
     }
 
     /// Pasted text goes into the field (line breaks dropped).
     pub fn paste(&mut self, text: &str) -> SignInOutcome {
-        if self.is_finished() {
+        if self.is_finished() || self.is_device() {
             return SignInOutcome::Ignored;
         }
         self.top = None;
@@ -356,9 +403,19 @@ impl SignInModal {
                 },
                 None => SignInOutcome::Ignored,
             },
+            SignInAction::CopyCode => match &self.prompt.device {
+                Some(d) => SignInOutcome::Copy {
+                    what: "sign-in code",
+                    text: d.user_code.to_string(),
+                },
+                None => SignInOutcome::Ignored,
+            },
             SignInAction::Cancel if self.is_finished() => SignInOutcome::Close,
             SignInAction::Cancel => SignInOutcome::Cancel,
             _ if self.is_finished() => SignInOutcome::Close,
+            SignInAction::Field | SignInAction::Submit if self.is_device() => {
+                SignInOutcome::Ignored
+            }
             SignInAction::Field | SignInAction::Submit => {
                 self.top = None;
                 if self.state == State::Checking {
@@ -407,6 +464,21 @@ impl SignInModal {
             SignInAction::CopyLink,
             Token::Accent,
         )];
+        if self.is_device() {
+            b.push((
+                COPY_CODE_ID,
+                "[ copy code ]".into(),
+                SignInAction::CopyCode,
+                Token::Accent,
+            ));
+            b.push((
+                CANCEL_ID,
+                "[ cancel ]".into(),
+                SignInAction::Cancel,
+                Token::Muted,
+            ));
+            return b;
+        }
         if self.prompt.forward.is_some() {
             b.push((
                 COPY_COMMAND_ID,
@@ -433,6 +505,8 @@ impl SignInModal {
     fn hint(&self) -> &'static str {
         if self.is_finished() {
             "Enter close"
+        } else if self.is_device() {
+            "Tab move · Enter activate · ctrl+y copy link · c copy code · Esc cancel"
         } else {
             "Tab move · Enter submit · ctrl+y copy link · Esc cancel"
         }
@@ -454,6 +528,10 @@ impl SignInModal {
             theme.fg(Token::Fg).add_modifier(Modifier::BOLD),
         );
         b.lines.push(Line::default());
+        if let Some(device) = &self.prompt.device {
+            self.device_body(&mut b, device, theme, w);
+            return b;
+        }
         match &self.prompt.no_browser {
             Some(why) => {
                 text(
@@ -474,11 +552,7 @@ impl SignInModal {
             ),
         }
         // The link, cut at the width (never shortened).
-        let link = theme.fg(Token::Accent).add_modifier(Modifier::UNDERLINED);
-        for chunk in chunks(&sanitize(&self.prompt.url), w) {
-            b.links.push(b.lines.len());
-            b.lines.push(Line::from(Span::styled(chunk, link)));
-        }
+        b.link(&self.prompt.url, theme, w);
         if !self.is_finished() {
             b.lines.push(Line::default());
             text(
@@ -523,6 +597,12 @@ impl SignInModal {
             b.field = Some((b.lines.len(), rows.len(), last));
             b.lines.extend(rows);
         }
+        self.outcome(&mut b, theme, w);
+        b
+    }
+
+    /// The outcome or status line, if any.
+    fn outcome(&self, b: &mut Body, theme: &Theme, w: usize) {
         let outcome = match &self.state {
             State::Done(m) => Some((Token::Ok, m.as_str())),
             State::Failed(m) => Some((Token::Error, m.as_str())),
@@ -530,9 +610,63 @@ impl SignInModal {
         };
         if let Some((token, m)) = outcome {
             b.lines.push(Line::default());
-            text(&mut b, m, theme.fg(token));
+            b.text(m, theme.fg(token), w);
         }
-        b
+    }
+
+    /// The body of a device authorization: the link, the code and the
+    /// plain verification page, then the outcome.
+    fn device_body(&self, b: &mut Body, device: &DeviceCode, theme: &Theme, w: usize) {
+        let complete = device.verification_uri_complete.is_some();
+        if let Some(why) = &self.prompt.no_browser {
+            b.text(
+                &format!("No browser opened here ({why})."),
+                theme.fg(Token::Warn),
+                w,
+            );
+        }
+        b.text(
+            if complete {
+                "Open this link on any device and check that it shows the code below:"
+            } else {
+                "Open this link on any device and enter the code below:"
+            },
+            theme.fg(Token::Fg),
+            w,
+        );
+        b.link(&self.prompt.url, theme, w);
+        b.lines.push(Line::default());
+        let code = sanitize(&device.user_code);
+        let rows = wrap_line(
+            Line::from(vec![
+                Span::styled("Code ", theme.fg(Token::Muted)),
+                Span::styled(code, theme.fg(Token::Accent).add_modifier(Modifier::BOLD)),
+            ]),
+            w,
+            &[],
+        );
+        b.lines.extend(rows);
+        if !self.is_finished() {
+            if complete {
+                b.lines.push(Line::default());
+                b.text(
+                    "Or open this page and type the code:",
+                    theme.fg(Token::Muted),
+                    w,
+                );
+                b.link(&device.verification_uri, theme, w);
+            }
+            b.lines.push(Line::default());
+            b.text(
+                &format!(
+                    "Waiting for approval… The code expires in {}. Nothing needs to be pasted back.",
+                    device.lifetime()
+                ),
+                theme.fg(Token::Muted),
+                w,
+            );
+        }
+        self.outcome(b, theme, w);
     }
 
     /// Draws the modal over `area`, registers its field and buttons, and
@@ -635,14 +769,14 @@ impl SignInModal {
         }
         for (row, line) in body.lines.into_iter().enumerate().skip(first).take(rows) {
             let y = y_of(row);
-            if body.links.contains(&row) {
+            if let Some((_, url)) = body.links.iter().find(|(r, _)| *r == row) {
                 let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
                 let style = line.spans.first().map_or(Style::default(), |s| s.style);
                 links.push(Hyperlink {
                     x: inner.x,
                     y,
                     text,
-                    url: self.prompt.url.clone(),
+                    url: url.clone(),
                     style: theme.base().patch(style),
                 });
             }
@@ -712,10 +846,30 @@ fn chunks(s: &str, w: usize) -> Vec<String> {
 #[derive(Default)]
 struct Body {
     lines: Vec<Line<'static>>,
-    /// Rows that hold the link.
-    links: Vec<usize>,
+    /// Rows that hold a link, and its target.
+    links: Vec<(usize, String)>,
     /// First row, row count and cursor column of the address field.
     field: Option<(usize, usize, usize)>,
+}
+
+impl Body {
+    /// Wrapped text.
+    fn text(&mut self, s: &str, style: Style, w: usize) {
+        self.lines.extend(wrap_line(
+            Line::from(Span::styled(sanitize(s), style)),
+            w,
+            &[],
+        ));
+    }
+
+    /// `url` cut into rows at the width (never shortened), each a link.
+    fn link(&mut self, url: &str, theme: &Theme, w: usize) {
+        let style = theme.fg(Token::Accent).add_modifier(Modifier::UNDERLINED);
+        for chunk in chunks(&sanitize(url), w) {
+            self.links.push((self.lines.len(), url.to_owned()));
+            self.lines.push(Line::from(Span::styled(chunk, style)));
+        }
+    }
 }
 
 #[cfg(test)]

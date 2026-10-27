@@ -20,7 +20,8 @@ use harness_providers::chatgpt::{Account, Browser, ChatGptError, Endpoints, Sign
 use harness_providers::login::{KeyCheck, VERIFY_TIMEOUT};
 use harness_providers::provider::ProviderError;
 use harness_providers::signin::{
-    Environment, Instructions, Paste, PasteReceiver, PasteSender, hyperlink, paste_channel,
+    DeviceCode, Environment, Instructions, Paste, PasteReceiver, PasteSender, hyperlink,
+    paste_channel,
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -493,15 +494,23 @@ fn choose_method(
 /// A [`Browser`] for the terminal: passes the URL on to be printed, then
 /// opens the system browser unless the browser is elsewhere.
 pub(crate) struct TerminalBrowser<'a> {
-    pub(crate) shown: tokio::sync::mpsc::UnboundedSender<String>,
+    pub(crate) shown: tokio::sync::mpsc::UnboundedSender<Shown>,
     pub(crate) inner: &'a dyn Browser,
     /// Open `inner` ([`Environment::opens_browser`]).
     pub(crate) open: bool,
 }
 
+/// What a sign-in asks the terminal to show.
+pub(crate) enum Shown {
+    /// An authorization URL (loopback redirect).
+    Url(String),
+    /// A device authorization (RFC 8628).
+    Device(DeviceCode),
+}
+
 impl Browser for TerminalBrowser<'_> {
     fn open(&self, url: &str) -> Result<(), String> {
-        let _ = self.shown.send(url.to_owned());
+        let _ = self.shown.send(Shown::Url(url.to_owned()));
         if self.open
             && let Err(e) = self.inner.open(url)
         {
@@ -509,6 +518,26 @@ impl Browser for TerminalBrowser<'_> {
         }
         Ok(())
     }
+
+    fn show_device_code(&self, code: &DeviceCode) -> Result<(), String> {
+        let _ = self.shown.send(Shown::Device(code.clone()));
+        if self.open
+            && let Err(e) = self.inner.open(code.link())
+        {
+            tracing::warn!(error = %e, "could not open a browser");
+        }
+        Ok(())
+    }
+}
+
+/// Copies `text` with OSC 52 through `err`.
+fn copy_osc52(text: &str, env: &dyn Fn(&str) -> Option<String>, err: &mut dyn Write) {
+    let clip = harness_tui::clipboard::Clipboard::from_env(
+        harness_tui::clipboard::ClipboardMode::Osc52,
+        env,
+        &|_| false,
+    );
+    let _ = clip.copy(text, &mut |seq| err.write_all(seq.as_bytes()));
 }
 
 /// How a browser sign-in shows itself in the terminal.
@@ -523,10 +552,11 @@ pub(crate) struct SignInView<'a> {
 
 /// Waits for `running` (a browser sign-in) while printing the link it
 /// opens and handing typed lines to it as pasted callbacks. `c` copies the
-/// link with OSC 52.
+/// link with OSC 52. For a device authorization the link and the code are
+/// printed instead, `u` copies the code and nothing is pasted.
 pub(crate) async fn drive_sign_in<T>(
     running: impl std::future::Future<Output = T>,
-    mut urls: UnboundedReceiver<String>,
+    mut shown: UnboundedReceiver<Shown>,
     mut lines: Option<UnboundedReceiver<String>>,
     paste: PasteSender,
     view: &SignInView<'_>,
@@ -535,6 +565,7 @@ pub(crate) async fn drive_sign_in<T>(
 ) -> T {
     tokio::pin!(running);
     let mut url = None;
+    let mut device: Option<DeviceCode> = None;
     // The flow answers pastes in the order they were sent.
     let mut replies: std::collections::VecDeque<
         tokio::sync::oneshot::Receiver<Result<(), String>>,
@@ -554,41 +585,76 @@ pub(crate) async fn drive_sign_in<T>(
         };
         tokio::select! {
             r = &mut running => return r,
-            Some(u) = urls.recv() => {
-                let shown = Instructions::new(&u, &view.env);
-                for l in shown.lines(view.what, lines.is_some()) {
-                    let l = if l == u && view.links { hyperlink(&u, &u) } else { l };
-                    let _ = writeln!(err, "{l}");
+            Some(s) = shown.recv() => match s {
+                Shown::Url(u) => {
+                    let shown = Instructions::new(&u, &view.env);
+                    for l in shown.lines(view.what, lines.is_some()) {
+                        let l = if l == u && view.links { hyperlink(&u, &u) } else { l };
+                        let _ = writeln!(err, "{l}");
+                    }
+                    if lines.is_some() {
+                        let _ = writeln!(
+                            err,
+                            "{}",
+                            if shown.no_browser.is_some() {
+                                "Paste the address here and press Enter (or type c and Enter to copy the link):"
+                            } else {
+                                "Waiting for the browser… (if it runs on another machine, paste the address it ends up at here)"
+                            }
+                        );
+                    } else {
+                        let _ = writeln!(err, "Waiting for the browser…");
+                    }
+                    url = Some(u);
                 }
-                if lines.is_some() {
+                Shown::Device(code) => {
+                    let link = code.link().to_owned();
+                    for l in code.lines(view.what, view.env.reason()) {
+                        let l = if l == link && view.links { hyperlink(&link, &link) } else { l };
+                        let _ = writeln!(err, "{l}");
+                    }
                     let _ = writeln!(
                         err,
                         "{}",
-                        if shown.no_browser.is_some() {
-                            "Paste the address here and press Enter (or type c and Enter to copy the link):"
+                        if lines.is_some() {
+                            "Waiting for approval… (type c and Enter to copy the link, u and Enter to copy the code)"
                         } else {
-                            "Waiting for the browser… (if it runs on another machine, paste the address it ends up at here)"
+                            "Waiting for approval…"
                         }
                     );
-                } else {
-                    let _ = writeln!(err, "Waiting for the browser…");
+                    url = Some(link);
+                    device = Some(code);
                 }
-                url = Some(u);
-            }
+            },
             Some(l) = line => {
                 let l = zeroize::Zeroizing::new(l);
                 match l.trim() {
                     "" => {}
                     "c" | "C" => {
                         if let Some(u) = &url {
-                            let clip = harness_tui::clipboard::Clipboard::from_env(
-                                harness_tui::clipboard::ClipboardMode::Osc52,
-                                env,
-                                &|_| false,
+                            copy_osc52(u, env, err);
+                            let _ = writeln!(
+                                err,
+                                "{}",
+                                if device.is_some() {
+                                    "Copied the link (OSC 52). Waiting for approval…"
+                                } else {
+                                    "Copied the link (OSC 52). Paste the address here when you are done:"
+                                }
                             );
-                            let _ = clip.copy(u, &mut |seq| err.write_all(seq.as_bytes()));
-                            let _ = writeln!(err, "Copied the link (OSC 52). Paste the address here when you are done:");
                         }
+                    }
+                    "u" | "U" if device.is_some() => {
+                        if let Some(d) = &device {
+                            copy_osc52(&d.user_code, env, err);
+                            let _ = writeln!(err, "Copied the code (OSC 52). Waiting for approval…");
+                        }
+                    }
+                    _ if device.is_some() => {
+                        let _ = writeln!(
+                            err,
+                            "Nothing to paste for this sign-in: open the link, approve the code there, and harness continues by itself."
+                        );
                     }
                     text => {
                         let (p, rx) = Paste::new(text);

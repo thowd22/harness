@@ -28,6 +28,13 @@
 //!    parameter (RFC 8707) and a loopback redirect
 //!    (`http://127.0.0.1:<port>/callback`). The callback's `iss` is checked
 //!    as RFC 9207 requires before the code goes anywhere.
+//!    When the browser is on another machine (SSH, no display, WSL) and
+//!    the authorization server advertises a
+//!    `device_authorization_endpoint`, the device grant (RFC 8628,
+//!    [`device`]) replaces the loopback redirect: the user confirms a
+//!    short code on any device and harness polls the token endpoint. A
+//!    server that refuses the device grant for this client gets the
+//!    loopback flow instead.
 //! 4. Tokens go to [`store::McpTokenStore`]: one JSON file per server under
 //!    `<data_dir>/auth/mcp/`, mode `0600` in `0700` directories, inside the
 //!    data dir's protected `auth/` directory, so agent tools can never read
@@ -39,6 +46,7 @@
 //!    never spend a refresh token twice. A dead refresh token clears the
 //!    stored tokens and asks to authorize again.
 
+pub mod device;
 pub mod discovery;
 pub mod flow;
 pub mod mock;
@@ -109,6 +117,11 @@ pub enum AuthError {
         "the authorization callback came from another issuer than `{0}` (possible mix-up attack); nothing was saved"
     )]
     IssuerMismatch(String),
+    /// The device code (RFC 8628) expired before the user approved it.
+    #[error(
+        "the sign-in code expired before it was approved; run the sign-in again and approve it sooner"
+    )]
+    DeviceExpired,
     /// The browser did not come back in time.
     #[error("no answer from the browser within {}s; try again", .0.as_secs())]
     Timeout(Duration),

@@ -272,9 +272,11 @@ links your own way anyway. It then shows:
 On WSL 2, a Windows browser usually reaches the WSL listener on
 `127.0.0.1` directly, so opening the link in Windows is enough.
 
-Device authorization (a code typed on another device) is not offered:
-OpenAI documents only the browser flow for apps like harness, and the MCP
-authorization spec defines only the authorization code flow. An abandoned
+Device authorization (a code typed on another device, nothing pasted back)
+is used for MCP servers whose authorization server advertises it; see
+[signing in with a code](mcp.md#signing-in-with-a-code-device-flow). Sign in
+with ChatGPT does not offer it: OpenAI documents only the browser flow for
+apps like harness. An abandoned
 sign-in ends after 5 minutes; cancelling it (Esc in the TUI, Ctrl+C in the
 terminal) closes the listener at once. Pasted codes and tokens are never
 logged, put in events or shown: the TUI shows only the part of a pasted

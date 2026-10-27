@@ -16,13 +16,20 @@ use super::{
     PLAN_SCOPE, SCOPES, SIGN_IN_TIMEOUT, TERMINAL_REFRESH_CODES, form_encode, parse_query,
     unix_now,
 };
-use crate::signin::{PasteReceiver, check_state, next_paste, param};
+use crate::signin::{DeviceCode, PasteReceiver, check_state, next_paste, param};
 
 /// Opens the authorization URL for the user.
 pub trait Browser: Send + Sync {
     /// Shows `url` to the user, usually in the system browser. An error
     /// stops the sign-in and is shown with the URL.
     fn open(&self, url: &str) -> Result<(), String>;
+
+    /// Shows a device authorization (RFC 8628): the code the user confirms
+    /// and the page where they do it, on any device. The default opens
+    /// [`DeviceCode::link`]; terminal and TUI browsers show the code too.
+    fn show_device_code(&self, code: &DeviceCode) -> Result<(), String> {
+        self.open(code.link())
+    }
 }
 
 /// The system browser: `xdg-open` on Linux, `open` on macOS, `start` on

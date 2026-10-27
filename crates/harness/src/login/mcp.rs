@@ -24,21 +24,27 @@ usage: harness login mcp <name>
 login mcp authorizes harness with the remote MCP server [mcp.<name>] using
 OAuth (the MCP authorization spec): it finds the server's authorization
 server, registers harness when the server allows it (or uses
-oauth_client_id), opens the browser to approve access, stores the tokens in
-<data_dir>/auth/mcp (mode 0600, never in harness.ini) and sets auth = oauth
-in the section. Tokens are refreshed automatically. Runs never open a
-browser: a server that needs authorization fails with a message naming this
-command. logout mcp deletes the stored tokens and registration after
-confirmation (--yes skips it).";
+oauth_client_id), opens the browser to approve access (over SSH or without
+a display: shows the link, takes the address pasted back, or shows a code
+to approve on any device when the server offers the device grant), stores
+the tokens in <data_dir>/auth/mcp (mode 0600, never in harness.ini) and
+sets auth = oauth in the section. Tokens are refreshed automatically. Runs
+never open a browser: a server that needs authorization fails with a
+message naming this command. logout mcp deletes the stored tokens and
+registration after confirmation (--yes skips it).";
 
 /// Authorizes `[mcp.<server>]` from the file at `path` in `browser` (or
-/// with a callback pasted into `paste`), then sets `auth = oauth`. Returns
-/// a one-line summary or an actionable error; neither contains a token.
+/// with a callback pasted into `paste`), then sets `auth = oauth`. With
+/// `device_grant` (the browser is on another machine,
+/// [`Environment::is_remote`]) a server that advertises the device grant
+/// (RFC 8628) gets that instead of the loopback redirect. Returns a
+/// one-line summary or an actionable error; neither contains a token.
 pub async fn authorize(
     path: &Path,
     server: &str,
     browser: &dyn Browser,
     paste: &mut PasteReceiver,
+    device_grant: bool,
 ) -> Result<String, String> {
     let cfg = config_at(path)?;
     let Some(s) = cfg.mcp.get(server) else {
@@ -63,6 +69,7 @@ pub async fn authorize(
     let store = crate::wiring::mcp_token_store(&cfg);
     let done = Authorize::new(server, s, store.clone())
         .map_err(|e| e.to_string())?
+        .with_device_grant(device_grant)
         .run_with(browser, paste)
         .await
         .map_err(|e| e.to_string())?;
@@ -125,7 +132,7 @@ pub async fn login_main(
     let (paste, mut pasted) = paste_channel();
     let lines = prompt.paste_lines();
     let result = drive_sign_in(
-        authorize(path, server, &shown, &mut pasted),
+        authorize(path, server, &shown, &mut pasted, view.env.is_remote()),
         urls,
         lines,
         paste,
@@ -471,5 +478,100 @@ mod tests {
         assert!(out.contains("authorized MCP server docs"), "{out}");
         let cfg = harness_config::ini::load_file(&s.path).unwrap();
         assert!(cfg.mcp["docs"].uses_oauth());
+    }
+
+    /// TASK-165: over SSH, a server that advertises the device grant gets
+    /// a user code instead of the loopback redirect.
+    #[tokio::test]
+    async fn over_ssh_a_device_code_is_shown_and_approving_it_authorizes() {
+        use crate::login::chatgpt_tests::{Shared, Typing, over_ssh};
+        let s = setup(
+            MockConfig {
+                device_authorization: true,
+                ..MockConfig::default()
+            },
+            "",
+        )
+        .await;
+        let (typed, lines) = tokio::sync::mpsc::unbounded_channel();
+        let mut prompt = Typing(Some(lines));
+        let local = MockBrowser::new();
+        let err = Shared::default();
+        let mut err_w = err.clone();
+        let mut out = Vec::new();
+        let args = vec!["docs".to_owned()];
+        let login = login_main(
+            &args,
+            &s.path,
+            &mut prompt,
+            &local,
+            &over_ssh,
+            &mut out,
+            &mut err_w,
+        );
+        let user = async {
+            let link = err.url("/device?user_code=").await;
+            typed.send("c".into()).unwrap();
+            typed.send("u".into()).unwrap();
+            typed
+                .send("http://127.0.0.1:1/callback?code=x".into())
+                .unwrap();
+            // Approve on the user's own machine.
+            MockBrowser::remote().open(&link).unwrap();
+        };
+        let (code, ()) = tokio::join!(login, user);
+        let err = err.text();
+        assert_eq!(code, 0, "{err}");
+        assert!(local.opened().is_empty(), "no local browser over SSH");
+        assert!(s.mock.requests_to("/authorize").is_empty());
+        let user_code = err
+            .lines()
+            .find(|l| l.starts_with("WDJB-"))
+            .unwrap_or_else(|| panic!("the code is a line of its own: {err}"));
+        let link_line = err
+            .lines()
+            .find(|l| l.contains("/device?user_code="))
+            .unwrap();
+        assert!(
+            link_line.starts_with("\x1b]8;;http") && link_line.contains(user_code),
+            "OSC 8 link: {link_line:?}"
+        );
+        assert!(
+            err.contains("Not opening a browser here (this is an SSH session)"),
+            "{err}"
+        );
+        assert!(err.contains("and check that it shows this code:"), "{err}");
+        assert!(err.contains("/device and type the code"), "{err}");
+        assert!(err.contains("Copied the link"), "{err}");
+        assert!(err.contains("Copied the code"), "{err}");
+        assert_eq!(err.matches("\x1b]52;c;").count(), 2, "{err:?}");
+        assert!(err.contains("Nothing to paste for this sign-in"), "{err}");
+        assert!(
+            !err.contains("ssh -N -L"),
+            "no port forward to offer: {err}"
+        );
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("authorized MCP server docs"), "{out}");
+        let cfg = harness_config::ini::load_file(&s.path).unwrap();
+        assert!(cfg.mcp["docs"].uses_oauth());
+        assert!(crate::wiring::mcp_token_store(&cfg).has_tokens("docs"));
+    }
+
+    /// TASK-165: on a desktop the same server keeps the browser redirect.
+    #[tokio::test]
+    async fn on_a_desktop_a_device_capable_server_keeps_the_browser_redirect() {
+        let s = setup(
+            MockConfig {
+                device_authorization: true,
+                ..MockConfig::default()
+            },
+            "",
+        )
+        .await;
+        let (code, _, err) = login(&s, &["docs"]).await;
+        assert_eq!(code, 0, "{err}");
+        assert!(err.contains("Opening your browser to authorize"), "{err}");
+        assert!(s.mock.requests_to("/device_authorization").is_empty());
+        assert_eq!(s.mock.requests_to("/authorize").len(), 1);
     }
 }

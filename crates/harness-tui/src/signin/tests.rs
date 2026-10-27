@@ -35,6 +35,7 @@ fn prompt(id: &str) -> SignInPrompt {
         url: url(),
         forward: Some("ssh -N -L 1455:127.0.0.1:1455 dev@10.0.0.2".into()),
         no_browser: Some("this is an SSH session".into()),
+        device: None,
     }
 }
 
@@ -466,6 +467,184 @@ fn app_mcp_sign_in_shows_the_outcome_in_the_modal() {
         ui.requests().is_empty(),
         "closing a finished sign-in sends nothing"
     );
+}
+
+// TASK-165: device authorization (RFC 8628): the link and the user code,
+// no address field.
+
+const USER_CODE: &str = "WDJB-MJHT";
+
+fn device_link() -> String {
+    format!("https://auth.example.com/device?user_code={USER_CODE}")
+}
+
+fn device_prompt(complete: bool) -> SignInPrompt {
+    let code = DeviceCode {
+        user_code: Zeroizing::new(USER_CODE.into()),
+        verification_uri: "https://auth.example.com/device".into(),
+        verification_uri_complete: complete.then(|| Zeroizing::new(device_link())),
+        expires_in: 900,
+    };
+    SignInPrompt {
+        id: "mcp.docs".into(),
+        title: "Authorize MCP server docs".into(),
+        url: code.link().to_owned(),
+        forward: None,
+        no_browser: Some("this is an SSH session".into()),
+        device: Some(code),
+    }
+}
+
+#[test]
+fn a_device_code_shows_the_link_and_the_code_without_an_address_field() {
+    let m = Modal::new(device_prompt(true), 80, 30);
+    let text = m.text();
+    for s in [
+        "Authorize MCP server docs",
+        "No browser opened here (this is an SSH session).",
+        "check that it shows the code below",
+        &device_link(),
+        &format!("Code {USER_CODE}"),
+        "Or open this page and type the code:",
+        "expires in 15 minutes",
+        "[ copy link ]",
+        "[ copy code ]",
+        "[ cancel ]",
+        "c copy code",
+    ] {
+        assert!(text.contains(s), "{s}:\n{text}");
+    }
+    for s in [
+        "Address ›",
+        "[ submit ]",
+        "[ copy ssh command ]",
+        "127.0.0.1",
+    ] {
+        assert!(!text.contains(s), "{s}:\n{text}");
+    }
+    // Both links are OSC 8 hyperlinks to themselves.
+    let targets: Vec<&str> = m.links.iter().map(|l| l.url.as_str()).collect();
+    assert!(targets.contains(&device_link().as_str()), "{targets:?}");
+    assert!(
+        targets.contains(&"https://auth.example.com/device"),
+        "{targets:?}"
+    );
+    for l in &m.links {
+        assert_eq!(l.text, l.url, "short links fit on one row");
+    }
+    // The first button has the focus; the prompt's Debug hides the code.
+    assert_eq!(m.focused(), Some(COPY_LINK_ID));
+    let debug = format!("{:?}", m.modal);
+    assert!(!debug.contains(USER_CODE), "{debug}");
+
+    // Without a complete link: the page, and "enter" the code.
+    let m = Modal::new(device_prompt(false), 80, 30);
+    let text = m.text();
+    assert!(text.contains("enter the code below"), "{text}");
+    assert!(!text.contains("Or open this page"), "{text}");
+    assert_eq!(m.links.len(), 1);
+    assert_eq!(m.links[0].url, "https://auth.example.com/device");
+}
+
+#[test]
+fn device_keyboard_path_copies_and_cancels() {
+    let mut m = Modal::new(device_prompt(true), 80, 30);
+    // Enter activates the focused button; Tab and the arrows move.
+    assert!(matches!(
+        m.key("enter"),
+        SignInOutcome::Copy { what: "sign-in link", text } if text == device_link()
+    ));
+    m.key("tab");
+    assert_eq!(m.focused(), Some(COPY_CODE_ID));
+    assert!(matches!(
+        m.key("enter"),
+        SignInOutcome::Copy { what: "sign-in code", text } if text == USER_CODE
+    ));
+    m.key("right");
+    assert_eq!(m.focused(), Some(CANCEL_ID));
+    m.key("shift+tab");
+    assert_eq!(m.focused(), Some(COPY_CODE_ID));
+    // `c` copies the code and ctrl+y the link from anywhere.
+    assert!(matches!(
+        m.key("c"),
+        SignInOutcome::Copy { what: "sign-in code", text } if text == USER_CODE
+    ));
+    assert!(matches!(
+        m.key("ctrl+y"),
+        SignInOutcome::Copy {
+            what: "sign-in link",
+            ..
+        }
+    ));
+    // There is nothing to type or paste.
+    assert!(matches!(m.key("x"), SignInOutcome::Ignored));
+    assert!(matches!(
+        m.send(Event::Paste("http://127.0.0.1:1/callback?code=x".into())),
+        SignInOutcome::Ignored
+    ));
+    assert!(!m.text().contains("127.0.0.1"));
+    // Esc cancels the sign-in (the driver stops polling).
+    assert!(matches!(m.key("esc"), SignInOutcome::Cancel));
+
+    // Once it ended, Enter closes it.
+    m.modal
+        .finish(Err("the sign-in code expired before it was approved".into()));
+    m.draw();
+    assert!(m.text().contains("expired before it was approved"));
+    assert!(!m.text().contains("[ copy code ]"));
+    assert!(matches!(m.key("enter"), SignInOutcome::Close));
+}
+
+#[test]
+fn device_mouse_path_clicks_every_button() {
+    let mut m = Modal::new(device_prompt(true), 80, 30);
+    assert!(matches!(
+        m.click_text("[ copy link ]"),
+        SignInOutcome::Copy {
+            what: "sign-in link",
+            ..
+        }
+    ));
+    assert!(matches!(
+        m.click_text("[ copy code ]"),
+        SignInOutcome::Copy { what: "sign-in code", text } if text == USER_CODE
+    ));
+    // A click outside does not throw the sign-in away.
+    assert!(matches!(m.send(click(0, 0)), SignInOutcome::Ignored));
+    assert!(matches!(m.click_text("[ cancel ]"), SignInOutcome::Cancel));
+}
+
+#[test]
+fn app_device_sign_in_copies_the_code_and_cancels_by_key_or_mouse() {
+    for by_mouse in [false, true] {
+        let mut ui = Ui::new();
+        ui.send(type_text("draft"));
+        ui.core(CoreEvent::SignIn(device_prompt(true)));
+        assert!(ui.text().contains(USER_CODE), "{}", ui.text());
+        assert!(ui.app.hyperlinks().iter().any(|l| l.url == device_link()));
+        // `c` copies the code; it does not reach the chat input.
+        ui.send(vec![key("c")]);
+        assert_eq!(ui.app.draft(), "draft");
+        assert!(ui.app.take_effects().contains(&Effect::Copy {
+            what: "sign-in code".into(),
+            text: USER_CODE.into(),
+        }));
+        ui.click_text("[ copy code ]");
+        assert!(ui.app.take_effects().contains(&Effect::Copy {
+            what: "sign-in code".into(),
+            text: USER_CODE.into(),
+        }));
+        if by_mouse {
+            ui.click_text("[ cancel ]");
+        } else {
+            ui.send(keys("esc"));
+        }
+        assert_eq!(
+            ui.requests(),
+            vec![UiRequest::SignInCancel("mcp.docs".into())]
+        );
+        assert!(ui.app.sign_in().is_none());
+    }
 }
 
 #[tokio::test]

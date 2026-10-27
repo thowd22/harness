@@ -1,6 +1,7 @@
-//! OAuth for remote MCP servers: pasted codes and tokens never reach the
-//! logs, even at TRACE. A test binary of its own, so no other test thread
-//! fixes `tracing`'s per-callsite interest before this subscriber is set.
+//! OAuth for remote MCP servers: pasted codes, device codes, user codes and
+//! tokens never reach the logs, even at TRACE. A test binary of its own, so
+//! no other test thread fixes `tracing`'s per-callsite interest before this
+//! subscriber is set.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -77,6 +78,74 @@ async fn pasted_codes_and_tokens_never_reach_the_logs() {
     for secret in [
         code.as_str(),
         "wrong-attempt",
+        tokens.access_token.expose(),
+        tokens.refresh_token.as_ref().unwrap().expose(),
+    ] {
+        assert!(!logs.contains(secret), "{secret} leaked into the logs");
+    }
+}
+
+/// Shows device codes like a screen on another device, and approves
+/// them there.
+#[derive(Clone, Default)]
+struct Screen(Arc<std::sync::Mutex<Vec<harness_providers::signin::DeviceCode>>>);
+
+impl harness_mcp::auth::Browser for Screen {
+    fn open(&self, _: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn show_device_code(&self, code: &harness_providers::signin::DeviceCode) -> Result<(), String> {
+        self.0.lock().unwrap().push(code.clone());
+        let link = code.link().to_owned();
+        tokio::spawn(async move {
+            let _ = reqwest::get(&link).await;
+        });
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn device_codes_user_codes_and_tokens_never_reach_the_logs() {
+    let buf = LogBuf::default();
+    let writer = buf.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_writer(move || writer.clone())
+        .with_ansi(false)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let mock = MockOAuthServer::start(MockConfig {
+        device_authorization: true,
+        device_script: vec!["authorization_pending".into(), "slow_down".into()],
+        ..MockConfig::default()
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = McpTokenStore::new(dir.path().join("auth/mcp"));
+    let mut cfg = McpServer::http(mock.mcp_url());
+    cfg.auth = McpAuth::OAuth;
+    let screen = Screen::default();
+    Authorize::new("docs", &cfg, store.clone())
+        .unwrap()
+        .with_timeout(Duration::from_secs(20))
+        .with_device_grant(true)
+        .with_poll_unit(Duration::from_millis(10))
+        .run(&screen)
+        .await
+        .unwrap();
+    let shown = screen.0.lock().unwrap()[0].clone();
+    let device_code = mock.requests_to("/token")[0].param("device_code").unwrap();
+    let tokens = store.load("docs").unwrap().unwrap().tokens.unwrap();
+    let logs = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+    assert!(
+        logs.contains("MCP server authorized"),
+        "logging was captured"
+    );
+    for secret in [
+        device_code.as_str(),
+        shown.user_code.as_str(),
         tokens.access_token.expose(),
         tokens.refresh_token.as_ref().unwrap().expose(),
     ] {

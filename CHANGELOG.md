@@ -25,6 +25,17 @@ to built-in prompts, agents, workflows and `harness.ini` defaults.
   listener. See
   [docs/providers.md](docs/providers.md#signing-in-from-a-remote-or-headless-machine).
   No default changed.
+- MCP OAuth signs in with a code (the device authorization grant, RFC 8628)
+  when harness runs over SSH, without a display or in WSL and the server's
+  authorization server advertises a `device_authorization_endpoint`:
+  `harness login mcp <name>` and `/login mcp <name>` show a link and a short
+  code to approve on any device (copy them with `c`/`u` in the CLI,
+  `[ copy link ]`/`[ copy code ]` in the TUI) and poll until you approve,
+  honouring `interval`, `slow_down`, `access_denied` and expiry; Esc
+  cancels. Other servers and desktop sessions keep the browser, paste-back
+  and `ssh -L` flow; a server that refuses the device grant falls back to
+  it. See [docs/mcp.md](docs/mcp.md#signing-in-with-a-code-device-flow).
+  No default changed.
 
 ## [0.4.0] - 2026-10-24
 

@@ -116,12 +116,13 @@ pub(super) async fn start(d: &mut Driver, server: &str) {
             .await;
     }
     let (path, owned) = (d.login_path.clone(), server.to_owned());
+    let device = d.sign_ins.env.is_remote();
     super::signin::start(
         d,
         &format!("{SIGN_IN_PREFIX}{server}"),
         format!("Authorize MCP server {server}"),
         move |browser, mut paste| async move {
-            crate::login::mcp::authorize(&path, &owned, &browser, &mut paste).await
+            crate::login::mcp::authorize(&path, &owned, &browser, &mut paste, device).await
         },
     );
 }

@@ -392,6 +392,7 @@ fn sign_in_modal_wraps_and_scrolls() {
             url: fx.url("link"),
             forward: Some(format!("ssh -N -L 1455:127.0.0.1:1455 {}", fx.word("host"))),
             no_browser: Some(fx.word("why")),
+            device: None,
         });
         frames.extend(draw(&mut m, &mut it, &mut t));
         // A refused paste with a long reason, then a long failure.
@@ -401,11 +402,27 @@ fn sign_in_modal_wraps_and_scrolls() {
         frames.extend(draw(&mut m, &mut it, &mut t));
         m.finish(Err(fx.prose("err")));
         frames.extend(draw(&mut m, &mut it, &mut t));
+        // A device authorization: two links and a code.
+        let code = crate::signin::DeviceCode {
+            user_code: zeroize::Zeroizing::new(fx.word("usercode")),
+            verification_uri: fx.url("page"),
+            verification_uri_complete: Some(zeroize::Zeroizing::new(fx.url("complete"))),
+            expires_in: 600,
+        };
+        let mut m = SignInModal::new(SignInPrompt {
+            id: "mcp.y".into(),
+            title: fx.prose("devtitle"),
+            url: code.link().to_owned(),
+            forward: None,
+            no_browser: Some(fx.word("devwhy")),
+            device: Some(code),
+        });
+        frames.extend(draw(&mut m, &mut it, &mut t));
         if !check {
             return;
         }
         let mut tokens = fx.all();
-        tokens.extend(["copy ssh command", "Address", "close"]);
+        tokens.extend(["copy ssh command", "Address", "close", "copy code"]);
         assert_reachable("sign-in", &frames, &tokens);
     });
 }
@@ -884,6 +901,7 @@ mod affordances {
                 url: format!("https://auth.example/authorize?{}", "x".repeat(200)),
                 forward: Some("ssh -N -L 1455:127.0.0.1:1455 dev@10.0.0.2".into()),
                 no_browser: Some("this is an SSH session".into()),
+                device: None,
             },
         )));
         // It opens with the address field in view.

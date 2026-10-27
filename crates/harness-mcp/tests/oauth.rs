@@ -2,7 +2,9 @@
 //! server (`harness_mcp::auth::mock`): success (dynamic and pre-registered
 //! clients), denied consent, refresh, expired refresh token, revoked
 //! token, step-up scopes, issuer checks, and the refusal to authorize
-//! interactively outside `harness login mcp`.
+//! interactively outside `harness login mcp`; and the device authorization
+//! grant (RFC 8628): success, polling intervals, denial, expiry, timeout,
+//! cancel and the loopback fallback.
 
 mod common;
 
@@ -432,6 +434,7 @@ async fn oauth_refuses_cleartext_http_to_remote_hosts() {
             client_secret: None,
             kind: Registration::Dynamic,
             redirect_uri: None,
+            device_grant: false,
         },
         scopes: vec![],
         step_up_scopes: vec![],
@@ -579,4 +582,327 @@ async fn the_port_forward_carries_the_browser_back() {
     let (r, ()) = tokio::join!(flow.run_with(&browser, &mut rx), user);
     r.unwrap();
     assert!(s.stored_access().is_some());
+}
+
+// TASK-165: the device authorization grant (RFC 8628) for servers that
+// advertise it, used when the browser is on another machine.
+
+/// One of the server's seconds in these tests.
+const UNIT: Duration = Duration::from_millis(20);
+
+/// A screen on another device: records every device code shown and, when
+/// `approve`, opens its link like a user who confirms the code. Loopback
+/// links are only recorded.
+#[derive(Clone, Default)]
+struct Screen {
+    approve: bool,
+    shown: Arc<std::sync::Mutex<Vec<harness_providers::signin::DeviceCode>>>,
+    opened: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl Screen {
+    fn approving() -> Self {
+        Self {
+            approve: true,
+            ..Self::default()
+        }
+    }
+
+    fn shown(&self) -> Vec<harness_providers::signin::DeviceCode> {
+        self.shown.lock().unwrap().clone()
+    }
+}
+
+impl harness_mcp::auth::Browser for Screen {
+    fn open(&self, url: &str) -> Result<(), String> {
+        self.opened.lock().unwrap().push(url.to_owned());
+        Ok(())
+    }
+
+    fn show_device_code(&self, code: &harness_providers::signin::DeviceCode) -> Result<(), String> {
+        self.shown.lock().unwrap().push(code.clone());
+        if self.approve {
+            let link = code.link().to_owned();
+            tokio::spawn(async move {
+                let _ = reqwest::get(&link).await;
+            });
+        }
+        Ok(())
+    }
+}
+
+fn device_config() -> MockConfig {
+    MockConfig {
+        device_authorization: true,
+        ..MockConfig::default()
+    }
+}
+
+impl Setup {
+    fn device(&self) -> Authorize {
+        self.authorize()
+            .with_device_grant(true)
+            .with_poll_unit(UNIT)
+    }
+}
+
+/// Times of the device-grant polls.
+fn polls(mock: &MockOAuthServer) -> Vec<std::time::Instant> {
+    mock.requests_to("/token")
+        .into_iter()
+        .filter(|r| {
+            r.param("grant_type").as_deref() == Some(harness_mcp::auth::device::DEVICE_GRANT)
+        })
+        .map(|r| r.at)
+        .collect()
+}
+
+#[tokio::test]
+async fn device_grant_shows_the_code_and_stores_the_tokens() {
+    let s = setup(device_config()).await;
+    let screen = Screen::approving();
+    let done = s.device().run(&screen).await.unwrap();
+    assert_eq!(done.registration, Registration::Dynamic);
+    assert!(done.refreshable);
+
+    // No loopback redirect: nothing was opened, /authorize never asked.
+    assert!(screen.opened.lock().unwrap().is_empty());
+    assert!(s.mock.requests_to("/authorize").is_empty());
+    let shown = screen.shown();
+    assert_eq!(shown.len(), 1);
+    let code = &shown[0];
+    assert!(code.user_code.starts_with("WDJB-"));
+    assert_eq!(code.verification_uri, format!("{}/device", s.mock.base_url));
+    assert_eq!(
+        code.link(),
+        format!("{}/device?user_code={}", s.mock.base_url, *code.user_code)
+    );
+    assert_eq!(code.expires_in, 600);
+
+    // The registration asks for the device grant; the device request and
+    // the poll carry the client, the resource and (request only) scopes.
+    let reg = &s.mock.requests_to("/register")[0];
+    assert!(
+        reg.body
+            .contains("urn:ietf:params:oauth:grant-type:device_code"),
+        "{}",
+        reg.body
+    );
+    let dev = &s.mock.requests_to("/device_authorization")[0];
+    assert_eq!(
+        dev.param("client_id"),
+        Some(s.mock.dynamic_clients()[0].clone())
+    );
+    assert_eq!(dev.param("resource"), Some(s.mock.mcp_url()));
+    assert_eq!(
+        dev.param("scope").as_deref(),
+        Some(format!("{MOCK_SCOPE} offline_access").as_str())
+    );
+    let poll = s.mock.requests_to("/token").pop().unwrap();
+    assert!(
+        poll.param("device_code")
+            .unwrap()
+            .starts_with("device-secret-")
+    );
+    assert_eq!(poll.param("resource"), Some(s.mock.mcp_url()));
+    assert!(poll.param("code_verifier").is_none());
+
+    // The tokens are in the MCP token store, and MCP requests use them.
+    assert!(s.stored_access().is_some());
+    let h = s.handle();
+    assert!(!h.list_tools().await.unwrap().is_empty());
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn device_polling_honours_interval_pending_and_slow_down() {
+    let s = setup(MockConfig {
+        device_interval: Some(2),
+        device_script: vec![
+            "authorization_pending".into(),
+            "slow_down".into(),
+            "authorization_pending".into(),
+        ],
+        ..device_config()
+    })
+    .await;
+    s.device().run(&Screen::approving()).await.unwrap();
+    let start = s.mock.requests_to("/device_authorization")[0].at;
+    let polls_at = polls(&s.mock);
+    assert_eq!(polls_at.len(), 4, "pending, slow_down, pending, success");
+    let times: Vec<std::time::Instant> = std::iter::once(start).chain(polls_at).collect();
+    let gaps: Vec<Duration> = times.windows(2).map(|w| w[1] - w[0]).collect();
+    // `interval` (2) before the first poll and after authorization_pending;
+    // 5 more after slow_down, and it stays slower.
+    for g in &gaps[..2] {
+        assert!(*g >= UNIT * 2, "{gaps:?}");
+    }
+    for g in &gaps[2..] {
+        assert!(*g >= UNIT * 7, "{gaps:?}");
+    }
+    assert!(s.stored_access().is_some());
+
+    // Without `interval` the client waits the RFC's 5 seconds.
+    let s = setup(MockConfig {
+        device_interval: None,
+        ..device_config()
+    })
+    .await;
+    s.device().run(&Screen::approving()).await.unwrap();
+    let start = s.mock.requests_to("/device_authorization")[0].at;
+    assert!(polls(&s.mock)[0] - start >= UNIT * 5);
+}
+
+#[tokio::test]
+async fn device_denial_saves_no_tokens() {
+    let s = setup(MockConfig {
+        deny: true,
+        ..device_config()
+    })
+    .await;
+    let e = s.device().run(&Screen::approving()).await.unwrap_err();
+    assert_eq!(e, AuthError::Denied);
+    assert!(s.stored_access().is_none());
+}
+
+#[tokio::test]
+async fn device_codes_expire_and_abandoned_ones_time_out() {
+    // The server says the code expired.
+    let s = setup(MockConfig {
+        device_script: vec!["authorization_pending".into(), "expired_token".into()],
+        ..device_config()
+    })
+    .await;
+    let e = s.device().run(&Screen::approving()).await.unwrap_err();
+    assert_eq!(e, AuthError::DeviceExpired);
+    assert!(e.to_string().contains("run the sign-in again"), "{e}");
+    assert!(s.stored_access().is_none());
+
+    // Nobody approves: harness stops at `expires_in` by itself.
+    let s = setup(MockConfig {
+        device_expires_in: 5,
+        ..device_config()
+    })
+    .await;
+    let e = s.device().run(&Screen::default()).await.unwrap_err();
+    assert_eq!(e, AuthError::DeviceExpired);
+
+    // ... or at its own timeout, when that comes first.
+    let s = setup(device_config()).await;
+    let e = s
+        .device()
+        .with_timeout(Duration::from_millis(150))
+        .run(&Screen::default())
+        .await
+        .unwrap_err();
+    assert!(matches!(e, AuthError::Timeout(_)), "{e}");
+    assert!(s.stored_access().is_none());
+}
+
+#[tokio::test]
+async fn cancelling_a_device_grant_stops_polling() {
+    let s = setup(device_config()).await;
+    let screen = Screen::default();
+    let flow = s.device();
+    tokio::select! {
+        r = flow.run(&screen) => panic!("nobody approved: {r:?}"),
+        () = async {
+            while polls(&s.mock).len() < 2 {
+                tokio::time::sleep(UNIT).await;
+            }
+        } => {}
+    }
+    // The flow future is dropped: no more polls, and approving now is moot.
+    let n = polls(&s.mock).len();
+    let link = screen.shown()[0].link().to_owned();
+    reqwest::get(&link).await.unwrap();
+    tokio::time::sleep(UNIT * 10).await;
+    assert_eq!(polls(&s.mock).len(), n);
+    assert!(s.stored_access().is_none());
+}
+
+#[tokio::test]
+async fn without_the_endpoint_or_on_a_desktop_the_loopback_flow_is_unchanged() {
+    // The server offers no device grant: the loopback redirect, as before.
+    let s = setup(MockConfig::default()).await;
+    let browser = MockBrowser::new();
+    s.device().run(&browser).await.unwrap();
+    assert_eq!(browser.opened().len(), 1);
+    assert!(
+        !s.mock.requests_to("/register")[0]
+            .body
+            .contains("device_code")
+    );
+
+    // A desktop session does not ask for it even when the server offers it.
+    let s = setup(device_config()).await;
+    let browser = MockBrowser::new();
+    s.authorize().run(&browser).await.unwrap();
+    assert_eq!(browser.opened().len(), 1);
+    assert!(s.mock.requests_to("/device_authorization").is_empty());
+    assert!(
+        !s.mock.requests_to("/register")[0]
+            .body
+            .contains("device_code")
+    );
+    assert_eq!(
+        s.mock.requests_to("/token")[0]
+            .param("grant_type")
+            .as_deref(),
+        Some("authorization_code")
+    );
+
+    // Over SSH against a server without it, paste-back still works.
+    let s = setup(MockConfig::default()).await;
+    let browser = MockBrowser::remote();
+    let (tx, mut rx) = harness_providers::signin::paste_channel();
+    let flow = s.device();
+    let user = async {
+        let address = browser.next_redirect().await;
+        assert_eq!(paste(&tx, &address).await, Ok(()));
+    };
+    let (r, ()) = tokio::join!(flow.run_with(&browser, &mut rx), user);
+    r.unwrap();
+    assert!(s.stored_access().is_some());
+}
+
+#[tokio::test]
+async fn a_refused_device_grant_falls_back_to_the_loopback_flow() {
+    // The server refuses the device grant for this client
+    // (unauthorized_client): the same run continues with the redirect,
+    // and paste-back works as before.
+    let s = setup(MockConfig {
+        device_refuse: Some("unauthorized_client".into()),
+        ..device_config()
+    })
+    .await;
+    let browser = MockBrowser::remote();
+    let (tx, mut rx) = harness_providers::signin::paste_channel();
+    let flow = s.device();
+    let user = async {
+        let address = browser.next_redirect().await;
+        assert_eq!(paste(&tx, &address).await, Ok(()));
+    };
+    let (r, ()) = tokio::join!(flow.run_with(&browser, &mut rx), user);
+    r.unwrap();
+    assert_eq!(s.mock.requests_to("/device_authorization").len(), 1);
+    assert_eq!(browser.opened().len(), 1, "fell back to the redirect");
+    assert!(s.stored_access().is_some());
+}
+
+#[tokio::test]
+async fn a_registration_without_the_device_grant_is_replaced_for_it() {
+    // A loopback login registered harness without the device grant; the
+    // first device login registers again, later ones reuse that.
+    let s = setup(device_config()).await;
+    s.authorize().run(&MockBrowser::new()).await.unwrap();
+    s.device().run(&Screen::approving()).await.unwrap();
+    assert_eq!(s.mock.requests_to("/register").len(), 2);
+    let record = s.store.load("docs").unwrap().unwrap();
+    assert!(record.client.device_grant);
+    s.device().run(&Screen::approving()).await.unwrap();
+    assert_eq!(s.mock.requests_to("/register").len(), 2);
+    // A loopback login keeps using it too.
+    s.authorize().run(&MockBrowser::new()).await.unwrap();
+    assert_eq!(s.mock.requests_to("/register").len(), 2);
 }

@@ -235,3 +235,105 @@ async fn mcp_over_ssh_takes_the_pasted_address() {
             .contains("auth = oauth")
     );
 }
+
+/// TASK-165: a TUI harness with `[mcp.docs]` on a mock that offers the
+/// device grant, over SSH.
+async fn device_harness(
+    env: &Env,
+) -> (
+    Harness,
+    PathBuf,
+    harness_mcp::auth::mock::MockOAuthServer,
+    Arc<harness_mcp::auth::mock::MockBrowser>,
+) {
+    use harness_mcp::auth::mock::{MockBrowser, MockConfig, MockOAuthServer};
+    let mock = MockOAuthServer::start(MockConfig {
+        device_authorization: true,
+        ..MockConfig::default()
+    })
+    .await;
+    let script = env.script(TEXT);
+    let ini_text = format!(
+        "[general]\ndata_dir = {}\n\n[mcp.docs]\nurl = {}\n",
+        env.root.join("data").display(),
+        mock.mcp_url()
+    );
+    let mut h = Harness::with_ini(env, &script, false, &ini_text).await;
+    let ini = env.root.join("cfg").join("harness.ini");
+    std::fs::create_dir_all(ini.parent().unwrap()).unwrap();
+    std::fs::write(&ini, &ini_text).unwrap();
+    h.d.login_path = ini.clone();
+    let local = Arc::new(MockBrowser::new());
+    h.d.browser = local.clone();
+    h.d.sign_ins.env = over_ssh();
+    (h, ini, mock, local)
+}
+
+#[tokio::test]
+async fn mcp_over_ssh_shows_a_device_code_and_approving_it_authorizes() {
+    use harness_mcp::auth::mock::MockBrowser;
+    let env = Env::new();
+    let (mut h, ini, mock, local) = device_harness(&env).await;
+    h.d.request(UiRequest::Submit("/login mcp docs".into()))
+        .await;
+    let p = prompt(&mut h, "mcp.docs").await;
+    let device = p.device.clone().expect("a device code");
+    assert_eq!(p.url, device.link());
+    assert!(p.url.contains(device.user_code.as_str()));
+    assert_eq!(p.no_browser.as_deref(), Some("this is an SSH session"));
+    assert_eq!(p.forward, None, "nothing comes back to forward");
+    assert!(local.opened().is_empty(), "no local browser over SSH");
+    assert!(mock.requests_to("/authorize").is_empty());
+
+    // The user approves on their own machine; harness finishes by itself.
+    MockBrowser::remote().open(&p.url).unwrap();
+    h.until(|e| matches!(e, AppEvent::Core(CoreEvent::Notify { title, .. }) if title == "MCP server docs authorized"))
+        .await;
+    h.until(|e| matches!(e, AppEvent::Core(CoreEvent::SignInDone { id, result: Ok(_) }) if id == "mcp.docs"))
+        .await;
+    assert!(
+        std::fs::read_to_string(&ini)
+            .unwrap()
+            .contains("auth = oauth")
+    );
+    let cfg = harness_config::ini::load_file(&ini).unwrap();
+    let store = crate::wiring::mcp_token_store(&cfg);
+    assert!(store.has_tokens("docs"));
+    // The device code and the tokens never reach the UI events; their
+    // Debug form hides the user code too.
+    let device_code = mock.requests_to("/token")[0].param("device_code").unwrap();
+    let seen = format!("{:?}", h.seen);
+    assert!(
+        !seen.contains(&device_code),
+        "the device code reached the UI"
+    );
+    assert!(!seen.contains(device.user_code.as_str()));
+    for t in store.secrets() {
+        assert!(!seen.contains(t.as_str()), "a token reached the UI");
+    }
+}
+
+#[tokio::test]
+async fn cancelling_a_device_sign_in_stops_polling() {
+    use harness_mcp::auth::mock::MockBrowser;
+    let env = Env::new();
+    let (mut h, ini, mock, _) = device_harness(&env).await;
+    h.d.request(UiRequest::Submit("/login mcp docs".into()))
+        .await;
+    let p = prompt(&mut h, "mcp.docs").await;
+    assert!(p.device.is_some());
+    // Esc in the modal sends this; the approval comes too late.
+    h.d.request(UiRequest::SignInCancel("mcp.docs".into()))
+        .await;
+    MockBrowser::remote().open(&p.url).unwrap();
+    // The mock's interval is 1 s: a running flow would have polled.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(mock.requests_to("/token").is_empty(), "polling stopped");
+    assert!(!std::fs::read_to_string(&ini).unwrap().contains("auth ="));
+    assert!(
+        !h.seen.iter().any(
+            |e| matches!(e, AppEvent::Core(CoreEvent::SignInDone { id, .. }) if id == "mcp.docs")
+        ),
+        "a cancelled sign-in reports nothing"
+    );
+}

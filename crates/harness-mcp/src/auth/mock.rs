@@ -20,7 +20,15 @@
 //!   (or `error=access_denied` when [`MockConfig::deny`]), `state` and `iss`.
 //! - `POST /token`: the code exchange (checks PKCE, client, redirect URI
 //!   and `resource`) and refresh (rotating the refresh token, or failing
-//!   with [`MockConfig::refresh_error`]).
+//!   with [`MockConfig::refresh_error`]), and the device grant: answers
+//!   [`MockConfig::device_script`] first, then `authorization_pending`
+//!   until the user code is approved (or declined) at `/device`.
+//! - With [`MockConfig::device_authorization`] (RFC 8628):
+//!   `POST /device_authorization` hands out a device code and user code
+//!   (dynamic clients must have registered the device grant, else
+//!   `unauthorized_client`), and `GET /device?user_code=…` is the
+//!   verification page: visiting it approves the code, or declines it when
+//!   [`MockConfig::deny`].
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -31,6 +39,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+use super::device::DEVICE_GRANT;
 use super::{Browser, parse_query};
 use crate::test_server::{HttpServer, Options};
 
@@ -61,6 +70,19 @@ pub struct MockConfig {
     pub wrong_callback_iss: Option<String>,
     /// MCP requests need this scope (else `403 insufficient_scope`).
     pub required_scope: Option<String>,
+    /// Advertise and serve the device grant (RFC 8628). Default false.
+    pub device_authorization: bool,
+    /// The device authorization's `interval` (`None`: not sent). Default 1.
+    pub device_interval: Option<u64>,
+    /// The device authorization's `expires_in`. Default 600.
+    pub device_expires_in: u64,
+    /// Send `verification_uri_complete`. Default true.
+    pub device_complete: bool,
+    /// The device authorization endpoint answers with this OAuth error.
+    pub device_refuse: Option<String>,
+    /// OAuth errors the token endpoint answers to device polls, in order,
+    /// before it looks at the approval (`slow_down`, `expired_token`, …).
+    pub device_script: Vec<String>,
 }
 
 impl Default for MockConfig {
@@ -75,6 +97,12 @@ impl Default for MockConfig {
             wrong_issuer: None,
             wrong_callback_iss: None,
             required_scope: None,
+            device_authorization: false,
+            device_interval: Some(1),
+            device_expires_in: 600,
+            device_complete: true,
+            device_refuse: None,
+            device_script: Vec::new(),
         }
     }
 }
@@ -93,6 +121,8 @@ pub struct MockRequest {
     pub headers: Vec<(String, String)>,
     /// The body.
     pub body: String,
+    /// When it arrived.
+    pub at: std::time::Instant,
 }
 
 impl MockRequest {
@@ -122,11 +152,30 @@ struct Grant {
     scope: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Approval {
+    Pending,
+    Approved,
+    Denied,
+}
+
+struct Device {
+    user_code: String,
+    client_id: String,
+    resource: String,
+    scope: String,
+    approval: Approval,
+}
+
 #[derive(Default)]
 struct State {
     config: MockConfig,
     counter: u64,
     clients: HashMap<String, Vec<String>>,
+    /// Grant types each dynamic client registered.
+    grants: HashMap<String, Vec<String>>,
+    /// Device authorizations by device code.
+    devices: HashMap<String, Device>,
     codes: HashMap<String, Grant>,
     /// Valid access tokens and their scopes.
     access: HashMap<String, String>,
@@ -313,6 +362,7 @@ async fn serve(
         query: parse_query(query),
         headers,
         body: String::from_utf8_lossy(&body).into_owned(),
+        at: std::time::Instant::now(),
     };
     st.lock().expect("lock").requests.push(req.clone());
     let reply = if req.path == "/mcp" {
@@ -443,6 +493,11 @@ fn handle(st: &Mutex<State>, base: &str, req: &MockRequest) -> Reply {
             if s.config.dynamic_registration {
                 m["registration_endpoint"] = json!(format!("{base}/register"));
             }
+            if s.config.device_authorization {
+                m["device_authorization_endpoint"] = json!(format!("{base}/device_authorization"));
+                m["grant_types_supported"] =
+                    json!(["authorization_code", "refresh_token", DEVICE_GRANT]);
+            }
             Reply::json(200, m)
         }
         ("POST", "/register") if s.config.dynamic_registration => {
@@ -460,6 +515,15 @@ fn handle(st: &Mutex<State>, base: &str, req: &MockRequest) -> Reply {
             }
             let id = format!("dyn-client-{n}");
             s.clients.insert(id.clone(), uris.clone());
+            let grants = v["grant_types"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|g| g.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default();
+            s.grants.insert(id.clone(), grants);
             Reply::json(
                 201,
                 json!({"client_id": id, "redirect_uris": uris, "token_endpoint_auth_method": "none"}),
@@ -505,9 +569,76 @@ fn handle(st: &Mutex<State>, base: &str, req: &MockRequest) -> Reply {
             let refs: Vec<(&str, &str)> = q.iter().map(|(k, v)| (*k, v.as_str())).collect();
             Reply::redirect(format!("{redirect}?{}", super::form_encode(&refs)))
         }
+        ("POST", "/device_authorization") if s.config.device_authorization => {
+            device_authorization(&mut s, n, base, req)
+        }
+        ("GET", "/device") => {
+            if let Some(code) = req.param("user_code") {
+                let deny = s.config.deny;
+                let Some(d) = s.devices.values_mut().find(|d| d.user_code == code) else {
+                    return Reply::json(400, json!({"error": "unknown code"}));
+                };
+                d.approval = if deny {
+                    Approval::Denied
+                } else {
+                    Approval::Approved
+                };
+            }
+            Reply {
+                status: 200,
+                content_type: "text/html".into(),
+                headers: Vec::new(),
+                body: b"<p>Enter the code shown by your device.</p>".to_vec(),
+            }
+        }
         ("POST", "/token") => token(&mut s, n, req),
         _ => Reply::json(404, json!({"error": "not_found"})),
     }
+}
+
+fn device_authorization(s: &mut State, n: u64, base: &str, req: &MockRequest) -> Reply {
+    let p = |k: &str| req.param(k).unwrap_or_default();
+    if let Some(code) = &s.config.device_refuse {
+        return Reply::json(400, json!({"error": code}));
+    }
+    let client_id = p("client_id");
+    if !s.clients.contains_key(&client_id) {
+        return Reply::json(401, json!({"error": "invalid_client"}));
+    }
+    if s.grants
+        .get(&client_id)
+        .is_some_and(|g| !g.iter().any(|g| g == DEVICE_GRANT))
+    {
+        return Reply::json(400, json!({"error": "unauthorized_client"}));
+    }
+    if p("resource").is_empty() {
+        return Reply::json(400, json!({"error": "invalid_request"}));
+    }
+    let device_code = format!("device-secret-{n}");
+    let user_code = format!("WDJB-{n:04}");
+    s.devices.insert(
+        device_code.clone(),
+        Device {
+            user_code: user_code.clone(),
+            client_id,
+            resource: p("resource"),
+            scope: p("scope"),
+            approval: Approval::Pending,
+        },
+    );
+    let mut out = json!({
+        "device_code": device_code,
+        "user_code": user_code,
+        "verification_uri": format!("{base}/device"),
+        "expires_in": s.config.device_expires_in,
+    });
+    if s.config.device_complete {
+        out["verification_uri_complete"] = json!(format!("{base}/device?user_code={user_code}"));
+    }
+    if let Some(i) = s.config.device_interval {
+        out["interval"] = json!(i);
+    }
+    Reply::json(200, out)
 }
 
 fn token(s: &mut State, n: u64, req: &MockRequest) -> Reply {
@@ -537,6 +668,30 @@ fn token(s: &mut State, n: u64, req: &MockRequest) -> Reply {
             match s.refresh.remove(&p("refresh_token")) {
                 Some((c, scope)) if c == p("client_id") => (c, scope),
                 _ => return bad("invalid_grant"),
+            }
+        }
+        DEVICE_GRANT => {
+            let code = p("device_code");
+            let Some(d) = s.devices.get(&code) else {
+                return bad("invalid_grant");
+            };
+            if d.client_id != p("client_id") || d.resource != p("resource") {
+                return bad("invalid_grant");
+            }
+            if !s.config.device_script.is_empty() {
+                let e = s.config.device_script.remove(0);
+                return bad(&e);
+            }
+            match d.approval {
+                Approval::Pending => return bad("authorization_pending"),
+                Approval::Denied => {
+                    s.devices.remove(&code);
+                    return bad("access_denied");
+                }
+                Approval::Approved => {
+                    let d = s.devices.remove(&code).expect("present");
+                    (d.client_id, d.scope)
+                }
             }
         }
         _ => return bad("unsupported_grant_type"),

@@ -13,9 +13,12 @@
 //!   on a real callback) and answers whether it took it.
 //! - **Port forwarding**: over SSH, [`port_forward_command`] is the
 //!   `ssh -L` command that carries the redirect to this machine.
-//! - Device authorization is not offered: OpenAI documents only the
-//!   loopback flow for this client, and the MCP authorization spec defines
-//!   only the authorization code flow.
+//! - **Device authorization** (RFC 8628), for MCP servers whose
+//!   authorization server advertises a `device_authorization_endpoint`:
+//!   no loopback redirect at all; the user opens a link on any device and
+//!   confirms a short code ([`DeviceCode`], shown through
+//!   `Browser::show_device_code`). Sign in with ChatGPT does not offer it:
+//!   OpenAI documents only the loopback flow for this client.
 //!
 //! [`Environment`] decides whether opening a local browser makes sense.
 //! Pasted text contains a one-time code; it is held in [`Zeroizing`]
@@ -184,6 +187,83 @@ impl Instructions {
                 ));
             }
         }
+        out
+    }
+}
+
+/// A device authorization (RFC 8628) to show the user: the code to
+/// confirm and where. The user code and the complete link (which carries
+/// it) are for the user's eyes only: `Debug` hides them, and they are
+/// never logged.
+#[derive(Clone, PartialEq, Eq)]
+pub struct DeviceCode {
+    /// The code the user enters or confirms (`user_code`).
+    pub user_code: Zeroizing<String>,
+    /// The page where the user enters it (`verification_uri`).
+    pub verification_uri: String,
+    /// The same page with the code filled in
+    /// (`verification_uri_complete`), when the server sends one.
+    pub verification_uri_complete: Option<Zeroizing<String>>,
+    /// Seconds until the code expires (`expires_in`).
+    pub expires_in: u64,
+}
+
+impl std::fmt::Debug for DeviceCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceCode")
+            .field("verification_uri", &self.verification_uri)
+            .field("user_code", &"[shown to the user]")
+            .field("expires_in", &self.expires_in)
+            .finish_non_exhaustive()
+    }
+}
+
+impl DeviceCode {
+    /// The link to open: the complete one when the server sent it, else
+    /// the page where the code is typed.
+    pub fn link(&self) -> &str {
+        self.verification_uri_complete
+            .as_deref()
+            .map_or(self.verification_uri.as_str(), String::as_str)
+    }
+
+    /// How long the code lasts, for messages (`10 minutes`).
+    pub fn lifetime(&self) -> String {
+        match self.expires_in {
+            s if s >= 120 => format!("{} minutes", s / 60),
+            s => format!("{s} seconds"),
+        }
+    }
+
+    /// Plain-text lines for a terminal: the link and the code each on a
+    /// line of their own (never cut), so the terminal's selection copies
+    /// them. `no_browser`: why no browser was opened here.
+    pub fn lines(&self, what: &str, no_browser: Option<&str>) -> Vec<String> {
+        let mut out = vec![match no_browser {
+            Some(why) => format!(
+                "Not opening a browser here ({why}). To {what}, open this link in a browser on any device:"
+            ),
+            None => format!(
+                "Opening your browser to {what}. If it does not open, visit this link on any device:"
+            ),
+        }];
+        out.push(self.link().to_owned());
+        out.push(if self.verification_uri_complete.is_some() {
+            "and check that it shows this code:".into()
+        } else {
+            "and enter this code:".into()
+        });
+        out.push(self.user_code.to_string());
+        if self.verification_uri_complete.is_some() {
+            out.push(format!(
+                "(Or open {} and type the code.)",
+                self.verification_uri
+            ));
+        }
+        out.push(format!(
+            "The code expires in {}. Nothing needs to be pasted back here.",
+            self.lifetime()
+        ));
         out
     }
 }
@@ -446,6 +526,34 @@ mod tests {
         let h = hyperlink("https://a\x07.example/\x1b]0;x", "t\x1bx");
         assert_eq!(h.matches('\x1b').count(), 4);
         assert!(!h.contains('\x07'));
+    }
+
+    #[test]
+    fn device_codes_show_link_and_code_but_debug_hides_them() {
+        let mut d = DeviceCode {
+            user_code: Zeroizing::new("WDJB-MJHT".into()),
+            verification_uri: "https://auth.example/device".into(),
+            verification_uri_complete: Some(Zeroizing::new(
+                "https://auth.example/device?user_code=WDJB-MJHT".into(),
+            )),
+            expires_in: 900,
+        };
+        assert_eq!(d.link(), "https://auth.example/device?user_code=WDJB-MJHT");
+        let lines = d.lines("authorize MCP server docs", Some("this is an SSH session"));
+        assert!(lines[0].contains("Not opening a browser here (this is an SSH session)"));
+        assert_eq!(lines[1], d.link(), "the link is a line of its own");
+        assert_eq!(lines[3], "WDJB-MJHT", "the code is a line of its own");
+        assert!(lines[4].contains("https://auth.example/device and type"));
+        assert!(lines[5].contains("15 minutes"));
+        let debug = format!("{d:?}");
+        assert!(!debug.contains("WDJB"), "{debug}");
+        d.verification_uri_complete = None;
+        d.expires_in = 30;
+        assert_eq!(d.link(), "https://auth.example/device");
+        let lines = d.lines("x", None);
+        assert!(lines[0].starts_with("Opening your browser"));
+        assert_eq!(lines[2], "and enter this code:");
+        assert!(lines[4].contains("30 seconds"));
     }
 
     #[tokio::test]
