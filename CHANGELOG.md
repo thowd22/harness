@@ -11,6 +11,8 @@ to built-in prompts, agents, workflows and `harness.ini` defaults.
 
 ## Unreleased
 
+## [0.6.0] - 2026-10-28
+
 ### Added
 
 - Sign in with ChatGPT shows the models your plan actually includes: harness
