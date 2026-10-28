@@ -11,6 +11,24 @@ to built-in prompts, agents, workflows and `harness.ini` defaults.
 
 ## Unreleased
 
+### Added
+
+- Sign in with ChatGPT shows the models your plan actually includes: harness
+  fetches the signed-in account's model list from OpenAI and lists it in
+  `/model` and `harness models` in OpenAI's order with its display names
+  (for example GPT-6-Astra, GPT-5.6-Sol). It is cached per account and
+  fetched again after each sign-in. Before it has been fetched, the GPT-5
+  and later and Codex families count as plan models.
+- Models that only a live model list knows (new Claude models from
+  Anthropic's list, new OpenRouter models, the ChatGPT plan models) now run
+  with that list's context window, output limit, thinking, image support
+  and price instead of the conservative 32k defaults.
+
+### Changed
+
+- OpenAI models named `gpt-6` and later are treated like `gpt-5`: they get
+  reasoning effort and the GPT-5 limits when nothing better is known.
+
 ## [0.5.1] - 2026-10-27
 
 ### Fixed

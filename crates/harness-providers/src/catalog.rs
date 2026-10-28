@@ -44,7 +44,9 @@ pub use service::{CatalogConfig, CatalogService, Clock, RefreshReport};
 
 use crate::model::Capabilities;
 use crate::pricing::Price;
-use crate::registry::{CONSERVATIVE_CAPABILITIES, ModelInfo, ModelRef, OPENROUTER, Registry};
+use crate::registry::{
+    CONSERVATIVE_CAPABILITIES, ModelInfo, ModelRef, OPENROUTER, Registry, ThinkingStyle,
+};
 
 /// Providers in display order. Other providers sort after these, by name.
 pub const PROVIDER_ORDER: &[&str] = &["anthropic", "openai", "openrouter"];
@@ -314,11 +316,12 @@ pub struct Catalog {
     refreshing: bool,
 }
 
-/// True for OpenAI models that Sign in with ChatGPT can use: the GPT-5 and
-/// Codex families with tool support. This is the best-known rule for plan
-/// access; models outside it need an API key.
+/// True for OpenAI models that Sign in with ChatGPT can use, by name: GPT-5
+/// and later and the Codex family, with tool support. The account's own
+/// model list ([`live::ListKind::ChatGpt`]) replaces this rule whenever it
+/// has been fetched; the rule is the fallback before that.
 pub fn chatgpt_plan_model(model: &str) -> bool {
-    (model.starts_with("gpt-5") || model.starts_with("codex"))
+    (crate::openai::is_gpt5_or_later(model) || model.starts_with("codex"))
         && live::openai_is_chat_model(model)
         && live::openai_supports_tools(model)
 }
@@ -381,14 +384,34 @@ impl Catalog {
             }
         }
 
+        // The signed-in ChatGPT account's own list, once fetched, says
+        // exactly which models the plan covers.
+        let plan_list = live
+            .get(crate::openai::PROVIDER_NAME)
+            .is_some_and(|l| l.models.iter().any(|m| m.plan == Some(true)));
+        let mut ranks: BTreeMap<ModelRef, u32> = BTreeMap::new();
         let mut entries = Vec::new();
         for (reference, c) in candidates {
+            if let Some(rank) = c.live.as_ref().and_then(|l| l.rank) {
+                ranks.insert(reference.clone(), rank);
+            }
             let names = aliases.remove(&reference).unwrap_or_default();
-            entries.extend(entries_for(registry, credentials, &reference, &c, names));
+            entries.extend(entries_for(
+                registry,
+                credentials,
+                &reference,
+                &c,
+                names,
+                plan_list,
+            ));
         }
+        // Within a provider, a server-ordered list keeps its order and comes
+        // first; everything else is sorted by id.
+        let rank = |e: &CatalogEntry| ranks.get(&e.reference).copied().unwrap_or(u32::MAX);
         entries.sort_by(|a, b| {
             provider_rank(a.provider())
                 .cmp(&provider_rank(b.provider()))
+                .then_with(|| rank(a).cmp(&rank(b)))
                 .then_with(|| a.model().cmp(b.model()))
                 .then_with(|| a.auth.cmp(&b.auth))
         });
@@ -400,7 +423,8 @@ impl Catalog {
     }
 
     /// Every entry, grouped by provider ([`PROVIDER_ORDER`] first) and
-    /// sorted by model id.
+    /// sorted by model id; a list the server orders for display (the
+    /// ChatGPT account's) keeps that order at the top of its provider.
     pub fn entries(&self) -> &[CatalogEntry] {
         &self.entries
     }
@@ -487,6 +511,41 @@ fn unavailable_reason(provider: &str, status: &AuthStatus) -> Option<String> {
     }
 }
 
+/// Runtime facts for a model only a live list knows: the list's limits and
+/// capabilities, with [`fallback_capabilities`] for whatever it leaves out.
+/// A model that reasons gets adaptive thinking on Anthropic and effort
+/// levels elsewhere. Plan models (the ChatGPT account list) are priced at
+/// zero: the plan has no per-token charge.
+pub fn live_model_info(provider: &str, m: &LiveModel) -> ModelInfo {
+    let reference = ModelRef::new(provider, &m.id);
+    let fb = fallback_capabilities(&reference);
+    let capabilities = Capabilities {
+        tools: m.tools.unwrap_or(fb.tools),
+        parallel_tool_calls: fb.parallel_tool_calls,
+        thinking: m.reasoning.unwrap_or(fb.thinking),
+        caching: fb.caching,
+        images: m.vision.unwrap_or(fb.images),
+        context_window: m.context_window.unwrap_or(fb.context_window),
+        max_output_tokens: m.max_output_tokens.unwrap_or(fb.max_output_tokens),
+    };
+    let thinking = match (capabilities.thinking, provider) {
+        (false, _) => ThinkingStyle::None,
+        (true, crate::anthropic::NAME) => ThinkingStyle::Adaptive,
+        (true, _) => ThinkingStyle::Effort,
+    };
+    ModelInfo {
+        display_name: m.display_name.clone().unwrap_or_else(|| m.id.clone()),
+        capabilities,
+        thinking,
+        price: if m.plan == Some(true) {
+            Some(Price::with_cache(0.0, 0.0, 0.0, 0.0))
+        } else {
+            m.price
+        },
+        reference,
+    }
+}
+
 /// Best-known facts for a model that neither the built-in table nor a live
 /// list fully describes.
 fn fallback_capabilities(reference: &ModelRef) -> Capabilities {
@@ -516,6 +575,7 @@ fn entries_for(
     reference: &ModelRef,
     c: &Candidate,
     aliases: Vec<String>,
+    plan_list: bool,
 ) -> Vec<CatalogEntry> {
     let provider = reference.provider.as_str();
     let fallback = fallback_capabilities(reference);
@@ -623,7 +683,12 @@ fn entries_for(
     };
 
     let statuses = credentials.statuses(provider);
-    let plan = provider == crate::openai::PROVIDER_NAME && chatgpt_plan_model(&reference.model);
+    let plan = provider == crate::openai::PROVIDER_NAME
+        && if plan_list {
+            live.is_some_and(|l| l.plan == Some(true))
+        } else {
+            chatgpt_plan_model(&reference.model)
+        };
     let mut out = Vec::new();
     for status in &statuses {
         match status.method {

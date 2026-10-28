@@ -91,7 +91,18 @@ pub fn redactor(secrets: &[String]) -> Arc<Redactor> {
 
 /// The model registry with `[models]` aliases and `[pricing]` overrides.
 pub fn registry(cfg: &Config) -> Result<Arc<Registry>, String> {
+    let cache = ModelListCache::new(DataDir::from_config(cfg).model_lists());
+    let live = harness_config::ini::config::PROVIDER_IDS
+        .iter()
+        .filter_map(|p| cache.load(p))
+        .flat_map(|list| {
+            list.models
+                .iter()
+                .map(|m| harness_providers::catalog::live_model_info(&list.provider, m))
+                .collect::<Vec<_>>()
+        });
     let registry = Registry::builtin()
+        .with_live_models(live)
         .with_aliases(cfg.models.iter())
         .map_err(|e| format!("[models]: {e}"))?
         .with_price_overrides(cfg.pricing.iter().map(|(k, p)| {
@@ -503,19 +514,47 @@ fn chatgpt_state(store: &TokenStore) -> CredentialState {
 }
 
 /// Live model-list sources for every provider with a resolvable API key,
-/// honouring `base_url`.
+/// honouring `base_url`. With `auth = chatgpt`, OpenAI's source is the
+/// signed-in account's own plan list instead (none while signed out).
 pub fn model_list_sources(cfg: &Config) -> Vec<ModelListSource> {
     harness_config::ini::config::PROVIDER_IDS
         .iter()
         .filter_map(|name| {
             let p = cfg.providers.get(*name)?;
             if *name == "openai" && p.auth_mode() == AuthMode::ChatGpt {
-                return None;
+                return chatgpt_model_list_source(cfg);
             }
             let key = p.resolve_api_key().ok()??;
             ModelListSource::new(name, Some(key.expose()), p.base_url.as_deref())
         })
         .collect()
+}
+
+/// Drops `provider`'s cached live model list, so the next catalog refresh
+/// fetches it again (after a sign-in changes what the account may use).
+pub fn forget_model_list(cfg: &Config, provider: &str) {
+    let path = ModelListCache::new(DataDir::from_config(cfg).model_lists()).path(provider);
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "could not drop the cached model list")
+        }
+    }
+}
+
+/// The ChatGPT account's model list, when signed in with plan usage.
+fn chatgpt_model_list_source(cfg: &Config) -> Option<ModelListSource> {
+    let store = chatgpt_store(cfg);
+    let tokens = store.load().ok()?.tokens.filter(|t| t.plan_usage())?;
+    let endpoints = chatgpt_endpoints(cfg);
+    let base = endpoints.api_base_url.clone();
+    let auth = ChatGptAuth::shared(store, endpoints);
+    Some(ModelListSource::chatgpt(
+        auth,
+        Some(&base),
+        &tokens.account.sub,
+    ))
 }
 
 /// The model catalog service for `/model`: built-in models, `[models]`
@@ -653,6 +692,7 @@ mod anthropic_config_tests {
 #[cfg(test)]
 mod chatgpt_tests {
     use super::*;
+    use harness_providers::catalog::live::ListKind;
     use harness_providers::chatgpt::store::{Account, AuthRecord, StoredTokens, Token};
 
     fn cfg(extra: &str, data: &Path) -> Config {
@@ -776,12 +816,62 @@ mod chatgpt_tests {
                 .map(|s| s.state),
             Some(CredentialState::Ready)
         );
+        // Signed in: OpenAI's list is the account's plan list.
+        let sources = model_list_sources(&c);
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].kind, ListKind::ChatGpt);
+        assert!(sources[0].origin().contains("#chatgpt:"));
+        assert!(!format!("{:?}", sources[0]).contains("at-plan-secret"));
         let secrets = credentials(&c);
         assert!(secrets.contains(&"at-plan-secret".to_owned()));
         assert!(secrets.contains(&"rt-plan-secret".to_owned()));
         let r = redactor(&secrets);
         let out = r.redact("token at-plan-secret and rt-plan-secret");
         assert!(!out.contains("plan-secret"), "{out}");
+    }
+
+    #[test]
+    fn runs_learn_models_from_cached_live_lists_and_sign_in_drops_the_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c = cfg("auth = chatgpt\n", tmp.path());
+        let cache = ModelListCache::new(DataDir::from_config(&c).model_lists());
+        let astra = harness_providers::catalog::LiveModel {
+            id: "gpt-6-astra".into(),
+            context_window: Some(272_000),
+            tools: Some(true),
+            reasoning: Some(true),
+            vision: Some(true),
+            plan: Some(true),
+            rank: Some(0),
+            ..Default::default()
+        };
+        cache
+            .store(&harness_providers::catalog::LiveList::new(
+                "openai",
+                "x",
+                0,
+                vec![astra],
+            ))
+            .unwrap();
+        let resolved = registry(&c).unwrap().resolve("openai/gpt-6-astra").unwrap();
+        assert!(resolved.warnings.is_empty(), "{:?}", resolved.warnings);
+        assert_eq!(resolved.capabilities().context_window, 272_000);
+        assert_eq!(
+            resolved.info.thinking,
+            harness_providers::registry::ThinkingStyle::Effort
+        );
+        forget_model_list(&c, "openai");
+        assert!(cache.load("openai").is_none());
+        // Dropping a list that is not there is fine.
+        forget_model_list(&c, "openai");
+        assert!(
+            !registry(&c)
+                .unwrap()
+                .resolve("openai/gpt-6-astra")
+                .unwrap()
+                .warnings
+                .is_empty()
+        );
     }
 
     #[test]

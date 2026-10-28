@@ -227,6 +227,9 @@ pub enum RegistryError {
 #[derive(Debug, Clone)]
 pub struct Registry {
     models: BTreeMap<ModelRef, ModelInfo>,
+    /// Models only a provider's live model list knows
+    /// ([`Registry::with_live_models`]).
+    live: BTreeMap<ModelRef, ModelInfo>,
     aliases: BTreeMap<String, ModelRef>,
     overrides: BTreeMap<String, Price>,
 }
@@ -252,6 +255,7 @@ impl Registry {
             .collect();
         Self {
             models,
+            live: BTreeMap::new(),
             aliases,
             overrides: BTreeMap::new(),
         }
@@ -267,6 +271,7 @@ impl Registry {
     pub fn empty() -> Self {
         Self {
             models: BTreeMap::new(),
+            live: BTreeMap::new(),
             aliases: BTreeMap::new(),
             overrides: BTreeMap::new(),
         }
@@ -332,13 +337,36 @@ impl Registry {
             .copied()
     }
 
-    /// Built-in facts for a reference. OpenRouter references fall back to
-    /// the vendor's own entry (`openrouter/anthropic/claude-sonnet-5.5`
-    /// uses `anthropic/claude-sonnet-5-5`).
+    /// Adds models that only a provider's live model list knows (see
+    /// [`crate::catalog::live_model_info`]), so a run on a model released
+    /// after this build gets its real limits instead of
+    /// [`CONSERVATIVE_CAPABILITIES`]. Built-in entries, and OpenRouter
+    /// models the vendor fallback covers, keep their built-in facts.
+    #[must_use]
+    pub fn with_live_models(mut self, models: impl IntoIterator<Item = ModelInfo>) -> Self {
+        for info in models {
+            if self.lookup(&info.reference).is_none() {
+                self.live.insert(info.reference.clone(), info);
+            }
+        }
+        self
+    }
+
+    /// Facts for a reference: the built-in table first, then, for
+    /// OpenRouter references, the vendor's own entry
+    /// (`openrouter/anthropic/claude-sonnet-5.5` uses
+    /// `anthropic/claude-sonnet-5-5`), then the live-list models.
     pub fn lookup(&self, reference: &ModelRef) -> Option<ModelInfo> {
         if let Some(info) = self.models.get(reference) {
             return Some(info.clone());
         }
+        if let Some(info) = self.vendor_fallback(reference) {
+            return Some(info);
+        }
+        self.live.get(reference).cloned()
+    }
+
+    fn vendor_fallback(&self, reference: &ModelRef) -> Option<ModelInfo> {
         if reference.provider != OPENROUTER {
             return None;
         }
@@ -377,6 +405,7 @@ impl Registry {
         let matches: Vec<&ModelRef> = self
             .models
             .keys()
+            .chain(self.live.keys())
             .filter(|r| r.provider != OPENROUTER && r.model == name)
             .collect();
         match matches.as_slice() {

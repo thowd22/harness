@@ -229,6 +229,8 @@ async fn apply_chatgpt(
         .await
         .map_err(|e| e.to_string())?;
     edit::save_credential(path, "openai", &Credential::ChatGpt).map_err(|e| e.to_string())?;
+    // The plan's model list belongs to the account: fetch it again.
+    crate::wiring::forget_model_list(&cfg, harness_providers::openai::PROVIDER_NAME);
     Ok(format!(
         "signed in with ChatGPT as {} with plan usage; set auth = chatgpt in {} (tokens are in {}, mode 0600)",
         account.label(),

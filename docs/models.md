@@ -89,8 +89,18 @@ charged twice.
 
 ## Unknown models
 
-A reference that is not in the built-in table still works. Harness uses
-conservative defaults for it:
+A model that is not in the built-in table but is on a cached live model
+list (see [the catalog](#model-catalog-harness-models-model)) runs with the
+facts that list gives: its context window, output limit, tool, reasoning
+and image support, and its price. A model that reasons gets adaptive
+thinking on Anthropic and effort levels on OpenAI and OpenRouter; facts the
+list leaves out fall back to the provider's usual values. So a model
+released after your harness build works at full size as soon as the list
+that names it has been fetched (`harness models --refresh`, or opening
+`/model`).
+
+A reference that neither the table nor a cached list knows still works.
+Harness uses conservative defaults for it:
 
 - 32k context window and 4,096 output tokens
 - tools only: no parallel calls, images, caching or thinking
@@ -109,7 +119,9 @@ The model catalog is the list of every model you can pick. It merges:
    when no other source knows the model,
 3. the live model lists of Anthropic (`GET /v1/models`), OpenAI
    (`GET /v1/models`) and OpenRouter (`GET /models`), fetched with the API key
-   and `base_url` of each `[provider.*]` section.
+   and `base_url` of each `[provider.*]` section. With `auth = chatgpt`,
+   OpenAI's list is the signed-in account's own plan list instead (see
+   below).
 
 Each entry has the model id, provider, aliases, context window, input and
 output price, capabilities (tools, reasoning, vision) and auth method.
@@ -133,11 +145,18 @@ embeddings, speech, image, moderation and realtime models.
   previews and `chatgpt-*` snapshots) can chat but is flagged as not usable
   for agents, because agents need tools.
 - **Sign in with ChatGPT** (OpenAI): entries show the auth method. Plan
-  models (the GPT-5 and Codex families) used through ChatGPT have the
-  `ChatGPT` auth method and no per-token price, because usage counts against
-  your plan. Other OpenAI models need an API key. With only ChatGPT signed
-  in, they are listed as `not included in Sign in with ChatGPT`. With both
-  an API key and ChatGPT, a plan model is listed once per auth method.
+  models used through ChatGPT have the `ChatGPT` auth method and no
+  per-token price, because usage counts against your plan. Which models the
+  plan covers comes from the account itself: harness fetches
+  `GET {api}/models` with the ChatGPT access token, as [OpenAI
+  documents](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference).
+  The entries meant for a picker (`visibility: "list"`) that the API
+  serves are shown first, in the server's order, under their
+  `display_name`; requests send their `slug`. Other OpenAI models need an
+  API key and are listed as `not included in Sign in with ChatGPT`. Until
+  that list has been fetched once (or when it cannot be), the GPT-5 and
+  later and Codex families count as plan models. With both an API key and
+  ChatGPT, a plan model is listed once per auth method.
 
 ### Caching and refresh
 
@@ -145,8 +164,11 @@ Live lists are cached in `<data_dir>/model-lists/`, one JSON file per
 provider. The catalog is built from the cache straight away, so it opens
 instantly and works offline. A list is refetched in the background when it
 is older than `[general] model_list_ttl` (default `24h`) or came from a
-different `base_url`. If a refresh fails, for example offline, the cached
-list stays in use and the error is kept for display.
+different `base_url`. The ChatGPT plan list is also refetched after every
+Sign in with ChatGPT and whenever the signed-in account is a different one;
+its cache file names the account only by a short hash and never holds a
+token. If a refresh fails, for example offline, the cached list stays in use
+and the error is kept for display.
 
 Session start uses the same cache: the OpenRouter tool-support check reads
 `openrouter.json` instead of downloading the catalog when the list is

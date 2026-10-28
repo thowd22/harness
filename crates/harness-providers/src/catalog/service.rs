@@ -90,7 +90,7 @@ struct State {
     sources: Vec<ModelListSource>,
     live: BTreeMap<String, LiveList>,
     errors: BTreeMap<String, String>,
-    rejected: BTreeMap<String, String>,
+    rejected: BTreeMap<String, (AuthMethod, String)>,
     refreshing: bool,
 }
 
@@ -212,7 +212,7 @@ impl CatalogService {
             .filter(|s| {
                 !st.live
                     .get(&s.provider)
-                    .is_some_and(|l| l.is_fresh(now, self.inner.ttl, &s.base_url))
+                    .is_some_and(|l| l.is_fresh(now, self.inner.ttl, s.origin()))
             })
             .cloned()
             .collect()
@@ -255,7 +255,7 @@ impl CatalogService {
             let p = source.provider.clone();
             match result {
                 Ok(models) => {
-                    let list = LiveList::new(&p, &source.base_url, now, models);
+                    let list = LiveList::new(&p, source.origin(), now, models);
                     if let Err(e) = self.inner.cache.store(&list) {
                         tracing::warn!(provider = %p, error = %e, "could not cache model list");
                     }
@@ -268,8 +268,15 @@ impl CatalogService {
                     let msg = e.to_string();
                     tracing::warn!(provider = %p, error = %msg, "model list refresh failed");
                     if let ProviderError::Auth(m) = &e {
+                        // A refused ChatGPT list is the sign-in's problem,
+                        // not an API key's.
+                        let method = if source.kind == ListKind::ChatGpt {
+                            AuthMethod::ChatGpt
+                        } else {
+                            AuthMethod::ApiKey
+                        };
                         st.rejected
-                            .insert(p.clone(), format!("rejected by {p}: {m}"));
+                            .insert(p.clone(), (method, format!("rejected by {p}: {m}")));
                     }
                     st.errors.insert(p.clone(), msg.clone());
                     report.failed.push((p, msg));
@@ -301,12 +308,8 @@ impl CatalogService {
 
     fn effective_credentials(&self, st: &State) -> Credentials {
         let mut creds = st.credentials.clone();
-        for (p, msg) in &st.rejected {
-            creds.set(
-                p,
-                AuthMethod::ApiKey,
-                CredentialState::Rejected(msg.clone()),
-            );
+        for (p, (method, msg)) in &st.rejected {
+            creds.set(p, *method, CredentialState::Rejected(msg.clone()));
         }
         creds
     }
@@ -332,7 +335,7 @@ impl CatalogService {
                     .sources
                     .iter()
                     .find(|s| s.provider == p)
-                    .map(|s| s.base_url.clone());
+                    .map(|s| s.origin().to_owned());
                 // Only a configured source can be refreshed, so only it
                 // can be stale.
                 let stale = base

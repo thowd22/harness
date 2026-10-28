@@ -46,21 +46,32 @@ pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 /// Request path appended to the base URL.
 pub const RESPONSES_PATH: &str = "responses";
 
+/// True for `gpt-5` and every later major version (`gpt-5.6-sol`,
+/// `gpt-6-astra`, `gpt-10`): the reasoning generation. A `provider/`
+/// prefix is ignored.
+pub fn is_gpt5_or_later(model: &str) -> bool {
+    let m = model.rsplit('/').next().unwrap_or(model);
+    let Some(rest) = m.strip_prefix("gpt-") else {
+        return false;
+    };
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse::<u32>().is_ok_and(|major| major >= 5)
+}
+
 /// True for models that take `reasoning` parameters: the o-series,
-/// `gpt-5*` (except `*-chat*` variants) and `codex-*`. A `provider/` prefix
-/// is ignored.
+/// `gpt-5` and later (except `*-chat*` variants) and `codex-*`. A
+/// `provider/` prefix is ignored.
 pub fn is_reasoning_model(model: &str) -> bool {
     let m = model.rsplit('/').next().unwrap_or(model);
-    let reasoning_family = ["o1", "o3", "o4", "gpt-5", "codex"]
-        .iter()
-        .any(|p| m.starts_with(p));
+    let reasoning_family =
+        is_gpt5_or_later(m) || ["o1", "o3", "o4", "codex"].iter().any(|p| m.starts_with(p));
     reasoning_family && !m.contains("-chat")
 }
 
 /// Best-known capabilities of an OpenAI model id.
 pub fn model_capabilities(model: &str) -> Capabilities {
     let m = model.rsplit('/').next().unwrap_or(model);
-    let (context_window, max_output_tokens) = if m.starts_with("gpt-5") || m.starts_with("codex") {
+    let (context_window, max_output_tokens) = if is_gpt5_or_later(m) || m.starts_with("codex") {
         (400_000, 128_000)
     } else if m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4") {
         (200_000, 100_000)
@@ -550,6 +561,14 @@ mod tests {
         }
         for m in ["gpt-4o", "gpt-4.1-mini", "gpt-5-chat-latest"] {
             assert!(!is_reasoning_model(m), "{m}");
+        }
+        // Later generations are reasoning models too, whatever their name.
+        for m in ["gpt-5.6-sol", "gpt-6-astra", "gpt-6.1-terra", "gpt-10"] {
+            assert!(is_reasoning_model(m), "{m}");
+            assert_eq!(model_capabilities(m).context_window, 400_000, "{m}");
+        }
+        for m in ["gpt-4.5", "gpt-reserve", "gpt-", "gpt-x5"] {
+            assert!(!is_gpt5_or_later(m), "{m}");
         }
         let c = model_capabilities("gpt-5");
         assert!(c.thinking && c.tools && c.parallel_tool_calls);

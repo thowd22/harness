@@ -182,9 +182,13 @@ out: `temperature`, `top_p`, `max_output_tokens`, `truncation`, `metadata`,
 `chatgpt::UNSUPPORTED_REQUEST_FIELDS`; `prompt_cache_key` is kept. The API key
 in the section is not used, and there is never a silent fallback to it.
 
-Plan models are the GPT-5 and Codex families; the model catalog shows them
-with the `ChatGPT` auth method and no per-token price (see
-[models.md](models.md)).
+Plan models are the ones the signed-in account lists: harness fetches
+`GET /v1/models` with the ChatGPT access token and shows the account's
+models (for example GPT-6-Astra or GPT-5.6-Sol) in `/model` and
+`harness models`, in OpenAI's order, with the `ChatGPT` auth method and no
+per-token price. Runs on them use the context window the list gives. Before
+the list has been fetched, the GPT-5 and later and Codex families count as
+plan models. See [models.md](models.md#which-models-are-usable).
 
 ### Usage limit
 

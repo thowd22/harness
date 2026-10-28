@@ -3,12 +3,14 @@
 //! them.
 
 use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::chatgpt::ChatGptAuth;
 use crate::http::error_message;
 use crate::pricing::Price;
 use crate::provider::ProviderError;
@@ -50,6 +52,14 @@ pub struct LiveModel {
     /// Image input support, if the list says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vision: Option<bool>,
+    /// `Some(true)` when the list is the signed-in ChatGPT account's own
+    /// ([`ListKind::ChatGpt`]): the plan covers exactly these models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<bool>,
+    /// Position in the server's own ordering, when the server orders its
+    /// list for display (ChatGPT); lower comes first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rank: Option<u32>,
 }
 
 /// The response shape a [`ModelListSource`] speaks.
@@ -62,6 +72,10 @@ pub enum ListKind {
     OpenAi,
     /// `GET {base}/models` with a bearer token; full facts and prices.
     OpenRouter,
+    /// `GET {base}/models` with a Sign in with ChatGPT access token: the
+    /// account's plan models in a `models` array (`slug`, `display_name`,
+    /// `visibility`, `context_window`, ...).
+    ChatGpt,
 }
 
 impl ListKind {
@@ -79,7 +93,7 @@ impl ListKind {
     pub fn default_base_url(self) -> &'static str {
         match self {
             Self::Anthropic => crate::anthropic::DEFAULT_BASE_URL,
-            Self::OpenAi => crate::openai::DEFAULT_BASE_URL,
+            Self::OpenAi | Self::ChatGpt => crate::openai::DEFAULT_BASE_URL,
             Self::OpenRouter => crate::openrouter::DEFAULT_BASE_URL,
         }
     }
@@ -88,14 +102,15 @@ impl ListKind {
     pub fn path(self) -> &'static str {
         match self {
             Self::Anthropic => "v1/models",
-            Self::OpenAi | Self::OpenRouter => "models",
+            Self::OpenAi | Self::OpenRouter | Self::ChatGpt => "models",
         }
     }
 }
 
 /// Where and how to fetch one provider's live model list.
 ///
-/// The API key is held only to build the request; `Debug` never prints it.
+/// The API key (or the ChatGPT sign-in) is held only to build the request;
+/// `Debug` never prints it.
 #[derive(Clone)]
 pub struct ModelListSource {
     /// Provider id (`anthropic`, `openai`, `openrouter`).
@@ -107,6 +122,8 @@ pub struct ModelListSource {
     /// Whole-request timeout.
     pub timeout: Duration,
     api_key: Option<String>,
+    chatgpt: Option<Arc<ChatGptAuth>>,
+    origin: String,
 }
 
 impl fmt::Debug for ModelListSource {
@@ -116,6 +133,8 @@ impl fmt::Debug for ModelListSource {
             .field("kind", &self.kind)
             .field("base_url", &self.base_url)
             .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field("chatgpt", &self.chatgpt.is_some())
+            .field("origin", &self.origin)
             .finish()
     }
 }
@@ -126,16 +145,47 @@ impl ModelListSource {
     /// provider's public endpoint.
     pub fn new(provider: &str, api_key: Option<&str>, base_url: Option<&str>) -> Option<Self> {
         let kind = ListKind::for_provider(provider)?;
+        let base_url = base_url.unwrap_or(kind.default_base_url()).to_owned();
         Some(Self {
             provider: provider.to_owned(),
             kind,
-            base_url: base_url.unwrap_or(kind.default_base_url()).to_owned(),
+            origin: base_url.clone(),
+            base_url,
             timeout: Duration::from_secs(20),
             api_key: api_key
                 .map(str::trim)
                 .filter(|k| !k.is_empty())
                 .map(str::to_owned),
+            chatgpt: None,
         })
+    }
+
+    /// The `openai` list of the account signed in with ChatGPT in `auth`,
+    /// from the API at `base_url` (the default API when `None`). Each fetch
+    /// asks `auth` for a fresh access token. `account` (the sign-in's
+    /// `sub`) is part of [`ModelListSource::origin`], so a cached list of
+    /// another account is never taken as fresh.
+    pub fn chatgpt(auth: Arc<ChatGptAuth>, base_url: Option<&str>, account: &str) -> Self {
+        let kind = ListKind::ChatGpt;
+        let base_url = base_url
+            .unwrap_or(kind.default_base_url())
+            .trim_end_matches('/')
+            .to_owned();
+        Self {
+            provider: crate::openai::PROVIDER_NAME.to_owned(),
+            kind,
+            origin: format!("{base_url}#chatgpt:{}", account_tag(account)),
+            base_url,
+            timeout: Duration::from_secs(20),
+            api_key: None,
+            chatgpt: Some(auth),
+        }
+    }
+
+    /// What a cached list must have come from to count as fresh: the base
+    /// URL, plus the account for a ChatGPT list.
+    pub fn origin(&self) -> &str {
+        &self.origin
     }
 
     /// The URL of the first page.
@@ -164,7 +214,7 @@ impl ModelListSource {
                     HeaderValue::from_static(crate::anthropic::API_VERSION),
                 );
             }
-            ListKind::OpenAi | ListKind::OpenRouter => {
+            ListKind::OpenAi | ListKind::OpenRouter | ListKind::ChatGpt => {
                 let mut v = HeaderValue::from_str(&format!("Bearer {key}")).map_err(|_| bad())?;
                 v.set_sensitive(true);
                 h.insert(AUTHORIZATION, v);
@@ -176,7 +226,18 @@ impl ModelListSource {
     /// Fetches and parses the whole list (following Anthropic pagination).
     /// HTTP 401/403 come back as [`ProviderError::Auth`].
     pub async fn fetch(&self, client: &reqwest::Client) -> Result<Vec<LiveModel>, ProviderError> {
-        let headers = self.headers()?;
+        let mut headers = self.headers()?;
+        if let Some(auth) = &self.chatgpt {
+            let token = auth.access_token().await?;
+            let mut v =
+                HeaderValue::from_str(&format!("Bearer {}", token.expose())).map_err(|_| {
+                    ProviderError::InvalidRequest(
+                        "the access token contains invalid characters".into(),
+                    )
+                })?;
+            v.set_sensitive(true);
+            headers.insert(AUTHORIZATION, v);
+        }
         let mut out = Vec::new();
         let mut after: Option<String> = None;
         for _ in 0..MAX_PAGES {
@@ -246,8 +307,21 @@ pub struct Page {
     pub next_after: Option<String>,
 }
 
+/// A short, stable tag for a ChatGPT account id, so cache files name the
+/// account without storing it.
+fn account_tag(account: &str) -> String {
+    use aws_lc_rs::digest::{SHA256, digest};
+    digest(&SHA256, account.as_bytes()).as_ref()[..6]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 /// Parses one response body of the given kind.
 pub fn parse(kind: ListKind, body: &Value) -> Result<Page, ProviderError> {
+    if kind == ListKind::ChatGpt {
+        return parse_chatgpt(body);
+    }
     let data = body
         .get("data")
         .and_then(Value::as_array)
@@ -256,6 +330,7 @@ pub fn parse(kind: ListKind, body: &Value) -> Result<Page, ProviderError> {
         ListKind::Anthropic => data.iter().filter_map(anthropic_model).collect(),
         ListKind::OpenAi => data.iter().filter_map(openai_model).collect(),
         ListKind::OpenRouter => data.iter().filter_map(openrouter_model).collect(),
+        ListKind::ChatGpt => unreachable!("parsed by parse_chatgpt"),
     };
     let next_after = (kind == ListKind::Anthropic
         && body.get("has_more").and_then(Value::as_bool) == Some(true))
@@ -266,6 +341,56 @@ pub fn parse(kind: ListKind, body: &Value) -> Result<Page, ProviderError> {
     })
     .flatten();
     Ok(Page { models, next_after })
+}
+
+/// The ChatGPT account list: entries with `visibility: "list"` (the ones
+/// meant for a model picker) that the API accepts, in the server's order,
+/// with `slug` as the id and `display_name` as the name.
+fn parse_chatgpt(body: &Value) -> Result<Page, ProviderError> {
+    let data = body
+        .get("models")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            ProviderError::Decode("ChatGPT model list response has no `models` array".into())
+        })?;
+    let models = data
+        .iter()
+        .filter(|v| v.get("visibility").and_then(Value::as_str) == Some("list"))
+        .filter(|v| v.get("supported_in_api").and_then(Value::as_bool) != Some(false))
+        .filter_map(|v| {
+            let id = v.get("slug")?.as_str()?.trim();
+            (!id.is_empty()).then(|| id.to_owned()).map(|id| (id, v))
+        })
+        .enumerate()
+        .map(|(i, (id, v))| {
+            let levels = v
+                .get("supported_reasoning_levels")
+                .and_then(Value::as_array)
+                .map(Vec::len);
+            let vision = v
+                .get("input_modalities")
+                .and_then(Value::as_array)
+                .map(|m| m.iter().any(|x| x.as_str() == Some("image")));
+            LiveModel {
+                display_name: v
+                    .get("display_name")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                context_window: u32_at(v, "/context_window"),
+                tools: Some(true),
+                reasoning: levels.map(|n| n > 0),
+                vision,
+                plan: Some(true),
+                rank: Some(u32::try_from(i).unwrap_or(u32::MAX)),
+                id,
+                ..LiveModel::default()
+            }
+        })
+        .collect();
+    Ok(Page {
+        models,
+        next_after: None,
+    })
 }
 
 fn u32_at(v: &Value, pointer: &str) -> Option<u32> {
@@ -291,6 +416,7 @@ fn anthropic_model(v: &Value) -> Option<LiveModel> {
         reasoning: supported("/capabilities/thinking/supported"),
         vision: supported("/capabilities/image_input/supported"),
         id,
+        ..LiveModel::default()
     })
 }
 
@@ -371,6 +497,7 @@ fn openrouter_model(v: &Value) -> Option<LiveModel> {
         reasoning: Some(base.supports_reasoning),
         vision: Some(base.supports_images),
         id: base.id,
+        ..LiveModel::default()
     })
 }
 
