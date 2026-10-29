@@ -11,6 +11,8 @@ to built-in prompts, agents, workflows and `harness.ini` defaults.
 
 ## Unreleased
 
+## [0.7.0] - 2026-10-29
+
 ### Added
 
 - Every reasoning effort level on every provider: `/effort` and agent YAML

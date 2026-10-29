@@ -886,7 +886,7 @@ dependencies = [
 
 [[package]]
 name = "harness"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "crossterm",
@@ -920,7 +920,7 @@ dependencies = [
 
 [[package]]
 name = "harness-agent"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -945,7 +945,7 @@ dependencies = [
 
 [[package]]
 name = "harness-config"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "dirs",
  "globset",
@@ -970,7 +970,7 @@ dependencies = [
 
 [[package]]
 name = "harness-eval"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "globset",
@@ -1001,7 +1001,7 @@ dependencies = [
 
 [[package]]
 name = "harness-events"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "hex",
  "insta",
@@ -1021,7 +1021,7 @@ dependencies = [
 
 [[package]]
 name = "harness-hygiene"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "globset",
@@ -1046,7 +1046,7 @@ dependencies = [
 
 [[package]]
 name = "harness-mcp"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -1073,7 +1073,7 @@ dependencies = [
 
 [[package]]
 name = "harness-memory"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "harness-config",
  "harness-events",
@@ -1095,7 +1095,7 @@ dependencies = [
 
 [[package]]
 name = "harness-policy"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "globset",
@@ -1116,7 +1116,7 @@ dependencies = [
 
 [[package]]
 name = "harness-providers"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "aws-lc-rs",
@@ -1140,7 +1140,7 @@ dependencies = [
 
 [[package]]
 name = "harness-remote"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -1164,7 +1164,7 @@ dependencies = [
 
 [[package]]
 name = "harness-tools"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "globset",
@@ -1185,7 +1185,7 @@ dependencies = [
 
 [[package]]
 name = "harness-tui"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "crossterm",
@@ -1216,7 +1216,7 @@ dependencies = [
 
 [[package]]
 name = "harness-workflow"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "futures",
