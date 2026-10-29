@@ -1,11 +1,11 @@
 ---
 id: TASK-169
 title: 'Shift+Tab cycles permission modes, with a new yolo mode'
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-29 17:54'
-updated_date: '2026-10-29 18:20'
+updated_date: '2026-10-29 18:58'
 labels:
   - tui
   - policy
@@ -69,3 +69,9 @@ Implemented:
 - Agent YAML rejects `mode: yolo` (an agent can only tighten the session).
 Verification: new tests yolo_never_asks_but_still_denies, yolo_sweeps_staging..., yolo_gates_never_ask (NeverAskUi panics if asked; main + capped subagent gate), shift_tab_in_the_input_cycles_the_mode, mode_comes_first_survives_narrow_terminals_and_yolo_stands_out, yolo_warns_and_runs_without_prompts (driver), yolo_mode_runs_what_would_ask_and_warns (headless, --mode and ini); updated focus tests to Alt+Up; snapshots reviewed (status line order, help rows, palette row). fmt, clippy -D warnings, nextest workspace 2160 passed / 24 skipped, doc tests, hermetic-guard, bench-guard ok. Not committed yet.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Shift+Tab in the chat input cycles ask → auto-edit → auto → yolo; yolo turns every ask (rules, outward guard, staging guard, MCP, scope) into allow for the main agent and subagents while deny rules, protected paths and the sandbox still refuse, and warns when chosen. The mode is the first, never-dropped status-line segment (yolo in the error colour); Alt+Up replaces Shift+Tab as the input→transcript focus key. Verified with policy, gate, chat, status, driver and headless tests, reviewed snapshots and the full suite; CI green on 012c3e7, released in v0.7.0.
+<!-- SECTION:FINAL_SUMMARY:END -->
