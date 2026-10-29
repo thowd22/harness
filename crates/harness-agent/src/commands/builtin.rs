@@ -18,7 +18,7 @@ pub enum Builtin {
     Model,
     /// `/effort [default|minimal|low|medium|high|xhigh|max|ultra]`.
     Effort,
-    /// `/mode [ask|auto-edit|auto]`.
+    /// `/mode [ask|auto-edit|auto|yolo]`.
     Mode,
     /// `/agents`.
     Agents,
@@ -176,7 +176,7 @@ impl Builtin {
             Self::Mode => vec![
                 ArgSpec::optional("mode")
                     .with_help("approval mode")
-                    .with_choices(&["ask", "auto-edit", "auto"]),
+                    .with_choices(&["ask", "auto-edit", "auto", "yolo"]),
             ],
             Self::Memory => vec![
                 ArgSpec::optional("action")

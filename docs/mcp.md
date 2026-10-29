@@ -426,7 +426,7 @@ Buttons are clickable, Tab / Shift+Tab or Left/Right move between them,
 Enter activates one, and Esc closes the panel.
 
 When a server has failed, the status line shows a red `⚠ mcp <name>` (or
-`⚠ mcp <n> failed`). Click it, or reach it with Shift+Tab from the message
+`⚠ mcp <n> failed`). Click it, or reach it with Alt+Up from the message
 box and press Enter, to open `/mcp`.
 
 ### Prompts

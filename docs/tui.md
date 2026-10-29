@@ -12,7 +12,7 @@ The app (`harness_tui::app::App`) composes the views:
   footer tabs. The **goal bar** (`GoalBar`) sits on the right of both when
   the run has tasks; on narrow terminals it collapses into a status-line
   indicator, which opens the goal and every task in the Status panel
-  (click it, or Shift+Tab to it and Enter). Click a task, or use the
+  (click it, or Alt+Up to it and Enter). Click a task, or use the
   palette's "Focus goal bar", to reach it from the keyboard. The pane wraps
   long titles and scrolls (wheel, PgUp/PgDn, Home/End) when the tasks do
   not fit.
@@ -146,6 +146,8 @@ Only a few actions have keys; everything else is in the command palette.
 | `newline` | `shift+enter`, `alt+enter` | new line in the input |
 | `cancel` | `esc` | close an overlay, step back, or cancel |
 | `switch_view` | `tab` | switch between chat and map |
+| `cycle_mode` | `shift+tab` | in the chat input: next permission mode (ask → auto-edit → auto → yolo → ask) |
+| `focus_transcript` | `alt+up` | in the chat input: focus the nearest card, button or indicator above it |
 | `palette` | `ctrl+p` | command palette |
 | `interrupt` | `ctrl+c` | interrupt the agent |
 | `quit` | `ctrl+q` | quit |
@@ -168,7 +170,7 @@ chord to two actions, or to the fixed `ctrl+z`, is reported at load with the
 file and line.
 
 The key help overlay lists the active bindings. Open it with the **keys**
-button at the bottom right (click it, or Shift+Tab to it and press Enter) or
+button at the bottom right (click it, or Alt+Up to it and press Enter) or
 from the palette. Esc, the **[ Close ]** button or a click outside closes it.
 
 ## Mouse and keyboard interaction
@@ -181,9 +183,11 @@ keyboard:
 - **Mouse wheel** scrolls the pane under the pointer.
 - **Drag** selects text and copies it on release; a press without movement
   is still a click (see [Copy and paste](#copy-and-paste)).
-- **Shift+Tab** and the **arrow keys** move focus between elements; **Tab**
-  does too inside overlays and when an element other than the input has focus
-  (in the input, Tab is `switch_view`). **Enter** activates the focused
+- **Alt+Up** moves focus from the chat input to the nearest element above
+  it. From there **Shift+Tab** and the **arrow keys** move focus between
+  elements; **Tab** does too inside overlays and when an element other than
+  the input has focus (in the input, Tab is `switch_view` and Shift+Tab is
+  `cycle_mode`). **Enter** activates the focused
   element, **Esc** backs out (closes the overlay or returns focus to the
   input).
 - **PgUp / PgDn** scroll the focused pane by a page.

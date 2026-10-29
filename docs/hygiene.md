@@ -97,7 +97,7 @@ prohibitions. An edit outside the scope is not refused:
 | Mode | Edit outside scope |
 | --- | --- |
 | `ask`, `auto-edit` | asks for approval, naming the scope |
-| `auto` | goes ahead and is flagged in the hygiene report |
+| `auto`, `yolo` | goes ahead and is flagged in the hygiene report |
 
 Changes made through bash are checked after the command, by the ledger.
 

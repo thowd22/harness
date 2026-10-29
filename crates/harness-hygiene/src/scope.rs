@@ -183,7 +183,7 @@ impl Scope {
         );
         match mode {
             Mode::Ask | Mode::AutoEdit => ScopeDecision::Ask { reason },
-            Mode::Auto => ScopeDecision::Flag { reason },
+            Mode::Auto | Mode::Yolo => ScopeDecision::Flag { reason },
         }
     }
 

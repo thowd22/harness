@@ -313,6 +313,18 @@ impl Driver {
         let _ = self.tx.send(AppEvent::Core(c)).await;
     }
 
+    /// Warns, once per change, that yolo mode confirms nothing.
+    async fn warn_yolo(&self, mode: Mode) {
+        if mode == Mode::Yolo {
+            self.notify(
+                Level::Warning,
+                "yolo mode",
+                Some(harness_policy::approvals::YOLO_WARNING.to_owned()),
+            )
+            .await;
+        }
+    }
+
     async fn notify(&self, level: Level, title: &str, body: Option<String>) {
         self.send(CoreEvent::Notify {
             level,
@@ -397,7 +409,12 @@ impl Driver {
         let mut opts = opts;
         let first = opts.prompt.take();
         self.opts = opts;
-        self.h = Some(Handles::of(&core));
+        let h = Handles::of(&core);
+        // A session that starts in yolo (harness.ini, a resumed session)
+        // warns like a change to it does.
+        let mode = *h.mode.lock().unwrap_or_else(|e| e.into_inner());
+        self.warn_yolo(mode).await;
+        self.h = Some(h);
         *self.provider.lock().unwrap_or_else(|e| e.into_inner()) =
             Some(core.model.provider.clone());
         self.core = Some(core);
@@ -554,6 +571,7 @@ impl Driver {
                     core.set_mode(m);
                 }
                 self.opts.mode = Some(m);
+                self.warn_yolo(m).await;
             }
             UiRequest::Run(inv) => commands::invocation(self, inv).await,
             UiRequest::UndoMemory(sha) => commands::undo_memory(self, sha).await,

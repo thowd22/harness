@@ -30,6 +30,8 @@ pub const KEY_ACTIONS: &[&str] = &[
     "quit",
     "copy",
     "select",
+    "cycle_mode",
+    "focus_transcript",
 ];
 
 /// Fixed (non-dotted) section names.
@@ -54,7 +56,8 @@ config_enum!(
     Mode { /// Ask before every edit or command.
         Ask = "ask", /// Edit files freely, ask for commands.
         AutoEdit = "auto-edit", /// Act without asking (policy still applies).
-        Auto = "auto" }
+        Auto = "auto", /// Never ask (deny rules still apply).
+        Yolo = "yolo" }
 );
 config_enum!(
     /// UI theme (`[ui] theme`).

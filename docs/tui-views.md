@@ -15,7 +15,7 @@ transcript ...                                         toasts (top right)
 ⠹ thinking 3.1s · turn 4 · 12.3s · ↑12.4k (cache 11.9k) ↓812 · $0.021 · ctrl+c to interrupt
 ╭ ⏸ approve bash  $ git push origin main ──────────────────── outward action ╮
 › your message
-~/CODE/harness  main │ sonnet · auto-edit │ ctx ▓▓▓░░░░░ 41% │ ↑182k ↓14k cache 93% │ $0.84 │ verify ✔ │ ◐ 3 agents │ ⧉ gpu-box
+auto-edit │ ~/CODE/harness  main │ sonnet │ ctx ▓▓▓░░░░░ 41% │ ↑182k ↓14k cache 93% │ $0.84 │ verify ✔ │ ◐ 3 agents │ ⧉ gpu-box
 ```
 
 From the top: the transcript, the activity line (only while the agent
@@ -72,7 +72,7 @@ output no longer moves the lines you are reading, and a
 `↓ new messages · end` button appears on the bottom row of the transcript.
 Any of these returns to the bottom and follows again:
 
-- clicking the button, or focusing it (Shift+Tab from the input) and
+- clicking the button, or focusing it (Alt+Up from the input) and
   pressing Enter;
 - **End**, when the input is empty or its cursor is already at the end of
   the line (otherwise End first moves the cursor), or **Ctrl+End** at any
@@ -107,7 +107,8 @@ in the bottom border get their own row above it.
 
 Bodies longer than `[ui] tool_preview_lines` (default 8) are collapsed with
 `… N more lines · Enter to expand`. Click a card (its header, body or the
-expand hint), or focus it with Shift+Tab / arrows and press Enter, to expand
+expand hint), or focus it with Alt+Up from the input (then Shift+Tab /
+arrows) and press Enter, to expand
 or collapse it; Esc returns to the input. On the body the click acts on the
 release, so dragging over its output selects text instead (see
 [tui.md](tui.md#copy-and-paste)). A failed call always shows the complete error message the model
@@ -214,7 +215,7 @@ shows the spinner and phase, e.g. `⠹ thinking · 12.3s — harness`
 
 **Ctrl+P** opens one fuzzy-searchable list of everything you can do:
 built-in commands, workflows, skills, agents, past runs, remotes and
-settings (including the autonomy modes `ask`, `auto-edit`, `auto`). Each row
+settings (including the autonomy modes `ask`, `auto-edit`, `auto`, `yolo`). Each row
 shows the title, description, where it comes from (kind and scope such as
 `skill · project`) and its key binding, if it has one.
 
@@ -236,7 +237,8 @@ same way.
 
 Built-in entries: Toggle mouse, Show keys, Switch view, Interrupt,
 Notifications, Jump to end, Quit, Timestamps: cycle, Thinking: cycle,
-Mode: ask / auto-edit / auto (for this session; the status line updates),
+Mode: ask / auto-edit / auto / yolo (for this session; the status line
+updates),
 and the copy actions: Copy focused, Copy last message, Copy last code
 block, Copy tool output (with or without line numbers), Copy diff and
 Select text (see [Copy and paste](tui.md#copy-and-paste)).
@@ -277,17 +279,18 @@ the full history (newest first, with timestamps); Up/Down move, Esc or
 
 ## Status line
 
-The footer always shows, in theme colours: working directory and git
-branch, model, the reasoning effort when one is set (`effort low`, or
-`no reasoning` on a model that does not reason; see
-[`/effort`](commands.md#effort)) and autonomy mode, a context usage bar (green, orange above
+The footer always shows, in theme colours: the autonomy mode first (the
+last part ever left out; `yolo` in the error colour; Shift+Tab in the
+input changes it), working directory and git branch, model, the reasoning
+effort when one is set (`effort low`, or `no reasoning` on a model that
+does not reason; see [`/effort`](commands.md#effort)), a context usage bar (green, orange above
 60 %, red above 85 %), session tokens with the cache hit rate, session cost
 (`$?` until known), the verify state (spinner, `✔` or `✗`), the number of
 running agents and the remote hosts in use. When an MCP server has
 failed, a red `⚠ mcp <name>` (`⚠ mcp <n> failed` for several) shows after
-the model; clicking it, or Shift+Tab to it and Enter, opens `/mcp`.
+the model; clicking it, or Alt+Up to it and Enter, opens `/mcp`.
 While background bash jobs run (`bash` with `run_in_background`), a
-`⚙ <n> jobs` indicator (running colour) shows; clicking it, or Shift+Tab
+`⚙ <n> jobs` indicator (running colour) shows; clicking it, or Alt+Up
 to it and Enter, opens `/jobs`: a panel listing every job of the session
 with its state, elapsed time, command and log file, with buttons (click,
 or Tab/arrows and Enter; Esc closes) to open a job's latest output (`output
@@ -299,7 +302,7 @@ row, the status line wraps onto more rows (up to three, and at most a sixth
 of the screen) instead of cutting anything; long paths, branches and model
 names wrap too. When even that is not enough, the least important parts
 (remotes, path, tokens, verify, agents) are left out and a `+N more` button
-ends the last row: click it, or Shift+Tab to it and Enter, to open the full
+ends the last row: click it, or Alt+Up to it and Enter, to open the full
 status in a panel (directory, branch, model and mode, context, tokens,
 cost, verify, goal, agents, jobs, remotes and every failed MCP server). The
 palette entry **Show status** opens the same panel at any time.

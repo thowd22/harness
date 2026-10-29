@@ -3,12 +3,13 @@ source: crates/harness-tui/src/app/tests.rs
 expression: "snapshot(ColorDepth::Ansi256)"
 ---
 
-
           ┌ Keys ───────────────────────────────────────────────────┐
           │ enter                   send message                    │
           │ shift+enter, alt+enter  new line                        │
           │ esc                     cancel / back                   │
           │ tab                     switch view (chat / map)        │
+          │ shift+tab               next permission mode            │
+          │ alt+up                  focus the transcript            │
           │ ctrl+p                  command palette                 │
           │ ctrl+y                  copy to clipboard               │
           │ ctrl+t                  select text with the keyboard   │
@@ -20,17 +21,21 @@ expression: "snapshot(ColorDepth::Ansi256)"
           │ pgup / pgdn             scroll focused pane             │
           │ end                     jump to the latest message      │
           │ mouse                   click activates, wheel scrolls  │
-          │                                                         │
-Type a mes│                        [ Close ]                        │
-◐ sending └─────────────────────────────────────────── esc to close ┘
-› Type a message, / for commands
-. │ no model · auto-edit │ ↑0 ↓0 │ $? │ ◐ 1 agent
+Type a mes│                                                         │
+◐ sending │                        [ Close ]                        │
+› Type a m└─────────────────────────────────────────── esc to close ┘
+auto-edit │ . │ no model │ ↑0 ↓0 │ $? │ ◐ 1 agent
  chat  map  │ ◐ running                                                    keys
 --- styles ---
 0 0-79: fg=Indexed(255) bg=Indexed(235)
-1 0-79: fg=Indexed(255) bg=Indexed(235)
+1 0-9: fg=Indexed(255) bg=Indexed(235)
+1 10-68: fg=Indexed(141) bg=Indexed(235) mod=BOLD
+1 69-79: fg=Indexed(255) bg=Indexed(235)
 2 0-9: fg=Indexed(255) bg=Indexed(235)
-2 10-68: fg=Indexed(141) bg=Indexed(235) mod=BOLD
+2 10-10: fg=Indexed(141) bg=Indexed(235) mod=BOLD
+2 11-35: fg=Indexed(141) bg=Indexed(235)
+2 36-67: fg=Indexed(255) bg=Indexed(235)
+2 68-68: fg=Indexed(141) bg=Indexed(235) mod=BOLD
 2 69-79: fg=Indexed(255) bg=Indexed(235)
 3 0-9: fg=Indexed(255) bg=Indexed(235)
 3 10-10: fg=Indexed(141) bg=Indexed(235) mod=BOLD
@@ -124,30 +129,34 @@ Type a mes│                        [ Close ]                        │
 17 69-79: fg=Indexed(255) bg=Indexed(235)
 18 0-9: fg=Indexed(255) bg=Indexed(235)
 18 10-10: fg=Indexed(141) bg=Indexed(235) mod=BOLD
-18 11-67: fg=Indexed(255) bg=Indexed(235)
+18 11-35: fg=Indexed(141) bg=Indexed(235)
+18 36-67: fg=Indexed(255) bg=Indexed(235)
 18 68-68: fg=Indexed(141) bg=Indexed(235) mod=BOLD
 18 69-79: fg=Indexed(255) bg=Indexed(235)
 19 0-9: fg=Indexed(61) bg=Indexed(235)
 19 10-10: fg=Indexed(141) bg=Indexed(235) mod=BOLD
-19 11-34: fg=Indexed(255) bg=Indexed(235)
-19 35-43: fg=Indexed(141) bg=Indexed(238)
-19 44-67: fg=Indexed(255) bg=Indexed(235)
+19 11-67: fg=Indexed(255) bg=Indexed(235)
 19 68-68: fg=Indexed(141) bg=Indexed(235) mod=BOLD
 19 69-79: fg=Indexed(61) bg=Indexed(235)
 20 0-8: fg=Indexed(117) bg=Indexed(235)
 20 9-9: fg=Indexed(255) bg=Indexed(235)
-20 10-53: fg=Indexed(141) bg=Indexed(235) mod=BOLD
-20 54-67: fg=Indexed(61) bg=Indexed(235) mod=BOLD
+20 10-10: fg=Indexed(141) bg=Indexed(235) mod=BOLD
+20 11-34: fg=Indexed(255) bg=Indexed(235)
+20 35-43: fg=Indexed(141) bg=Indexed(238)
+20 44-67: fg=Indexed(255) bg=Indexed(235)
 20 68-68: fg=Indexed(141) bg=Indexed(235) mod=BOLD
 20 69-79: fg=Indexed(255) bg=Indexed(235)
 21 0-1: fg=Indexed(141) bg=Indexed(238)
-21 2-31: fg=Indexed(61) bg=Indexed(238)
-21 32-79: fg=Indexed(255) bg=Indexed(238)
-22 0-0: fg=Indexed(117) bg=Indexed(235)
-22 1-3: fg=Indexed(61) bg=Indexed(235)
-22 4-11: fg=Indexed(141) bg=Indexed(235)
-22 12-14: fg=Indexed(61) bg=Indexed(235)
-22 15-23: fg=Indexed(141) bg=Indexed(235)
+21 2-9: fg=Indexed(61) bg=Indexed(238)
+21 10-53: fg=Indexed(141) bg=Indexed(235) mod=BOLD
+21 54-67: fg=Indexed(61) bg=Indexed(235) mod=BOLD
+21 68-68: fg=Indexed(141) bg=Indexed(235) mod=BOLD
+21 69-79: fg=Indexed(255) bg=Indexed(238)
+22 0-8: fg=Indexed(141) bg=Indexed(235)
+22 9-11: fg=Indexed(61) bg=Indexed(235)
+22 12-12: fg=Indexed(117) bg=Indexed(235)
+22 13-15: fg=Indexed(61) bg=Indexed(235)
+22 16-23: fg=Indexed(141) bg=Indexed(235)
 22 24-26: fg=Indexed(61) bg=Indexed(235)
 22 27-31: fg=Indexed(228) bg=Indexed(235)
 22 32-34: fg=Indexed(61) bg=Indexed(235)

@@ -2,7 +2,7 @@
 
 **Ctrl+P** opens one fuzzy-searchable list of everything you can do:
 built-in commands, workflows, skills, agents, past runs, saved sessions,
-remote hosts, MCP prompts and resources, and settings, including the autonomy modes (`ask`, `auto-edit`, `auto`). Each
+remote hosts, MCP prompts and resources, and settings, including the autonomy modes (`ask`, `auto-edit`, `auto`, `yolo`). Each
 row shows where it comes from (for example `skill · project`) and its key
 binding.
 

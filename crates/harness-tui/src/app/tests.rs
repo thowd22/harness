@@ -747,11 +747,11 @@ fn memory_cards_undo_by_mouse_and_keyboard() {
     assert!(ui.text().contains("undone"), "{}", ui.text());
     assert!(!ui.text().contains("[ undo ]"));
 
-    // Keyboard: Shift+Tab from the input reaches the undo button.
+    // Keyboard: Alt+Up from the input reaches the undo button.
     let mut ui = Ui::sized(AppConfig::default(), 90, 24);
     ui.app.handle(memory_event());
     ui.draw();
-    ui.send(keys("shift+tab"));
+    ui.send(keys("alt+up"));
     ui.send(keys("enter"));
     assert_eq!(ui.requests(), vec![UiRequest::UndoMemory(SHA.into())]);
 }

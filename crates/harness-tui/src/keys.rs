@@ -57,15 +57,22 @@ pub enum Action {
     /// Start keyboard text selection (transcript lines in the chat, a
     /// cursor on the map and other screens).
     Select,
+    /// Step to the next permission mode (from the chat input).
+    CycleMode,
+    /// Move focus from the chat input to the transcript (the nearest
+    /// card, button or indicator above it).
+    FocusTranscript,
 }
 
 impl Action {
     /// Every action, in help-overlay order.
-    pub const ALL: [Action; 9] = [
+    pub const ALL: [Action; 11] = [
         Action::Send,
         Action::Newline,
         Action::Cancel,
         Action::SwitchView,
+        Action::CycleMode,
+        Action::FocusTranscript,
         Action::Palette,
         Action::Copy,
         Action::Select,
@@ -85,6 +92,8 @@ impl Action {
             Action::Quit => "quit",
             Action::Copy => "copy",
             Action::Select => "select",
+            Action::CycleMode => "cycle_mode",
+            Action::FocusTranscript => "focus_transcript",
         }
     }
 
@@ -105,6 +114,8 @@ impl Action {
             Action::Quit => "quit",
             Action::Copy => "copy to clipboard",
             Action::Select => "select text with the keyboard",
+            Action::CycleMode => "next permission mode",
+            Action::FocusTranscript => "focus the transcript",
         }
     }
 
@@ -120,6 +131,8 @@ impl Action {
             Action::Quit => &["ctrl+q"],
             Action::Copy => &["ctrl+y"],
             Action::Select => &["ctrl+t"],
+            Action::CycleMode => &["shift+tab"],
+            Action::FocusTranscript => &["alt+up"],
         }
     }
 }
@@ -667,7 +680,10 @@ mod tests {
             Some(Action::Quit)
         );
         assert_eq!(k.lookup(&ev(KeyCode::Char('q'), none)), None);
-        assert_eq!(k.lookup(&ev(KeyCode::BackTab, KeyModifiers::SHIFT)), None);
+        assert_eq!(
+            k.lookup(&ev(KeyCode::BackTab, KeyModifiers::SHIFT)),
+            Some(Action::CycleMode)
+        );
     }
 
     #[test]

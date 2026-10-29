@@ -326,6 +326,13 @@ impl ChatView {
         self.mode.session()
     }
 
+    /// Sets the session mode (after `/mode`), for the status line and the
+    /// cycle-mode key.
+    pub fn set_mode(&mut self, mode: Mode) {
+        self.mode.set_palette(mode);
+        self.status.set_mode(mode);
+    }
+
     /// The focused element.
     pub fn focused(&self) -> Option<&ElementId> {
         self.interaction.focused()
@@ -656,9 +663,23 @@ impl ChatView {
                     return out.push(ChatOutput::Cancel);
                 }
                 // Like the app: the switch-view key (Tab) switches view from
-                // the input; Shift+Tab and paging reach the focus layer.
+                // the input, the cycle-mode key (Shift+Tab) steps the
+                // permission mode, the focus-transcript key (Alt+Up) moves
+                // focus to the transcript, and paging reaches the focus
+                // layer.
                 if action == Some(Action::SwitchView) {
                     return out.push(ChatOutput::Command(AppCommand::SwitchView(View::Map)));
+                }
+                if action == Some(Action::CycleMode) {
+                    let m = self.mode.cycle();
+                    self.status.set_mode(m);
+                    return out.push(ChatOutput::ModeChanged(m));
+                }
+                if action == Some(Action::FocusTranscript) {
+                    if let Some(d) = self.interaction.move_focus(false) {
+                        self.dispatch(d, now, out);
+                    }
+                    return;
                 }
                 if let Some(d) = self.interaction.handle_key(k)
                     && !matches!(d, Dispatch::Back | Dispatch::Activate(_))
@@ -1470,13 +1491,36 @@ mod tests {
     #[test]
     fn palette_mode_changes_update_the_footer() {
         let mut ui = Ui::new();
-        assert!(ui.text().contains("sonnet · auto-edit"));
+        assert!(ui.text().contains("auto-edit │ "), "{}", ui.text());
         ui.send(vec![key("ctrl+p")]);
         ui.send(type_text("mode auto act"));
         ui.send(vec![key("enter")]);
         assert_eq!(ui.take(), vec![ChatOutput::ModeChanged(Mode::Auto)]);
-        assert!(ui.text().contains("sonnet · auto "), "{}", ui.text());
+        assert!(ui.text().contains("auto │ "), "{}", ui.text());
         assert_eq!(ui.view.mode(), Mode::Auto);
+    }
+
+    #[test]
+    fn shift_tab_in_the_input_cycles_the_mode() {
+        let mut ui = Ui::new();
+        ui.send(type_text("draft"));
+        for want in [Mode::Auto, Mode::Yolo, Mode::Ask, Mode::AutoEdit] {
+            ui.send(vec![key("shift+tab")]);
+            assert_eq!(ui.take(), vec![ChatOutput::ModeChanged(want)]);
+            assert_eq!(ui.view.mode(), want);
+            assert!(
+                ui.text().contains(&format!("{want} │ ")),
+                "{want}: {}",
+                ui.text()
+            );
+            assert_eq!(ui.view.focused().map(|f| f.0.as_str()), Some(INPUT_ID));
+        }
+        // The typed text is untouched.
+        assert!(ui.text().contains("draft"));
+        // A mode set elsewhere (`/mode`) is where the next press starts.
+        ui.view.set_mode(Mode::Yolo);
+        ui.send(vec![key("shift+tab")]);
+        assert_eq!(ui.take(), vec![ChatOutput::ModeChanged(Mode::Ask)]);
     }
 
     #[test]
@@ -1912,11 +1956,11 @@ mod tests {
         assert!(ui.text().contains("… 4 more lines"));
         ui.click_text("$ seq 6");
         assert!(ui.text().contains("Enter to collapse"));
-        // Keyboard: Shift+Tab from the input reaches the card's copy button,
+        // Keyboard: Alt+Up from the input reaches the card's copy button,
         // then the card; Enter toggles, Esc returns.
         ui.send(vec![key("esc")]);
         ui.view.interaction.set_focus(INPUT_ID);
-        ui.send(vec![key("shift+tab")]);
+        ui.send(vec![key("alt+up")]);
         assert_eq!(ui.view.focused(), Some(&ElementId::from("copy.out.b")));
         ui.send(vec![key("shift+tab")]);
         assert_eq!(ui.view.focused(), Some(&ElementId::from("card.b")));
@@ -1981,7 +2025,7 @@ mod tests {
         assert!(ui.text().contains("Enter to collapse"));
         ui.send(vec![key("esc")]);
         ui.view.interaction.set_focus(INPUT_ID);
-        ui.send(vec![key("shift+tab")]);
+        ui.send(vec![key("alt+up")]);
         assert_eq!(ui.view.focused(), Some(&ElementId::from("copy.out.m")));
         ui.send(vec![key("shift+tab")]);
         assert_eq!(ui.view.focused(), Some(&ElementId::from("card.m")));
@@ -2200,7 +2244,7 @@ mod tests {
         let mut ui = Ui::sized(60, 14);
         scroll_up_then_output(&mut ui, vec![key("pageup")]);
         // The indicator is the last element above the input.
-        ui.send(vec![key("shift+tab")]);
+        ui.send(vec![key("alt+up")]);
         assert_eq!(
             ui.view.focused().map(|f| f.0.as_str()),
             Some(NEW_MESSAGES_ID)
@@ -2229,9 +2273,9 @@ mod tests {
         // Mouse.
         ui.click_text("⚠ mcp docs");
         assert_eq!(ui.take(), vec![ChatOutput::Submit("/mcp".into())]);
-        // Keyboard: Shift+Tab from the input (Tab switches the view there)
-        // cycles the focus layer and reaches it; Enter activates it.
-        ui.send(vec![key("shift+tab")]);
+        // Keyboard: Alt+Up from the input (Tab switches the view there and
+        // Shift+Tab cycles the mode) reaches it; Enter activates it.
+        ui.send(vec![key("alt+up")]);
         assert_eq!(
             ui.view.focused().map(|f| f.0.as_str()),
             Some(crate::status::MCP_INDICATOR_ID)
@@ -2285,8 +2329,8 @@ mod tests {
         // Mouse.
         ui.click_text("⚙ 1 job");
         assert_eq!(ui.take(), vec![ChatOutput::Submit("/jobs".into())]);
-        // Keyboard: Shift+Tab from the input reaches it; Enter activates it.
-        ui.send(vec![key("shift+tab")]);
+        // Keyboard: Alt+Up from the input reaches it; Enter activates it.
+        ui.send(vec![key("alt+up")]);
         assert_eq!(
             ui.view.focused().map(|f| f.0.as_str()),
             Some(crate::status::JOBS_INDICATOR_ID)
@@ -2615,9 +2659,9 @@ mod tests {
         ui.view.interaction.set_focus("copy.code.0.0");
         ui.send(vec![key("enter")]);
         assert_eq!(copies(ui.take())[0].1, "cargo test -p parse");
-        // Shift+Tab from the input walks back over the card's buttons.
+        // Alt+Up from the input walks back over the card's buttons.
         ui.view.interaction.set_focus(INPUT_ID);
-        ui.send(vec![key("shift+tab")]);
+        ui.send(vec![key("alt+up")]);
         assert_eq!(ui.view.focused(), Some(&ElementId::from("copy.diff.e")));
         ui.send(vec![key("ctrl+y")]);
         assert_eq!(copies(ui.take()), vec![("diff".into(), EDIT_DIFF.into())]);
@@ -2852,9 +2896,9 @@ mod tests {
         // Mouse.
         ui.click_text("more");
         assert_eq!(ui.take(), vec![ChatOutput::Command(AppCommand::ShowStatus)]);
-        // Keyboard: Shift+Tab from the input reaches the last status
+        // Keyboard: Alt+Up from the input reaches the last status
         // button; Enter activates it.
-        ui.send(vec![key("shift+tab")]);
+        ui.send(vec![key("alt+up")]);
         assert_eq!(
             ui.view.focused().map(|f| f.0.as_str()),
             Some(crate::status::STATUS_MORE_ID)

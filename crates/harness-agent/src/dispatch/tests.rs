@@ -543,6 +543,59 @@ async fn capped_gates_never_get_looser_than_the_agent_mode() {
     ));
 }
 
+/// An approval UI that fails the test if it is ever asked.
+struct NeverAskUi;
+
+#[async_trait]
+impl harness_policy::approvals::ApprovalUi for NeverAskUi {
+    async fn ask(
+        &self,
+        prompt: harness_policy::approvals::ApprovalPrompt,
+    ) -> Vec<(String, harness_policy::approvals::ApprovalAnswer)> {
+        panic!("asked for approval in yolo mode: {:?}", prompt.requests);
+    }
+}
+
+#[tokio::test]
+async fn yolo_gates_never_ask() {
+    use harness_policy::rules::PolicyConfig;
+    let dir = tempfile::tempdir().unwrap();
+    let config = PolicyConfig {
+        bash_ask: vec!["make release*".into()],
+        bash_deny: vec!["rm -rf /*".into()],
+        ..Default::default()
+    };
+    let engine = PolicyEngine::new(&config, dir.path()).unwrap();
+    let broker = ApprovalBroker::new(engine.grants().clone(), Arc::new(NeverAskUi), dir.path());
+    let gate = Arc::new(PolicyGate::new(engine, Arc::new(broker), Mode::Yolo));
+    let call = |id: &str, tool: &str, args: Value| GateCall {
+        call_id: id.into(),
+        tool: tool.into(),
+        args,
+    };
+    let calls = [
+        // An outward action, an ask rule, sweeping staging and an
+        // unconfigured MCP tool: each asks in auto.
+        call("push", "bash", json!({"command": "git push origin main"})),
+        call("rule", "bash", json!({"command": "make release"})),
+        call("stage", "bash", json!({"command": "git add -A"})),
+        call("mcp", "mcp__gh__create_issue", json!({})),
+        call("edit", "write", json!({"path": "x.txt", "content": "x"})),
+    ];
+    let allowed = vec![GateDecision::Allow; calls.len()];
+    assert_eq!(gate.review(None, &calls).await, allowed);
+    assert!(calls.iter().all(|c| gate.auto_allows(None, c)));
+    // A subagent's gate (capped by its agent mode) is yolo too when the
+    // agent sets no stricter mode.
+    let sub = CappedGate::new(gate.clone(), Mode::Yolo);
+    assert_eq!(sub.review(None, &calls).await, allowed);
+    // Deny rules still refuse.
+    let denied = gate
+        .review(None, &[call("rm", "bash", json!({"command": "rm -rf /"}))])
+        .await;
+    assert!(matches!(denied[0], GateDecision::Deny { .. }), "{denied:?}");
+}
+
 /// A tool that forwards to an MCP server tool named by its `call` argument.
 struct FakeMcp;
 

@@ -22,6 +22,6 @@ pub use broker::{
 };
 pub use grants::SessionGrants;
 pub use ini_edit::{ALWAYS_KEY, IniEditError, IniRuleProposal, append_rule};
-pub use mode::{ModeState, PALETTE_MODE_PREFIX, PaletteModeEntry, palette_entries};
+pub use mode::{ModeState, PALETTE_MODE_PREFIX, PaletteModeEntry, YOLO_WARNING, palette_entries};
 
 pub use crate::rules::Mode;

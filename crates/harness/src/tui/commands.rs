@@ -366,6 +366,7 @@ async fn builtin(d: &mut Driver, b: Builtin, cmd: &Command) {
                     *h.mode.lock().unwrap_or_else(|e| e.into_inner()) = mode;
                     d.opts.mode = Some(mode);
                     d.send(CoreEvent::Mode(mode)).await;
+                    d.warn_yolo(mode).await;
                 }
                 None => {
                     d.notify(Level::Error, "unknown mode", Some(m.to_owned()))

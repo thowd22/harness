@@ -25,12 +25,20 @@ that decides wins:
 
 When no rule decides, the autonomy mode does:
 
-| Action | `ask` | `auto-edit` (default) | `auto` |
-|---|---|---|---|
-| read a file (`read`, `grep`, `glob`) | allow | allow | allow |
-| write / edit a file | ask | allow | allow |
-| bash command | ask | ask | allow |
-| other tools | allow | allow | allow |
+| Action | `ask` | `auto-edit` (default) | `auto` | `yolo` |
+|---|---|---|---|---|
+| read a file (`read`, `grep`, `glob`) | allow | allow | allow | allow |
+| write / edit a file | ask | allow | allow | allow |
+| bash command | ask | ask | allow | allow |
+| other tools | allow | allow | allow | allow |
+
+`yolo` goes further than `auto`: nothing ever asks. Whatever would have
+asked in `auto` (`bash.ask` and MCP rules, the outward-action guard, the
+staging guard, edits outside an agent's scope) runs without a prompt, and
+the recorded rule says so (`mode yolo`, naming the rule that would have
+asked). Deny rules, protected paths and the bash sandbox still apply:
+they refuse rather than ask. Choosing `yolo` shows a warning, and the
+status line shows the mode in the error colour.
 
 Every decision is recorded with the rule that produced it: the layer, where
 the rule lives (for example `harness.ini [policy] bash.deny`), the pattern
@@ -159,10 +167,12 @@ action: it asks in every mode, including `auto`. See
 
 ## Autonomy modes and approvals
 
-The mode comes from `[general] mode` (`ask`, `auto-edit`, `auto`). The
-command palette overrides it for the session (`Mode: ask`, `Mode: auto-edit`,
-`Mode: auto`). A per-agent mode can only make it stricter: the effective
-mode is the stricter of the session mode and the agent's.
+The mode comes from `[general] mode` (`ask`, `auto-edit`, `auto`, `yolo`).
+Shift+Tab in the chat input steps through them (ask → auto-edit → auto →
+yolo → ask), and `/mode` and the command palette (`Mode: ask`,
+`Mode: auto-edit`, `Mode: auto`, `Mode: yolo`) set one, for the session. A
+per-agent mode can only make it stricter: the effective mode is the
+stricter of the session mode and the agent's.
 
 When calls need approval you can answer each one:
 

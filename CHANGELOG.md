@@ -26,8 +26,26 @@ to built-in prompts, agents, workflows and `harness.ini` defaults.
   current model takes. Claude budget models get xhigh (32,768) and max
   (49,152) thinking budgets.
 
+- `yolo`, a permission mode above `auto` that never asks: whatever would
+  ask in `auto` (`bash.ask` and MCP rules, the outward-action guard for
+  pushes and publishes, the staging guard, edits outside an agent's scope)
+  runs without a prompt, for the main agent and subagents. Deny rules,
+  protected paths and the sandbox still apply. Set it with `[general] mode`,
+  `harness run --mode yolo`, `/mode yolo`, the palette or Shift+Tab; it
+  warns when chosen. Agent YAML cannot set it.
+- Shift+Tab in the chat input steps through the permission modes (ask →
+  auto-edit → auto → yolo → ask), like Claude Code. Rebind it with
+  `[keys] cycle_mode`.
+
 ### Changed
 
+- The status line shows the permission mode first, left of the working
+  directory, and keeps it when the terminal is too narrow for anything
+  else; `yolo` shows in the error colour.
+- Alt+Up (`[keys] focus_transcript`) now moves focus from the chat input to
+  the cards, buttons and indicators above it, since Shift+Tab there changes
+  the mode. Once something is focused, Shift+Tab and the arrows move focus
+  as before.
 - Cached live model lists from 0.6.0 and earlier are fetched again on the
   next refresh, so they pick up effort levels; until then the cached list
   is still used.

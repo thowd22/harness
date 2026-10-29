@@ -416,6 +416,36 @@ fn outward_actions_ask_even_in_auto() {
 }
 
 #[test]
+fn yolo_never_asks_but_still_denies() {
+    let f = fx();
+    let e = f.engine();
+    // Outward actions, ask rules and the mode default all ask in auto;
+    // yolo runs them and says what would have asked.
+    for (c, asked) in [
+        ("git push origin main", "built-in"),
+        ("deploy prod", "harness.ini [policy] outward.ask"),
+        ("git commit -m x", "harness.ini [policy] bash.ask"),
+    ] {
+        assert_eq!(d(&e, &bash(c), Mode::Auto), Decision::Ask, "{c}");
+        let v = decide(&e, &bash(c), Mode::Yolo);
+        assert_eq!(v.decision, Decision::Allow, "{c}");
+        assert_eq!(v.rule.layer, Layer::Mode, "{c}");
+        assert!(v.rule.reason.contains("yolo"), "{}", v.rule.reason);
+        assert!(v.rule.reason.contains(asked), "{c}: {}", v.rule.reason);
+    }
+    assert_eq!(d(&e, &bash("make"), Mode::Yolo), Decision::Allow);
+    assert_eq!(d(&e, &write("src/lib.rs"), Mode::Yolo), Decision::Allow);
+    // Deny rules and protected paths are refusals, not prompts.
+    assert_eq!(d(&e, &bash("git push --force"), Mode::Yolo), Decision::Deny);
+    assert_eq!(d(&e, &bash("rm -rf /"), Mode::Yolo), Decision::Deny);
+    assert_eq!(
+        d(&e, &read(f.home.join(".ssh/id_rsa")), Mode::Yolo),
+        Decision::Deny
+    );
+    assert_eq!(d(&e, &write(f.ini.clone()), Mode::Yolo), Decision::Deny);
+}
+
+#[test]
 fn outward_chained_and_aliased_forms() {
     let f = fx();
     let e = f.engine();
@@ -666,19 +696,22 @@ fn mcp_tools_follow_ini_rules_and_are_outward_by_default() {
         name: action_name(s, t),
     };
     for mode in Mode::ALL {
+        // Yolo runs whatever would ask; the other modes ask.
+        let ask = if mode == Mode::Yolo {
+            Decision::Allow
+        } else {
+            Decision::Ask
+        };
         let v = decide(&e, &mcp("github", "delete_repo"), mode);
         assert_eq!(v.decision, Decision::Deny, "{mode}");
         assert_eq!(v.rule.origin, "harness.ini [policy] mcp.github.deny");
         assert_eq!(v.rule.rule, "delete_*");
         let v = decide(&e, &mcp("github", "get_issue"), mode);
         assert_eq!((v.decision, v.rule.layer), (Decision::Allow, Layer::Ini));
-        assert_eq!(
-            d(&e, &mcp("github", "get_secret_value"), mode),
-            Decision::Ask
-        );
+        assert_eq!(d(&e, &mcp("github", "get_secret_value"), mode), ask);
         // No rule: an outward action that asks even in auto mode.
         let v = decide(&e, &mcp("github", "create_issue"), mode);
-        assert_eq!((v.decision, v.outward), (Decision::Ask, true), "{mode}");
+        assert_eq!((v.decision, v.outward), (ask, true), "{mode}");
         assert!(
             v.rule.reason.contains("mcp.github.allow"),
             "{}",
@@ -686,10 +719,10 @@ fn mcp_tools_follow_ini_rules_and_are_outward_by_default() {
         );
         // Annotations count only where the user trusts them.
         assert_eq!(d(&e, &mcp("docs", "search"), mode), Decision::Allow);
-        assert_eq!(d(&e, &mcp("docs", "publish"), mode), Decision::Ask);
-        assert_eq!(d(&e, &mcp("github", "list_repos"), mode), Decision::Ask);
+        assert_eq!(d(&e, &mcp("docs", "publish"), mode), ask);
+        assert_eq!(d(&e, &mcp("github", "list_repos"), mode), ask);
         // Unconfigured servers ask too.
-        assert_eq!(d(&e, &mcp("other", "x"), mode), Decision::Ask);
+        assert_eq!(d(&e, &mcp("other", "x"), mode), ask);
     }
     // Session grants turn asks into allows, never denies.
     e.grants().allow_tool("mcp:github/*");

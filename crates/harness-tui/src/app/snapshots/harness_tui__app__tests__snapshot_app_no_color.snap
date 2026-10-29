@@ -3,12 +3,13 @@ source: crates/harness-tui/src/app/tests.rs
 expression: "snapshot(ColorDepth::None)"
 ---
 
-
           ┌ Keys ───────────────────────────────────────────────────┐
           │ enter                   send message                    │
           │ shift+enter, alt+enter  new line                        │
           │ esc                     cancel / back                   │
           │ tab                     switch view (chat / map)        │
+          │ shift+tab               next permission mode            │
+          │ alt+up                  focus the transcript            │
           │ ctrl+p                  command palette                 │
           │ ctrl+y                  copy to clipboard               │
           │ ctrl+t                  select text with the keyboard   │
@@ -20,14 +21,15 @@ expression: "snapshot(ColorDepth::None)"
           │ pgup / pgdn             scroll focused pane             │
           │ end                     jump to the latest message      │
           │ mouse                   click activates, wheel scrolls  │
-          │                                                         │
-Type a mes│                        [ Close ]                        │
-◐ sending └─────────────────────────────────────────── esc to close ┘
-› Type a message, / for commands
-. │ no model · auto-edit │ ↑0 ↓0 │ $? │ ◐ 1 agent
+Type a mes│                                                         │
+◐ sending │                        [ Close ]                        │
+› Type a m└─────────────────────────────────────────── esc to close ┘
+auto-edit │ . │ no model │ ↑0 ↓0 │ $? │ ◐ 1 agent
  chat  map  │ ◐ running                                                    keys
 --- styles ---
-2 10-68: mod=BOLD
+1 10-68: mod=BOLD
+2 10-10: mod=BOLD
+2 68-68: mod=BOLD
 3 10-10: mod=BOLD
 3 68-68: mod=BOLD
 4 10-10: mod=BOLD
@@ -61,8 +63,11 @@ Type a mes│                        [ Close ]                        │
 18 10-10: mod=BOLD
 18 68-68: mod=BOLD
 19 10-10: mod=BOLD
-19 35-43: mod=REVERSED
 19 68-68: mod=BOLD
-20 10-68: mod=BOLD
-21 0-79: mod=REVERSED
+20 10-10: mod=BOLD
+20 35-43: mod=REVERSED
+20 68-68: mod=BOLD
+21 0-9: mod=REVERSED
+21 10-68: mod=BOLD
+21 69-79: mod=REVERSED
 23 0-5: mod=BOLD

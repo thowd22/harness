@@ -6,7 +6,7 @@ expression: "snap(Page::Palette)"
 
 
             ╭ Command palette ─────────────────────────────────────────────────────────────────────────────╮
-            │›   17 of 17                                                                                  │
+            │›   18 of 18                                                                                  │
             │▸ Interrupt                             Stop the running agent                 builtin  ctrl+c│
             │  Jump to end                           Scroll the chat to the latest output           builtin│
             │  Notifications                         Show the notification history                  builtin│
@@ -22,9 +22,9 @@ expression: "snap(Page::Palette)"
             │  Mode: ask                             Ask before every edit and command              setting│
             │  Mode: auto                            Act without asking (rules and outward guard s… setting│
             │  Mode: auto-edit                       Edit files freely, ask before commands         setting│
+            │  Mode: yolo                            Never ask: nothing is confirmed (deny rules s… setting│
             │  Thinking: cycle                       collapsed → expanded → hidden for this session setting│
             │  Timestamps: cycle                     time → relative → off for this session         setting│
-            │                                                                                              │
             │                                                                                              │
             ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
 
@@ -207,7 +207,10 @@ expression: "snap(Page::Palette)"
 21 108-119: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 22 0-11: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 22 12-12: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90) mod=BOLD
-22 13-106: fg=Rgb(248, 248, 242) bg=Rgb(68, 71, 90)
+22 13-14: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90)
+22 15-52: fg=Rgb(248, 248, 242) bg=Rgb(68, 71, 90)
+22 53-98: fg=Rgb(98, 114, 164) bg=Rgb(68, 71, 90)
+22 99-106: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90)
 22 107-107: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90) mod=BOLD
 22 108-119: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
 23 0-11: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)

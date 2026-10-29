@@ -29,7 +29,7 @@ true` is set, and always when `CI` is set. Use an API key there. See
 | `--approvals deny` | (default) Every call that would ask for approval is denied; the model is told why. |
 | `--approvals allowlist` | Calls that would ask are allowed only if they match an `--allow` pattern (or an ini `bash.allow` rule). |
 | `--allow PATTERN` | Command pattern for allowlist mode, e.g. `--allow 'cargo test*'`. Repeatable. |
-| `--mode ask\|auto-edit\|auto` | Autonomy mode for this run (default `[general] mode`). |
+| `--mode ask\|auto-edit\|auto\|yolo` | Autonomy mode for this run (default `[general] mode`). `yolo` runs whatever would ask, including outward actions, and prints a warning; see [policy](policy.md#autonomy-modes-and-approvals). |
 | `--max-turns N` | Stop after N model calls. |
 | `--budget-usd X`, `--budget-tokens N` | Stop when this run has spent X dollars or N tokens. |
 | `--no-verify` | Skip the `[verify] command`. |

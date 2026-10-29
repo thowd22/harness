@@ -524,6 +524,36 @@ async fn mode_changes_reach_the_policy_gate() {
 }
 
 #[tokio::test]
+async fn yolo_warns_and_runs_without_prompts() {
+    let env = Env::new();
+    let script = env.script(
+        "responses:\n  - content: [ { tool_use: { name: bash, input: { command: \"touch made.txt\" } } } ]\n  - content: [ { text: finished } ]\n",
+    );
+    let mut h = Harness::start(&env, &script).await;
+    let warned = |e: &AppEvent| {
+        matches!(e, AppEvent::Core(CoreEvent::Notify { level: Level::Warning, title, body })
+            if title == "yolo mode" && body.as_deref() == Some(harness_policy::approvals::YOLO_WARNING))
+    };
+    // Shift+Tab (or the palette) reports the change.
+    h.d.request(UiRequest::ModeChanged(Mode::Yolo)).await;
+    h.until(warned).await;
+    // A command that asks in auto-edit runs with no prompt.
+    h.d.request(UiRequest::Submit("make a file".into())).await;
+    h.finish_turn().await;
+    assert!(env.project.join("made.txt").exists());
+    assert!(h.prompts.try_recv().is_err(), "no approval prompt in yolo");
+    // `/mode yolo` warns too; other modes do not.
+    h.d.request(UiRequest::Submit("/mode ask".into())).await;
+    h.until(|e| matches!(e, AppEvent::Core(CoreEvent::Mode(Mode::Ask))))
+        .await;
+    h.d.request(UiRequest::Submit("/mode yolo".into())).await;
+    h.until(warned).await;
+    // A session that starts in yolo from harness.ini warns at once.
+    let mut h = Harness::with_ini(&env, &script, false, "[general]\nmode = yolo\n").await;
+    h.until(warned).await;
+}
+
+#[tokio::test]
 async fn workflow_commands_prompt_for_missing_inputs_and_gates_are_answered_in_chat() {
     let env = Env::new();
     let fixtures = crate_root().join("../harness-workflow/evals/workflows/fixtures/calc");

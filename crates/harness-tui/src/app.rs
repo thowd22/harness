@@ -1257,7 +1257,7 @@ impl App {
             CoreEvent::HostBadge { host, badge, token } => {
                 self.map.set_host_badge(&host, &badge, token)
             }
-            CoreEvent::Mode(m) => self.chat.status_mut().set_mode(m),
+            CoreEvent::Mode(m) => self.chat.set_mode(m),
             CoreEvent::Effort(e) => self.chat.status_mut().set_effort(e),
             CoreEvent::Memory(data) => match &mut self.screen {
                 Some(Screen::Memory(m)) => m.browser.set_data(data),

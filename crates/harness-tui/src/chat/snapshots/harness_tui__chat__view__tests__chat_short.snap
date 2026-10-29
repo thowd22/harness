@@ -1,6 +1,5 @@
 ---
 source: crates/harness-tui/src/chat/view.rs
-assertion_line: 1892
 expression: ui.snapshot()
 ---
 
@@ -15,7 +14,7 @@ expression: ui.snapshot()
 ▌ second                                   ⧉ copy · 14:32:00
 
 › Type a message, / for commands
-~/CODE/harness  main │ sonnet · auto-edit │ ctx ░░░░░░░░ 0%
+auto-edit │ ~/CODE/harness  main │ sonnet │ ctx ░░░░░░░░ 0%
 ↑0 ↓0 │ $?
 --- styles ---
 0 0-59: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)
@@ -36,12 +35,12 @@ expression: ui.snapshot()
 11 0-1: fg=Rgb(189, 147, 249) bg=Rgb(68, 71, 90)
 11 2-31: fg=Rgb(98, 114, 164) bg=Rgb(68, 71, 90)
 11 32-59: fg=Rgb(248, 248, 242) bg=Rgb(68, 71, 90)
-12 0-13: fg=Rgb(139, 233, 253) bg=Rgb(40, 42, 54)
-12 14-19: fg=Rgb(255, 121, 198) bg=Rgb(40, 42, 54)
-12 20-22: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
-12 23-28: fg=Rgb(189, 147, 249) bg=Rgb(40, 42, 54)
-12 29-31: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
-12 32-40: fg=Rgb(189, 147, 249) bg=Rgb(40, 42, 54)
+12 0-8: fg=Rgb(189, 147, 249) bg=Rgb(40, 42, 54)
+12 9-11: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
+12 12-25: fg=Rgb(139, 233, 253) bg=Rgb(40, 42, 54)
+12 26-31: fg=Rgb(255, 121, 198) bg=Rgb(40, 42, 54)
+12 32-34: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
+12 35-40: fg=Rgb(189, 147, 249) bg=Rgb(40, 42, 54)
 12 41-55: fg=Rgb(98, 114, 164) bg=Rgb(40, 42, 54)
 12 56-58: fg=Rgb(241, 250, 140) bg=Rgb(40, 42, 54)
 12 59-59: fg=Rgb(248, 248, 242) bg=Rgb(40, 42, 54)

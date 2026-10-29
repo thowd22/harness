@@ -14,7 +14,7 @@ command palette both read from it.
 | `/rename` | `[name...]` | Rename this session (without a name: show it) |
 | `/model` | `[model]` (alias or provider/model) | Switch the model directly, or open the model picker without an argument |
 | `/effort` | `[default\|minimal\|low\|medium\|high\|xhigh\|max\|ultra]` | Set the reasoning effort of the session's agent; without an argument, open a picker showing the active effort ([below](#effort)) |
-| `/mode` | `[ask\|auto-edit\|auto]` | Show or switch the approval mode |
+| `/mode` | `[ask\|auto-edit\|auto\|yolo]` | Show or switch the approval mode (Shift+Tab in the input steps through them; `yolo` never asks, see [policy](policy.md#autonomy-modes-and-approvals)) |
 | `/agents` | | List agents and switch to one |
 | `/workflows` | | List workflows and their arguments |
 | `/skills` | | List skills and their arguments |
@@ -68,7 +68,7 @@ Errors point at the problem and show the usage:
 
 ```text
 `/fix` needs <issue>. Usage: /fix <issue> [level=…] [scope=…]
-`fast` is not a valid mode for `/mode`: use one of ask, auto-edit, auto
+`fast` is not a valid mode for `/mode`: use one of ask, auto-edit, auto, yolo
 unknown command `/cots`. Did you mean `/cost`? Type /help to list commands.
 unterminated " quote starting at column 5: close it with "
 ```

@@ -556,6 +556,14 @@ impl Artifact for Agent {
                 )?,
             ),
         };
+        if mode == Some(crate::ini::config::Mode::Yolo) {
+            return Err(err(
+                &["mode"],
+                "mode `yolo` is chosen for the session (harness.ini, --mode, /mode or Shift+Tab); \
+                 an agent's mode can only tighten it, so use ask, auto-edit or auto"
+                    .into(),
+            ));
+        }
         if d.max_turns == Some(0) {
             return Err(err(&["max_turns"], "`max_turns` must be at least 1".into()));
         }

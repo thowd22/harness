@@ -77,7 +77,8 @@ pub fn exit_code(outcome: &LoopOutcome) -> u8 {
 
 /// Parses `--mode`.
 pub fn parse_mode(s: &str) -> Result<Mode, String> {
-    Mode::parse(s).ok_or_else(|| format!("--mode: expected ask, auto-edit or auto, got `{s}`"))
+    Mode::parse(s)
+        .ok_or_else(|| format!("--mode: expected ask, auto-edit, auto or yolo, got `{s}`"))
 }
 
 /// Prints each redacted event as one JSON line (`--json`).
@@ -188,6 +189,12 @@ async fn run_inner(
     redactor: Arc<Redactor>,
 ) -> Result<u8, String> {
     let mode = args.mode.as_deref().map(parse_mode).transpose()?;
+    if mode.unwrap_or_else(|| Mode::from(cfg.general.mode)) == Mode::Yolo {
+        eprintln!(
+            "harness: warning: yolo mode: {}",
+            harness_policy::approvals::YOLO_WARNING
+        );
+    }
     let opts = CoreOptions {
         cwd: args.cwd.clone(),
         agent: args.agent.clone(),

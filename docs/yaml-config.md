@@ -96,7 +96,9 @@ or labels in `runs_on`, and agent budgets above `[budget] run_usd`.
 - `mode:` (`ask`, `auto-edit` or `auto`) sets how much this agent may do
   without asking. It can only make the session's mode stricter: an agent
   with `mode: ask` asks before every edit even in an `auto` session, while
-  `mode: auto` in an `ask` session changes nothing.
+  `mode: auto` in an `ask` session changes nothing. `yolo` is not
+  accepted here: it is a session choice (harness.ini, `--mode`, `/mode` or
+  Shift+Tab).
 - `policy:` can only add restrictions. The allowed keys are `bash.deny`,
   `bash.ask`, `paths.protected` and `outward.ask`, each taking a string or a
   list. `bash.allow` is rejected because allow rules belong in

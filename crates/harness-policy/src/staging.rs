@@ -260,7 +260,9 @@ impl StagingGuard {
         cwd: &Path,
         sink: &dyn DecisionSink,
     ) -> Verdict {
-        let verdict = self.apply(action, engine.check(action, mode, cwd));
+        let verdict = self
+            .apply(action, engine.check(action, mode, cwd))
+            .in_mode(mode);
         sink.record(&DecisionRecord {
             tool: action.tool().to_string(),
             action: action.summary(),
@@ -351,6 +353,30 @@ mod tests {
 
     fn bash(c: &str) -> Action {
         Action::Bash { command: c.into() }
+    }
+
+    #[test]
+    fn yolo_sweeps_staging_without_asking_and_deny_still_refuses() {
+        let e = engine(&[]);
+        let sink = RecordingDecisions::default();
+        let v = StagingGuard::default().decide(
+            &e,
+            &bash("git add -A"),
+            Mode::Yolo,
+            Path::new("/w"),
+            &sink,
+        );
+        assert_eq!(v.decision, Decision::Allow);
+        assert!(v.rule.reason.contains(STAGING_ORIGIN), "{}", v.rule.reason);
+        assert_eq!(sink.records()[0].verdict, v);
+        let v = StagingGuard::deny().decide(
+            &e,
+            &bash("git add -A"),
+            Mode::Yolo,
+            Path::new("/w"),
+            &sink,
+        );
+        assert_eq!(v.decision, Decision::Deny);
     }
 
     #[test]

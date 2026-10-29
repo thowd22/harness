@@ -2,6 +2,10 @@
 
 use crate::rules::Mode;
 
+/// The warning shown when the mode becomes yolo.
+pub const YOLO_WARNING: &str = "nothing is confirmed: commands, edits, pushes and publishes run \
+                                without asking (deny rules and the sandbox still apply)";
+
 /// Prefix of the palette command ids that select a mode.
 pub const PALETTE_MODE_PREFIX: &str = "mode.";
 
@@ -29,6 +33,7 @@ pub fn palette_entries() -> Vec<PaletteModeEntry> {
                 Mode::Ask => "Ask before every edit and command",
                 Mode::AutoEdit => "Edit files freely, ask before commands",
                 Mode::Auto => "Act without asking (rules and outward guard still apply)",
+                Mode::Yolo => "Never ask: nothing is confirmed (deny rules still apply)",
             },
             mode,
         })
@@ -69,12 +74,14 @@ impl ModeState {
         Some(mode)
     }
 
-    /// Select the next mode (Ask → AutoEdit → Auto → Ask), e.g. for a key.
+    /// Select the next mode (Ask → AutoEdit → Auto → Yolo → Ask), e.g.
+    /// for a key.
     pub fn cycle(&mut self) -> Mode {
         let next = match self.session() {
             Mode::Ask => Mode::AutoEdit,
             Mode::AutoEdit => Mode::Auto,
-            Mode::Auto => Mode::Ask,
+            Mode::Auto => Mode::Yolo,
+            Mode::Yolo => Mode::Ask,
         };
         self.set_palette(next);
         next
@@ -123,7 +130,11 @@ mod tests {
         s.reset();
         assert_eq!(s.session(), Mode::AutoEdit);
         assert_eq!(s.cycle(), Mode::Auto);
+        assert_eq!(s.cycle(), Mode::Yolo);
         assert_eq!(s.cycle(), Mode::Ask);
+        // An agent's mode caps yolo like any other.
+        s.set_palette(Mode::Yolo);
+        assert_eq!(s.effective(Some(Mode::Auto)), Mode::Auto);
     }
 
     #[test]
@@ -131,7 +142,7 @@ mod tests {
         let e = palette_entries();
         assert_eq!(
             e.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
-            ["mode.ask", "mode.auto-edit", "mode.auto"]
+            ["mode.ask", "mode.auto-edit", "mode.auto", "mode.yolo"]
         );
         let mut s = ModeState::new(Mode::Ask);
         for entry in &e {
@@ -146,6 +157,8 @@ mod tests {
             "\"auto-edit\""
         );
         assert_eq!(Mode::parse("auto-edit"), Some(Mode::AutoEdit));
+        assert_eq!(Mode::parse("yolo"), Some(Mode::Yolo));
+        assert_eq!(serde_json::to_string(&Mode::Yolo).unwrap(), "\"yolo\"");
         let m: Mode = serde_norway::from_str("ask").unwrap();
         assert_eq!(m, Mode::Ask);
     }

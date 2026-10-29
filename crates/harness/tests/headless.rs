@@ -176,6 +176,44 @@ fn approvals_are_denied_by_default_in_headless_mode() {
 }
 
 #[test]
+fn yolo_mode_runs_what_would_ask_and_warns() {
+    // An ask rule asks even in auto mode, so headless denies it there.
+    let env = Env::new("[policy]\nbash.ask = touch *\n");
+    let script = env.script("s.yaml", BASH);
+    let o = env.run(&script, &["--json", "--mode", "auto", "make", "a", "file"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert!(!env.project.join("made.txt").exists(), "asked command ran");
+    assert!(!stderr(&o).contains("yolo"), "{}", stderr(&o));
+    // Yolo runs it with no approval at all.
+    let o = env.run(&script, &["--json", "--mode", "yolo", "make", "a", "file"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert!(env.project.join("made.txt").exists(), "{}", stderr(&o));
+    assert!(
+        !events(&o).iter().any(|e| e["type"] == "approval_requested"),
+        "no approval in yolo"
+    );
+    assert!(
+        stderr(&o).contains("harness: warning: yolo mode: nothing is confirmed"),
+        "{}",
+        stderr(&o)
+    );
+    // `[general] mode = yolo` warns too.
+    let env = Env::new("");
+    let ini = env.root.join("harness.ini");
+    let text = std::fs::read_to_string(&ini).unwrap();
+    std::fs::write(
+        &ini,
+        text.replacen("[general]\n", "[general]\nmode = yolo\n", 1),
+    )
+    .unwrap();
+    let script = env.script("s.yaml", BASH);
+    let o = env.run(&script, &["make", "a", "file"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert!(env.project.join("made.txt").exists(), "{}", stderr(&o));
+    assert!(stderr(&o).contains("yolo mode"), "{}", stderr(&o));
+}
+
+#[test]
 fn allowlist_mode_runs_only_allow_listed_commands() {
     let env = Env::new("");
     let script = env.script("s.yaml", BASH);

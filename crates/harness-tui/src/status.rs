@@ -246,6 +246,20 @@ impl StatusLine {
         let muted = theme.fg(Token::Muted);
         let num = theme.fg(Token::Number);
         let mut segs: Vec<(u8, Vec<Span<'static>>)> = Vec::new();
+        // The mode comes first and is the last segment dropped; yolo,
+        // which confirms nothing, stands out.
+        let mode_token = if self.mode == Mode::Yolo {
+            Token::Error
+        } else {
+            Token::Accent
+        };
+        segs.push((
+            11,
+            vec![Span::styled(
+                self.mode.as_str().to_owned(),
+                theme.fg(mode_token),
+            )],
+        ));
         let mut loc = vec![Span::styled(self.cwd.clone(), theme.fg(Token::Path))];
         if let Some(b) = &self.branch {
             loc.push(Span::styled(format!("  {b}"), theme.fg(Token::Keyword)));
@@ -259,11 +273,6 @@ impl StatusLine {
             model.push(Span::styled(" · ", muted));
             model.push(Span::styled(effort.clone(), theme.fg(Token::Keyword)));
         }
-        model.push(Span::styled(" · ", muted));
-        model.push(Span::styled(
-            self.mode.as_str().to_owned(),
-            theme.fg(Token::Accent),
-        ));
         segs.push((9, model));
         let mcp_at = segs.len();
         if let Some(label) = self.mcp_label() {
@@ -474,10 +483,12 @@ impl StatusLine {
             spans.iter().map(|s| s.content.as_ref()).collect()
         };
         let mut out = vec![
+            format!("Mode: {}", self.mode),
             format!("Directory: {}", self.cwd),
             format!("Branch: {}", self.branch.as_deref().unwrap_or("none")),
         ];
-        for s in self.segments(theme, spinner).iter().skip(1) {
+        // The first two segments are the mode and the location.
+        for s in self.segments(theme, spinner).iter().skip(2) {
             out.push(text(&s.spans));
         }
         if !self.mcp_failed.is_empty() {
@@ -719,7 +730,7 @@ mod tests {
         let l = text(&s.line(&theme, &Spinner::new(false), 200));
         assert_eq!(
             l,
-            "~/CODE/harness  main │ sonnet · auto-edit │ ctx ▓▓▓▓▓▓▓▓ 98% │ ↑182k ↓14k cache 93% │ $0.84 │ verify ✔ │ ◐ 3 agents │ ⧉ gpu-box"
+            "auto-edit │ ~/CODE/harness  main │ sonnet │ ctx ▓▓▓▓▓▓▓▓ 98% │ ↑182k ↓14k cache 93% │ $0.84 │ verify ✔ │ ◐ 3 agents │ ⧉ gpu-box"
         );
     }
 
@@ -729,10 +740,10 @@ mod tests {
         let mut s = sample();
         s.set_effort(Some("effort low".into()));
         let l = text(&s.line(&theme, &Spinner::new(false), 200));
-        assert!(l.contains("│ sonnet · effort low · auto-edit │"), "{l}");
+        assert!(l.contains("│ sonnet · effort low │"), "{l}");
         s.set_effort(None);
         let l = text(&s.line(&theme, &Spinner::new(false), 200));
-        assert!(l.contains("│ sonnet · auto-edit │"), "{l}");
+        assert!(l.contains("│ sonnet │"), "{l}");
     }
 
     #[test]
@@ -885,7 +896,8 @@ mod tests {
         let s = sample();
         let l = text(&s.line(&theme, &Spinner::new(false), 60));
         assert!(width(&l) <= 60, "{l}");
-        assert!(l.contains("sonnet · auto-edit"));
+        assert!(l.starts_with("auto-edit │ "), "{l}");
+        assert!(l.contains("sonnet"));
         assert!(l.contains("$0.84"));
         assert!(!l.contains("gpu-box"));
         let mut term = Terminal::new(TestBackend::new(30, 1)).unwrap();
@@ -896,6 +908,27 @@ mod tests {
             )
         })
         .unwrap();
+    }
+
+    #[test]
+    fn mode_comes_first_survives_narrow_terminals_and_yolo_stands_out() {
+        let theme = Theme::default();
+        let mut s = sample();
+        for w in [200, 60, 20, 12] {
+            let l = text(&s.line(&theme, &Spinner::new(false), w));
+            assert!(l.starts_with("auto-edit"), "{w}: {l}");
+        }
+        let mode = |s: &StatusLine| {
+            let line = s.line(&theme, &Spinner::new(false), 200);
+            line.spans[0].clone()
+        };
+        assert_eq!(mode(&s).style, theme.fg(Token::Accent));
+        s.set_mode(Mode::Yolo);
+        let span = mode(&s);
+        assert_eq!(span.content, "yolo");
+        assert_eq!(span.style, theme.fg(Token::Error));
+        let l = text(&s.line(&theme, &Spinner::new(false), 12));
+        assert!(l.starts_with("yolo"), "{l}");
     }
 
     #[test]
@@ -968,7 +1001,8 @@ mod tests {
         for want in [
             "/a/very/long/path/that/needs/rows/of/its/own/to/show/in/full_end",
             "Branch: main",
-            "sonnet · auto-edit",
+            "Mode: auto-edit",
+            "sonnet",
             "$0.84",
             "gpu-box",
             "⚙ 1 job",

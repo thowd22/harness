@@ -80,7 +80,7 @@ Options:
                           or allow only those matching --allow patterns
   --allow PATTERN         command pattern (or mcp:<server>/<tool>) allowed in
                           allowlist mode (repeatable)
-  --mode ask|auto-edit|auto
+  --mode ask|auto-edit|auto|yolo
                           autonomy mode for this run
   --max-turns N           stop after N model turns
   --budget-usd X          stop when this run has cost X dollars
@@ -221,7 +221,7 @@ Options:
   --json                  stream redacted events as JSON lines on stdout
   --approvals deny|allowlist, --allow PATTERN
                           tool calls of agent steps that need approval
-  --mode ask|auto-edit|auto
+  --mode ask|auto-edit|auto|yolo
                           autonomy mode for agent steps
   --model REF             model for agent steps that do not name one
   --max-turns N           turn limit for each agent step

@@ -8,7 +8,7 @@ separated; comments start with `;` or `#`.
 ```ini
 [general]
 default_model = sonnet           ; alias or provider/model
-mode = auto-edit                 ; ask | auto-edit | auto
+mode = auto-edit                 ; ask | auto-edit | auto | yolo
 identity_prompt = on             ; on | off: the built-in identity prompt layer
 session_summary_model = off      ; off | a cheap model: names and describes sessions (docs/sessions.md)
 todo_nudge_after = 3             ; remind agents to plan with todo after N model calls; 0 = off

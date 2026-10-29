@@ -381,8 +381,15 @@ fn mode_parses_and_can_only_tighten_a_shadowed_agent() {
     let a = load("name: a\nprompt_text: x\nmode: ask\n").unwrap();
     assert_eq!(a.mode, Some(Mode::Ask));
     assert_eq!(load("name: a\nprompt_text: x\n").unwrap().mode, None);
+    let e = err("name: a\nprompt_text: x\nmode: fast\n");
+    assert!(e.message.contains("unknown mode `fast`"), "{e}");
+    assert_eq!(e.line, 3);
+    // Yolo is a session choice; an agent can only tighten the session.
     let e = err("name: a\nprompt_text: x\nmode: yolo\n");
-    assert!(e.message.contains("unknown mode `yolo`"), "{e}");
+    assert!(
+        e.message.contains("mode `yolo` is chosen for the session"),
+        "{e}"
+    );
     assert_eq!(e.line, 3);
 
     let mut base = load("name: a\nprompt_text: x\nmode: auto-edit\n").unwrap();

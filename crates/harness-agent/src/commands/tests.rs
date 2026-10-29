@@ -117,7 +117,7 @@ fn every_builtin_has_a_description_and_argument_help() {
     }
     assert_eq!(
         reg.get("mode").unwrap().usage(),
-        "/mode [ask|auto-edit|auto]"
+        "/mode [ask|auto-edit|auto|yolo]"
     );
     assert_eq!(
         reg.get("compact").unwrap().arg_hint().unwrap(),
@@ -125,7 +125,7 @@ fn every_builtin_has_a_description_and_argument_help() {
     );
     assert_eq!(
         reg.get("mode").unwrap().arg_help(),
-        ["mode: approval mode (one of ask, auto-edit, auto; optional)"]
+        ["mode: approval mode (one of ask, auto-edit, auto, yolo; optional)"]
     );
     let help = reg.help(None);
     assert_eq!(help.len(), Builtin::ALL.len());
@@ -153,7 +153,7 @@ fn builtin_arguments_are_validated_with_helpful_errors() {
     let e = reg.parse("/mode fast").unwrap_err();
     assert_eq!(
         e.to_string(),
-        "`fast` is not a valid mode for `/mode`: use one of ask, auto-edit, auto"
+        "`fast` is not a valid mode for `/mode`: use one of ask, auto-edit, auto, yolo"
     );
     let e = reg.parse("/undo now").unwrap_err();
     assert_eq!(

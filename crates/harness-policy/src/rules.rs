@@ -63,18 +63,21 @@ pub enum Mode {
     AutoEdit,
     /// Act without asking (rules and the outward guard still apply).
     Auto,
+    /// Never ask: whatever would ask runs (deny rules still refuse).
+    Yolo,
 }
 
 impl Mode {
     /// All modes, most supervised first.
-    pub const ALL: [Mode; 3] = [Mode::Ask, Mode::AutoEdit, Mode::Auto];
+    pub const ALL: [Mode; 4] = [Mode::Ask, Mode::AutoEdit, Mode::Auto, Mode::Yolo];
 
-    /// The ini / palette spelling (`ask`, `auto-edit`, `auto`).
+    /// The ini / palette spelling (`ask`, `auto-edit`, `auto`, `yolo`).
     pub fn as_str(self) -> &'static str {
         match self {
             Mode::Ask => "ask",
             Mode::AutoEdit => "auto-edit",
             Mode::Auto => "auto",
+            Mode::Yolo => "yolo",
         }
     }
 
@@ -208,6 +211,30 @@ pub struct Verdict {
     pub outward: bool,
 }
 
+impl Verdict {
+    /// The verdict in `mode`: yolo never asks, so an `ask` becomes an
+    /// `allow` whose rule says what would have asked. Other modes and
+    /// decisions are unchanged.
+    pub fn in_mode(self, mode: Mode) -> Verdict {
+        if mode != Mode::Yolo || self.decision != Decision::Ask {
+            return self;
+        }
+        let asked = &self.rule;
+        let rule = mode_rule(
+            mode,
+            &format!(
+                "runs without asking in yolo mode ({}: {})",
+                asked.origin, asked.reason
+            ),
+        );
+        Verdict {
+            decision: Decision::Allow,
+            rule,
+            ..self
+        }
+    }
+}
+
 /// A decision as reported to a [`DecisionSink`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DecisionRecord {
@@ -318,6 +345,7 @@ impl From<harness_config::ini::config::Mode> for Mode {
             M::Ask => Mode::Ask,
             M::AutoEdit => Mode::AutoEdit,
             M::Auto => Mode::Auto,
+            M::Yolo => Mode::Yolo,
         }
     }
 }
@@ -536,7 +564,8 @@ impl PolicyEngine {
                 command: None,
                 outward: false,
             },
-        };
+        }
+        .in_mode(mode);
         self.sink.record(&DecisionRecord {
             tool: action.tool().to_string(),
             action: action.summary(),
@@ -848,10 +877,10 @@ impl PolicyEngine {
             );
         }
         // 7. Mode default.
-        if mode == Mode::Auto {
+        if mode >= Mode::Auto {
             return verdict(
                 Decision::Allow,
-                mode_rule(mode, "commands run without asking in auto mode"),
+                mode_rule(mode, &format!("commands run without asking in {mode} mode")),
                 some_line(),
                 false,
             );
