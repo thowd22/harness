@@ -1207,8 +1207,16 @@ mod tests {
     fn logout_asks_and_removes_all_credential_keys() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("harness.ini");
-        let ini = "[provider.openai]\napi_key = sk-1\napi_key_env = X\nbase_url = u\n[provider.anthropic]\napi_key = sk-2\n";
-        std::fs::write(&path, ini).unwrap();
+        // A data dir of its own: logout openai also deletes the ChatGPT
+        // tokens in the data dir, and the default one is the user's.
+        let general = format!(
+            "[general]\ndata_dir = {}\n",
+            dir.path().join("data").display()
+        );
+        let ini = format!(
+            "{general}[provider.openai]\napi_key = sk-1\napi_key_env = X\nbase_url = u\n[provider.anthropic]\napi_key = sk-2\n"
+        );
+        std::fs::write(&path, &ini).unwrap();
         let logout = |a: &str, p: &mut Script| {
             let (mut out, mut err) = (Vec::new(), Vec::new());
             let rc = logout_main(&args(a), &path, p, &mut out, &mut err);
@@ -1221,6 +1229,7 @@ mod tests {
         let (rc, text) = logout("openai", &mut p);
         assert_eq!(rc, 1, "{text}");
         assert!(p.prompts[0].contains("Remove api_key, api_key_env from [provider.openai]"));
+        assert!(!p.prompts[0].contains("ChatGPT"), "{}", p.prompts[0]);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), ini);
 
         let mut p = Script::new(false, &[]);
@@ -1233,7 +1242,9 @@ mod tests {
         assert_eq!(rc, 0, "{text}");
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
-            "[provider.openai]\nbase_url = u\n[provider.anthropic]\napi_key = sk-2\n"
+            format!(
+                "{general}[provider.openai]\nbase_url = u\n[provider.anthropic]\napi_key = sk-2\n"
+            )
         );
         let (rc, text) = logout("openai", &mut Script::new(false, &[]));
         assert_eq!(rc, 0);

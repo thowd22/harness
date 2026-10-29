@@ -11,6 +11,27 @@ to built-in prompts, agents, workflows and `harness.ini` defaults.
 
 ## Unreleased
 
+### Added
+
+- Every reasoning effort level on every provider: `/effort` and agent YAML
+  `effort` take `minimal`, `low`, `medium`, `high`, `xhigh`, `max` and
+  `ultra`. Each model knows the levels it accepts, from the live model
+  list where it says (Anthropic's `capabilities.effort`, the ChatGPT
+  plan's `supported_reasoning_levels`, for example `low` to `max`), else
+  from its provider and family (Claude 4.7+ `low` to `max`, GPT-5
+  `minimal` to `high`, GPT-5.2+ `low` to `xhigh`, OpenRouter `minimal` to
+  `xhigh`). A level the model does not accept is sent as the nearest one it
+  does, for the main agent and subagents, and `/effort` says so
+  (`effort ultra: sent as max`). The `/effort` panel offers the levels the
+  current model takes. Claude budget models get xhigh (32,768) and max
+  (49,152) thinking budgets.
+
+### Changed
+
+- Cached live model lists from 0.6.0 and earlier are fetched again on the
+  next refresh, so they pick up effort levels; until then the cached list
+  is still used.
+
 ## [0.6.0] - 2026-10-28
 
 ### Added

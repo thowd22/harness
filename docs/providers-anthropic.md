@@ -128,8 +128,8 @@ any model whose style is none, get no thinking fields at any effort:
 
 | Model style | Sent |
 |---|---|
-| Adaptive (current Claude models) | `thinking: {type: adaptive, display: <thinking_display>}` (default `summarized`) plus `output_config.effort`. If only a budget is set, it is converted to an effort level: up to 4,096 tokens is low, up to 16,384 is medium, anything higher is high. |
-| Budget (Claude Haiku 4.5) | `thinking: {type: enabled, budget_tokens}`. If only an effort level is set, it is converted to a budget: low 2,048, medium 8,192, high 24,576 tokens. The budget is at least 1,024, and `max_tokens` is raised above it. |
+| Adaptive (current Claude models) | `thinking: {type: adaptive, display: <thinking_display>}` (default `summarized`) plus `output_config.effort`. Claude 4.7 and later take low, medium, high, xhigh and max; 4.6 has no xhigh; Opus 4.5 stops at high. Another level is sent as the nearest the model takes (minimal as low, ultra as max, xhigh on 4.6 as high). The levels come from the Models API's `capabilities.effort` when the live list has them. If only a budget is set, it is converted to an effort level: up to 4,096 tokens is low, up to 16,384 is medium, anything higher is high. |
+| Budget (Claude Haiku 4.5) | `thinking: {type: enabled, budget_tokens}`. If only an effort level is set, it is converted to a budget: low 2,048, medium 8,192, high 24,576, xhigh 32,768, max 49,152 tokens (minimal as low, ultra as max). The budget is at least 1,024, and `max_tokens` is raised above it. |
 
 Notes:
 

@@ -22,7 +22,7 @@ use harness_providers::catalog::{
 use harness_providers::chatgpt::{ChatGptAuth, Endpoints, TokenStore};
 use harness_providers::fake::FakeProvider;
 use harness_providers::http::HttpConfig;
-use harness_providers::model::{ReasoningEffort, ThinkingConfig, Usage};
+use harness_providers::model::{ThinkingConfig, Usage};
 use harness_providers::openai::OpenAiProvider;
 use harness_providers::openrouter::{OpenRouterOptions, OpenRouterProvider};
 use harness_providers::pricing::Price;
@@ -353,10 +353,10 @@ pub fn provider_sync(
 ) -> Result<Arc<dyn Provider>, String> {
     let name = resolved.reference.provider.as_str();
     if name == harness_providers::openai::PROVIDER_NAME && openai_uses_chatgpt(cfg) {
-        return Ok(Arc::new(chatgpt_provider(
-            cfg,
-            INTERACTIVE.load(Ordering::SeqCst),
-        )?));
+        return Ok(Arc::new(
+            chatgpt_provider(cfg, INTERACTIVE.load(Ordering::SeqCst))?
+                .with_registry(registry.clone()),
+        ));
     }
     let key = api_key(cfg, name)?;
     let base = cfg.providers.get(name).and_then(|p| p.base_url.clone());
@@ -370,7 +370,8 @@ pub fn provider_sync(
         harness_providers::openai::PROVIDER_NAME => Arc::new(
             OpenAiProvider::with_key(key.expose(), base.as_deref())
                 .map_err(err)?
-                .with_extended_cache_retention(openai_extended_cache_retention(cfg)),
+                .with_extended_cache_retention(openai_extended_cache_retention(cfg))
+                .with_registry(registry.clone()),
         ),
         harness_providers::openrouter::PROVIDER_NAME => Arc::new(openrouter(cfg, key.expose())?),
         other => return Err(format!("unknown provider `{other}`")),
@@ -455,14 +456,7 @@ pub fn system_prompt(catalog: &Catalog, agent: &Agent, cwd: &Path) -> Result<Str
 /// when one is set, else the agent YAML's `effort` (`None`: no reasoning
 /// fields, the model default).
 pub fn thinking(agent: &Agent, session: Option<Effort>) -> Option<ThinkingConfig> {
-    session.or(agent.effort).map(|e| ThinkingConfig {
-        budget_tokens: None,
-        effort: Some(match e {
-            Effort::Low => ReasoningEffort::Low,
-            Effort::Medium => ReasoningEffort::Medium,
-            Effort::High => ReasoningEffort::High,
-        }),
-    })
+    harness_agent::subagents::thinking_for(session.or(agent.effort))
 }
 
 /// The project root: `--cwd` or the current directory, canonicalized.
@@ -1036,20 +1030,66 @@ mod effort_wire_tests {
     #[test]
     fn anthropic_budget_models_get_a_thinking_budget() {
         use harness_providers::anthropic::request::effort_budget;
-        use harness_providers::model::ReasoningEffort;
         let a = agent(None);
-        for (e, r) in [
-            (Effort::Low, ReasoningEffort::Low),
-            (Effort::Medium, ReasoningEffort::Medium),
-            (Effort::High, ReasoningEffort::High),
-        ] {
+        for e in Effort::ALL {
+            // Haiku 4.5 takes low to max: minimal and ultra get the
+            // nearest of those budgets.
+            let r = harness_agent::subagents::reasoning_effort(e).nearest(
+                &harness_providers::registry::default_efforts(
+                    &"anthropic/claude-haiku-4-5".parse().unwrap(),
+                    true,
+                ),
+            );
             let b = body("anthropic/claude-haiku-4-5", &a, Some(e));
             assert_eq!(
                 b["thinking"],
                 json!({"type": "enabled", "budget_tokens": effort_budget(r)}),
                 "{e:?}"
             );
+            assert!(b["max_tokens"].as_u64().unwrap() > u64::from(effort_budget(r)));
             assert!(b.get("output_config").is_none());
+        }
+    }
+
+    #[test]
+    fn every_effort_is_sent_as_a_level_the_model_accepts() {
+        let a = agent(None);
+        let sent = |model: &str, e: Effort| {
+            let b = body(model, &a, Some(e));
+            b.pointer("/output_config/effort")
+                .or(b.pointer("/reasoning/effort"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| panic!("{model} {e:?}: {b}"))
+        };
+        let cases: [(&str, [&str; 7]); 5] = [
+            (
+                "anthropic/claude-opus-5-5",
+                ["low", "low", "medium", "high", "xhigh", "max", "max"],
+            ),
+            (
+                "anthropic/claude-sonnet-4-6",
+                ["low", "low", "medium", "high", "high", "max", "max"],
+            ),
+            (
+                "openai/gpt-5",
+                ["minimal", "low", "medium", "high", "high", "high", "high"],
+            ),
+            (
+                "openai/gpt-5.1",
+                ["low", "low", "medium", "high", "high", "high", "high"],
+            ),
+            (
+                "openrouter/anthropic/claude-opus-5.5",
+                [
+                    "minimal", "low", "medium", "high", "xhigh", "xhigh", "xhigh",
+                ],
+            ),
+        ];
+        for (model, want) in cases {
+            for (e, w) in Effort::ALL.into_iter().zip(want) {
+                assert_eq!(sent(model, e), w, "{model} {e:?}");
+            }
         }
     }
 

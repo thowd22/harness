@@ -16,7 +16,7 @@ use harness_config::builtins;
 use harness_config::discovery::Catalog;
 use harness_config::prompts::{PromptVars, SessionPrompt};
 use harness_providers::anthropic::{AnthropicConfig, AnthropicProvider};
-use harness_providers::model::{ChatRequest, Message, ReasoningEffort, ThinkingConfig};
+use harness_providers::model::{ChatRequest, Message};
 use harness_providers::openai::OpenAiProvider;
 use harness_providers::openrouter::{OpenRouterOptions, OpenRouterProvider};
 use harness_tools::bash::EnvScrubber;
@@ -80,14 +80,7 @@ fn request(c: &Catalog, agent: &Agent, model: &str) -> (ChatRequest, Vec<String>
     req.system = Some(system_prompt(c, agent));
     req.messages = vec![Message::user(USER)];
     req.tools = specs;
-    req.thinking = agent.effort.map(|e| ThinkingConfig {
-        budget_tokens: None,
-        effort: Some(match e {
-            Effort::Low => ReasoningEffort::Low,
-            Effort::Medium => ReasoningEffort::Medium,
-            Effort::High => ReasoningEffort::High,
-        }),
-    });
+    req.thinking = harness_agent::subagents::thinking_for(agent.effort);
     (req, missing)
 }
 

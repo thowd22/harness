@@ -2112,7 +2112,8 @@ async fn effort_on_a_model_without_reasoning_warns() {
     h.until(|e| matches!(e, AppEvent::Core(CoreEvent::Effort(Some(s))) if s == "no reasoning"))
         .await;
     // An unknown value is an error, never a silent default.
-    h.d.request(UiRequest::Submit("/effort max".into())).await;
+    h.d.request(UiRequest::Submit("/effort extreme".into()))
+        .await;
     assert_eq!(
         h.d.core.as_ref().unwrap().effort().session,
         Some(harness_config::agents::Effort::High)
@@ -2145,16 +2146,13 @@ async fn effort_picker_works_with_keyboard_and_mouse() {
         "{lines:?}"
     );
     assert!(lines.iter().any(|l| l.contains("fake/")), "{lines:?}");
-    let ids: Vec<&str> = buttons.iter().map(|b| b.id.as_str()).collect();
-    assert_eq!(
-        ids,
-        [
-            "effort.set:default",
-            "effort.set:low",
-            "effort.set:medium",
-            "effort.set:high"
-        ]
-    );
+    // The fake model's levels are unknown, so every level is offered.
+    let ids: Vec<String> = buttons.iter().map(|b| b.id.clone()).collect();
+    let want: Vec<String> = effort::CHOICES
+        .iter()
+        .map(|c| format!("effort.set:{c}"))
+        .collect();
+    assert_eq!(ids, want);
 
     let (tx, mut requests) = mpsc::unbounded_channel();
     let mut app = App::new(AppConfig::default(), tx);
@@ -2166,10 +2164,12 @@ async fn effort_picker_works_with_keyboard_and_mouse() {
     }));
     term.draw(|f| app.render(f)).unwrap();
     let text = buffer_text(term.backend().buffer());
-    for b in ["[ default ]", "[ low ]", "[ medium ]", "[ high ]"] {
-        assert!(text.contains(b), "{b}: {text}");
+    for c in effort::CHOICES {
+        let b = format!("[ {c} ]");
+        assert!(text.contains(&b), "{b}: {text}");
     }
-    // Keyboard: the first button is focused; Right moves to `low`.
+    // Keyboard: the first button is focused; Right twice moves to `low`.
+    app.handle(AppEvent::Terminal(key("right")));
     app.handle(AppEvent::Terminal(key("right")));
     app.handle(AppEvent::Terminal(key("enter")));
     let req = requests
@@ -2219,7 +2219,8 @@ async fn effort_is_in_help_palette_and_completion() {
     );
     let one = h.d.registry.help(Some("effort"));
     assert!(
-        one.iter().any(|l| l.contains("default, low, medium, high")),
+        one.iter()
+            .any(|l| l.contains("default, minimal, low, medium, high, xhigh, max, ultra")),
         "{one:?}"
     );
     let entries = commands::palette_entries(&h.d.registry, h.d.core.as_ref().unwrap());
@@ -2240,8 +2241,11 @@ async fn effort_is_in_help_palette_and_completion() {
     );
     let slash = commands::slash_commands(&h.d.registry);
     let s = slash.iter().find(|s| s.name == "effort").unwrap();
-    assert_eq!(s.choices, ["default", "low", "medium", "high"]);
-    assert_eq!(s.args.as_deref(), Some("[default|low|medium|high]"));
+    assert_eq!(s.choices, effort::CHOICES);
+    assert_eq!(
+        s.args.as_deref(),
+        Some("[default|minimal|low|medium|high|xhigh|max|ultra]")
+    );
     // Busy: the change is queued for after the turn.
     h.d.request(UiRequest::Submit("go".into())).await;
     assert!(h.d.busy());

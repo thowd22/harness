@@ -257,10 +257,12 @@ impl AnthropicProvider {
             Some(info) => ModelProfile {
                 capabilities: info.capabilities,
                 thinking: info.thinking,
+                efforts: info.efforts,
             },
             None => ModelProfile {
                 capabilities: crate::registry::CONSERVATIVE_CAPABILITIES,
                 thinking: ThinkingStyle::Adaptive,
+                efforts: crate::registry::default_efforts(&ModelRef::new(NAME, model), true),
             },
         }
     }

@@ -145,15 +145,25 @@ pub trait ChildBuilder: Send + Sync {
 }
 
 /// Maps the agent `effort` onto the provider-neutral thinking setting.
+/// Providers send the nearest level the model accepts.
 pub fn thinking_for(effort: Option<Effort>) -> Option<ThinkingConfig> {
     effort.map(|e| ThinkingConfig {
         budget_tokens: None,
-        effort: Some(match e {
-            Effort::Low => ReasoningEffort::Low,
-            Effort::Medium => ReasoningEffort::Medium,
-            Effort::High => ReasoningEffort::High,
-        }),
+        effort: Some(reasoning_effort(e)),
     })
+}
+
+/// The provider-neutral level for an agent `effort`.
+pub fn reasoning_effort(effort: Effort) -> ReasoningEffort {
+    match effort {
+        Effort::Minimal => ReasoningEffort::Minimal,
+        Effort::Low => ReasoningEffort::Low,
+        Effort::Medium => ReasoningEffort::Medium,
+        Effort::High => ReasoningEffort::High,
+        Effort::XHigh => ReasoningEffort::XHigh,
+        Effort::Max => ReasoningEffort::Max,
+        Effort::Ultra => ReasoningEffort::Ultra,
+    }
 }
 
 /// Loop limits from the agent's `max_turns` and `budget`.

@@ -459,7 +459,8 @@ fn anthropic_body(req: &ChatRequest) -> Option<Value> {
     let info = reg.lookup(&ModelRef::parse(&format!("anthropic/{}", req.model)).ok()?);
     let profile = ModelProfile {
         capabilities: reg.capabilities("anthropic", &req.model),
-        thinking: info.map_or(ThinkingStyle::None, |i| i.thinking),
+        thinking: info.as_ref().map_or(ThinkingStyle::None, |i| i.thinking),
+        efforts: info.map(|i| i.efforts).unwrap_or_default(),
     };
     build_body(req, &profile, &RequestOptions::default()).ok()
 }

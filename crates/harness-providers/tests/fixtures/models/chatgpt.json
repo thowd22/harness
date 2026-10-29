@@ -12,7 +12,7 @@
       "input_modalities": ["text", "image"],
       "supports_parallel_tool_calls": true,
       "default_reasoning_level": "low",
-      "supported_reasoning_levels": [{"effort": "low"}, {"effort": "medium"}, {"effort": "high"}]
+      "supported_reasoning_levels": [{"effort": "low"}, {"effort": "medium"}, {"effort": "high"}, {"effort": "xhigh"}, {"effort": "max"}, {"effort": "ultra"}]
     },
     {
       "slug": "gpt-6-astra",
@@ -22,7 +22,7 @@
       "priority": 2,
       "context_window": 272000,
       "input_modalities": ["text", "image"],
-      "supported_reasoning_levels": [{"effort": "low"}, {"effort": "medium"}, {"effort": "high"}]
+      "supported_reasoning_levels": [{"effort": "high"}, {"effort": "low"}, {"effort": "medium"}, {"effort": "turbo"}]
     },
     {
       "slug": "gpt-reserve",

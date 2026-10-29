@@ -61,7 +61,8 @@ service_tier }`.
   results follow in a user message, because the `tool` role carries only
   text.
 - **Reasoning.** The agent's effort (its YAML `effort`, or the session's
-  [`/effort`](commands.md#effort) choice) is sent as `reasoning.effort`, a
+  [`/effort`](commands.md#effort) choice) is sent as `reasoning.effort`
+  (`minimal` to `xhigh`; `max` and `ultra` go as `xhigh`), a
   token budget as `reasoning.max_tokens`. A model whose catalog entry
   lacks the `reasoning` parameter gets no `reasoning` object, so the
   request cannot fail on it; a model missing from the catalog still gets

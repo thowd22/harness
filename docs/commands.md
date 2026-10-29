@@ -13,7 +13,7 @@ command palette both read from it.
 | `/resume` | `[session...]` (a name, `last`, an id prefix or a `#tag`) | Resume a saved session; with no argument, pick one in a searchable dialog ([sessions](sessions.md)) |
 | `/rename` | `[name...]` | Rename this session (without a name: show it) |
 | `/model` | `[model]` (alias or provider/model) | Switch the model directly, or open the model picker without an argument |
-| `/effort` | `[default\|low\|medium\|high]` | Set the reasoning effort of the session's agent; without an argument, open a picker showing the active effort ([below](#effort)) |
+| `/effort` | `[default\|minimal\|low\|medium\|high\|xhigh\|max\|ultra]` | Set the reasoning effort of the session's agent; without an argument, open a picker showing the active effort ([below](#effort)) |
 | `/mode` | `[ask\|auto-edit\|auto]` | Show or switch the approval mode |
 | `/agents` | | List agents and switch to one |
 | `/workflows` | | List workflows and their arguments |
@@ -75,7 +75,7 @@ unterminated " quote starting at column 5: close it with "
 
 ## Effort
 
-`/effort low|medium|high` sets the reasoning effort of the session's
+`/effort minimal|low|medium|high|xhigh|max|ultra` sets the reasoning effort of the session's
 main agent for the rest of the session; subagents keep the `effort` of
 their own YAML. The next request carries it, the status line shows it
 after the model (`<model> · effort low · <mode>`), and the session file
@@ -87,18 +87,28 @@ is queued and applies after the turn.
 
 A bare `/effort` opens a panel with the agent, the model, the active
 effort and where it comes from (this session, the agent YAML or the model
-default) and how the model's provider receives it, with `default`, `low`,
-`medium` and `high` buttons (click them, or Tab/arrows and Enter; Esc
-closes). The panel updates when you pick one.
+default) and how the model's provider receives it, with a `default`
+button and one button per level the model takes (click them, or
+Tab/arrows and Enter; Esc closes). The panel updates when you pick one.
 
-How each provider receives it:
+Models take different levels. A level the model does not take is sent as
+the nearest one it does: the highest level below it, or else the lowest
+above it. `/effort` then says so (`effort ultra: sent as max`), the panel
+shows `ultra (sent as max)` and the status line `effort ultra→max`. The
+same applies to an agent YAML's `effort` and to subagents.
 
-| Provider | Sent |
-|---|---|
-| Anthropic, adaptive models (current Claude) | `thinking: {type: adaptive}` plus `output_config.effort` ([details](providers-anthropic.md#effort-and-thinking-budget)) |
-| Anthropic, budget models (Claude Haiku 4.5) | `thinking.budget_tokens`: low 2,048, medium 8,192, high 24,576 |
-| OpenRouter | `reasoning.effort` ([details](providers-openrouter.md)) |
-| OpenAI | `reasoning.effort` on reasoning models ([details](providers-openai.md)) |
+| Provider | Levels | Sent |
+|---|---|---|
+| Anthropic, Claude 4.7 and later | low, medium, high, xhigh, max | `thinking: {type: adaptive}` plus `output_config.effort` ([details](providers-anthropic.md#effort-and-thinking-budget)) |
+| Anthropic, Claude 4.6 | low, medium, high, max | the same |
+| Anthropic, budget models (Claude Haiku 4.5) | low to max | `thinking.budget_tokens`: low 2,048, medium 8,192, high 24,576, xhigh 32,768, max 49,152 |
+| OpenAI, Sign in with ChatGPT | what the plan's model list reports per model (for example low to ultra) | `reasoning.effort` ([details](providers-openai.md)) |
+| OpenAI, API key | GPT-5: minimal to high; GPT-5.1: low to high; GPT-5.2 and later: low to xhigh; o-series: low to high | `reasoning.effort` on reasoning models |
+| OpenRouter | minimal, low, medium, high, xhigh | `reasoning.effort` ([details](providers-openrouter.md)); OpenRouter maps it to the upstream model |
+
+Where a provider's live model list states the levels (Anthropic's
+`capabilities.effort`, ChatGPT's `supported_reasoning_levels`), the list
+wins over the table above.
 
 On a model that does not reason (for example `openai/gpt-4o`, an Anthropic
 model outside the table, or an OpenRouter model whose catalog entry lacks

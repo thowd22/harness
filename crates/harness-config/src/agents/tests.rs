@@ -88,9 +88,16 @@ fn every_spec_field_is_supported() {
             .runs_on,
         RunsOn::Local
     );
-    for effort in ["low", "high"] {
-        assert!(load(&format!("name: c\nprompt_text: x\neffort: {effort}\n")).is_ok());
+    for effort in Effort::ALL {
+        let a = load(&format!(
+            "name: c\nprompt_text: x\neffort: {}\n",
+            effort.as_str()
+        ))
+        .unwrap();
+        assert_eq!(a.effort, Some(effort));
+        assert_eq!(Effort::parse(&effort.as_str().to_uppercase()), Some(effort));
     }
+    assert!(load("name: c\nprompt_text: x\neffort: extreme\n").is_err());
 }
 
 #[test]

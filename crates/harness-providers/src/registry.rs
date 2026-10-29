@@ -18,7 +18,7 @@ use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{Capabilities, Usage};
+use crate::model::{Capabilities, ReasoningEffort, Usage};
 use crate::pricing::Price;
 
 /// The OpenRouter provider id. Its model ids are themselves `vendor/model`.
@@ -144,8 +144,59 @@ pub struct ModelInfo {
     pub capabilities: Capabilities,
     /// How reasoning is requested.
     pub thinking: ThinkingStyle,
+    /// The effort levels the model accepts, least to most (see
+    /// [`default_efforts`]). Empty when it does not reason or is unknown.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub efforts: Vec<ReasoningEffort>,
     /// Built-in list price, if known.
     pub price: Option<Price>,
+}
+
+impl ModelInfo {
+    /// The level to send for `effort`: the nearest one the model accepts.
+    pub fn effort(&self, effort: ReasoningEffort) -> ReasoningEffort {
+        effort.nearest(&self.efforts)
+    }
+}
+
+/// The levels OpenRouter's `reasoning.effort` accepts. OpenRouter maps
+/// them onto each upstream model.
+pub const OPENROUTER_EFFORTS: [ReasoningEffort; 5] = [
+    ReasoningEffort::Minimal,
+    ReasoningEffort::Low,
+    ReasoningEffort::Medium,
+    ReasoningEffort::High,
+    ReasoningEffort::XHigh,
+];
+
+/// The effort levels a model accepts when no live list says, from what is
+/// known of its provider and family. Empty when `reasons` is false.
+///
+/// Anthropic adaptive models take `low` to `max`, except that 4.6 has no
+/// `xhigh` and Opus 4.5 stops at `high`; budget models turn `low` to `max`
+/// into a token budget. OpenAI ids follow
+/// [`crate::openai::default_efforts`], and OpenRouter takes
+/// [`OPENROUTER_EFFORTS`].
+pub fn default_efforts(reference: &ModelRef, reasons: bool) -> Vec<ReasoningEffort> {
+    use ReasoningEffort::{High, Low, Max, Medium, XHigh};
+    if !reasons {
+        return Vec::new();
+    }
+    let m = reference.model.as_str();
+    match reference.provider.as_str() {
+        crate::anthropic::NAME => {
+            if m.contains("opus-4-5") {
+                vec![Low, Medium, High]
+            } else if m.contains("-4-6") {
+                vec![Low, Medium, High, Max]
+            } else {
+                vec![Low, Medium, High, XHigh, Max]
+            }
+        }
+        crate::openai::PROVIDER_NAME => crate::openai::default_efforts(m),
+        OPENROUTER => OPENROUTER_EFFORTS.to_vec(),
+        _ => Vec::new(),
+    }
 }
 
 /// Where the price of a [`Resolved`] model came from.
@@ -377,6 +428,7 @@ impl Registry {
         })?;
         let mut info = vendor.clone();
         info.reference = reference.clone();
+        info.efforts = default_efforts(reference, !info.efforts.is_empty());
         Some(info)
     }
 
@@ -438,6 +490,7 @@ impl Registry {
             display_name: reference.to_string(),
             capabilities: CONSERVATIVE_CAPABILITIES,
             thinking: ThinkingStyle::None,
+            efforts: Vec::new(),
             price: None,
         });
         let key = reference.to_string();
@@ -621,12 +674,16 @@ fn builtin_models() -> Vec<ModelInfo> {
     ];
     entries
         .into_iter()
-        .map(|e| ModelInfo {
-            reference: ModelRef::new(e.provider, e.id),
-            display_name: e.name.to_owned(),
-            capabilities: e.caps,
-            thinking: e.thinking,
-            price: Some(e.price),
+        .map(|e| {
+            let reference = ModelRef::new(e.provider, e.id);
+            ModelInfo {
+                efforts: default_efforts(&reference, e.thinking != ThinkingStyle::None),
+                reference,
+                display_name: e.name.to_owned(),
+                capabilities: e.caps,
+                thinking: e.thinking,
+                price: Some(e.price),
+            }
         })
         .collect()
 }

@@ -12,6 +12,7 @@ use serde_json::Value;
 
 use crate::chatgpt::ChatGptAuth;
 use crate::http::error_message;
+use crate::model::ReasoningEffort;
 use crate::pricing::Price;
 use crate::provider::ProviderError;
 
@@ -60,6 +61,11 @@ pub struct LiveModel {
     /// list for display (ChatGPT); lower comes first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rank: Option<u32>,
+    /// The reasoning effort levels the model accepts, if the list says
+    /// (ChatGPT `supported_reasoning_levels`, Anthropic
+    /// `capabilities.effort`). Unknown level names are left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub efforts: Option<Vec<ReasoningEffort>>,
 }
 
 /// The response shape a [`ModelListSource`] speaks.
@@ -139,6 +145,12 @@ impl fmt::Debug for ModelListSource {
     }
 }
 
+/// Appended to every [`ModelListSource::origin`]. Changing it makes every
+/// cached list stale, so lists cached before a parser learned a new fact
+/// (v2: effort levels) are fetched again; until then the old list is still
+/// used.
+const FACTS_TAG: &str = "#facts:3";
+
 impl ModelListSource {
     /// A source for `provider` (which must be one [`ListKind::for_provider`]
     /// knows) authenticated with `api_key`. `base_url` defaults to the
@@ -149,7 +161,7 @@ impl ModelListSource {
         Some(Self {
             provider: provider.to_owned(),
             kind,
-            origin: base_url.clone(),
+            origin: format!("{base_url}{FACTS_TAG}"),
             base_url,
             timeout: Duration::from_secs(20),
             api_key: api_key
@@ -174,7 +186,7 @@ impl ModelListSource {
         Self {
             provider: crate::openai::PROVIDER_NAME.to_owned(),
             kind,
-            origin: format!("{base_url}#chatgpt:{}", account_tag(account)),
+            origin: format!("{base_url}#chatgpt:{}{FACTS_TAG}", account_tag(account)),
             base_url,
             timeout: Duration::from_secs(20),
             api_key: None,
@@ -365,8 +377,21 @@ fn parse_chatgpt(body: &Value) -> Result<Page, ProviderError> {
         .map(|(i, (id, v))| {
             let levels = v
                 .get("supported_reasoning_levels")
-                .and_then(Value::as_array)
-                .map(Vec::len);
+                .and_then(Value::as_array);
+            let efforts = levels.map(|l| {
+                let mut e: Vec<ReasoningEffort> = l
+                    .iter()
+                    .filter_map(|x| x.get("effort").and_then(Value::as_str))
+                    .filter_map(ReasoningEffort::parse)
+                    // The list offers `ultra`, but the Responses API
+                    // rejects it (it takes `none` to `max`); it is sent as
+                    // `max` instead.
+                    .filter(|e| *e != ReasoningEffort::Ultra)
+                    .collect();
+                e.sort();
+                e.dedup();
+                e
+            });
             let vision = v
                 .get("input_modalities")
                 .and_then(Value::as_array)
@@ -378,9 +403,10 @@ fn parse_chatgpt(body: &Value) -> Result<Page, ProviderError> {
                     .map(str::to_owned),
                 context_window: u32_at(v, "/context_window"),
                 tools: Some(true),
-                reasoning: levels.map(|n| n > 0),
+                reasoning: levels.map(|l| !l.is_empty()),
                 vision,
                 plan: Some(true),
+                efforts,
                 rank: Some(u32::try_from(i).unwrap_or(u32::MAX)),
                 id,
                 ..LiveModel::default()
@@ -415,6 +441,19 @@ fn anthropic_model(v: &Value) -> Option<LiveModel> {
         tools: Some(true),
         reasoning: supported("/capabilities/thinking/supported"),
         vision: supported("/capabilities/image_input/supported"),
+        efforts: v.pointer("/capabilities/effort").map(|e| {
+            if e.get("supported").and_then(Value::as_bool) == Some(false) {
+                return Vec::new();
+            }
+            ReasoningEffort::ALL
+                .into_iter()
+                .filter(|l| {
+                    e.pointer(&format!("/{l}/supported"))
+                        .and_then(Value::as_bool)
+                        == Some(true)
+                })
+                .collect()
+        }),
         id,
         ..LiveModel::default()
     })

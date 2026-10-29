@@ -533,10 +533,15 @@ pub fn live_model_info(provider: &str, m: &LiveModel) -> ModelInfo {
         (true, crate::anthropic::NAME) => ThinkingStyle::Adaptive,
         (true, _) => ThinkingStyle::Effort,
     };
+    let efforts = match &m.efforts {
+        Some(e) if capabilities.thinking => e.clone(),
+        _ => crate::registry::default_efforts(&reference, capabilities.thinking),
+    };
     ModelInfo {
         display_name: m.display_name.clone().unwrap_or_else(|| m.id.clone()),
         capabilities,
         thinking,
+        efforts,
         price: if m.plan == Some(true) {
             Some(Price::with_cache(0.0, 0.0, 0.0, 0.0))
         } else {

@@ -6,7 +6,7 @@
 //! display_name: Implementer     # shown in the TUI and CLI; default from the name
 //! description: Writes code for a scoped task
 //! model: sonnet                 # alias or provider/model
-//! effort: medium                # low | medium | high
+//! effort: medium                # minimal | low | medium | high | xhigh | max | ultra
 //! prompt: coder                 # prompt name, or inline `prompt_text:`
 //! tools: [read, write, edit, bash, todo, mcp:github/create_issue, mcp:db/*]
 //! subagents: [researcher]       # enables spawn_agent restricted to these
@@ -50,16 +50,61 @@ pub const MEMORY_TOOL: &str = "memory";
 /// `policy:` keys an agent may set. All of them only add restrictions.
 pub const POLICY_KEYS: &[&str] = &["bash.deny", "bash.ask", "paths.protected", "outward.ask"];
 
-/// Reasoning effort, mapped to each provider's own setting.
+/// Reasoning effort, least to most, mapped to each provider's own
+/// setting. A model that does not accept a level gets the nearest one it
+/// does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "lowercase")]
 pub enum Effort {
+    /// Minimal.
+    Minimal,
     /// Low.
     Low,
     /// Medium.
     Medium,
     /// High.
     High,
+    /// Extra high.
+    XHigh,
+    /// Max.
+    Max,
+    /// Ultra.
+    Ultra,
+}
+
+impl Effort {
+    /// Every level, least to most.
+    pub const ALL: [Effort; 7] = [
+        Self::Minimal,
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::XHigh,
+        Self::Max,
+        Self::Ultra,
+    ];
+
+    /// The YAML name: `minimal`, `low`, `medium`, `high`, `xhigh`, `max`
+    /// or `ultra`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+            Self::Ultra => "ultra",
+        }
+    }
+
+    /// Parses a name (case-insensitive).
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim();
+        Self::ALL
+            .into_iter()
+            .find(|e| e.as_str().eq_ignore_ascii_case(s))
+    }
 }
 
 /// Memory access level. Ordered from least to most access.
@@ -378,7 +423,8 @@ impl Agent {
                 "display_name": { "type": "string", "minLength": 1, "description": "Human-readable name shown in the TUI and CLI. Defaults to the name with a capital first letter." },
                 "description": { "type": "string", "description": "One line shown in the palette and to parents choosing a subagent." },
                 "model": { "type": "string", "description": "Alias from [models] or provider/model. Defaults to [general] default_model." },
-                "effort": { "enum": ["low", "medium", "high"] },
+                "effort": { "enum": ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
+                            "description": "Reasoning effort. A level the model does not accept is sent as the nearest one it does." },
                 "prompt": { "type": "string", "description": "Prompt name from prompts/." },
                 "prompt_text": { "type": "string", "description": "Inline system prompt (not templated)." },
                 "tools": { "type": "array", "uniqueItems": true, "items": { "anyOf": [

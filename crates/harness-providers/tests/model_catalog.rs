@@ -100,6 +100,27 @@ fn recorded_fixtures_parse_for_each_provider() {
         (opus.tools, opus.reasoning, opus.vision),
         (Some(true), Some(true), Some(true))
     );
+    {
+        use harness_providers::model::ReasoningEffort::*;
+        assert_eq!(
+            opus.efforts.as_deref(),
+            Some(&[Low, Medium, High, XHigh, Max][..])
+        );
+        // `capabilities.effort` with only some levels, or none.
+        let partial = json(
+            r#"{"data": [
+                {"id": "claude-opus-4-5", "capabilities": {"effort": {"supported": true,
+                    "low": {"supported": true}, "medium": {"supported": true},
+                    "high": {"supported": true}, "max": {"supported": false}}}},
+                {"id": "claude-haiku-4-5", "capabilities": {"effort": {"supported": false}}},
+                {"id": "claude-old"}
+            ]}"#,
+        );
+        let m = parse(ListKind::Anthropic, &partial).unwrap().models;
+        assert_eq!(m[0].efforts.as_deref(), Some(&[Low, Medium, High][..]));
+        assert_eq!(m[1].efforts.as_deref(), Some(&[][..]));
+        assert_eq!(m[2].efforts, None);
+    }
     let p2 = parse(ListKind::Anthropic, &json(ANTHROPIC_P2)).unwrap();
     assert_eq!(p2.next_after, None);
 
@@ -520,6 +541,17 @@ async fn refresh_fetches_caches_and_publishes_live_lists() {
     }
     // A fresh cache means there is nothing to do.
     assert!(svc.spawn_refresh(false).is_none());
+}
+
+#[test]
+fn lists_cached_before_effort_facts_are_stale_but_kept() {
+    // Lists cached by 0.6.0 and earlier name the bare base URL; they lack
+    // effort levels, so they are fetched again.
+    let source = ModelListSource::new("anthropic", Some("k"), None).unwrap();
+    let old = LiveList::new("anthropic", "https://api.anthropic.com", 100, Vec::new());
+    assert!(!old.is_fresh(100, Duration::from_secs(60), source.origin()));
+    let new = LiveList::new("anthropic", source.origin(), 100, Vec::new());
+    assert!(new.is_fresh(100, Duration::from_secs(60), source.origin()));
 }
 
 #[tokio::test]

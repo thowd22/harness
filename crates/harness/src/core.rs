@@ -50,6 +50,7 @@ use harness_policy::approvals::{ApprovalBroker, ApprovalUi, RecorderApprovalEven
 use harness_policy::provenance::{Labeler, ProjectTrust};
 use harness_policy::rules::{Mode, PolicyConfig, PolicyEngine, PolicyOverlay};
 use harness_policy::sandbox::{Launcher, SandboxConfig, SandboxedExec};
+use harness_providers::model::ReasoningEffort;
 use harness_providers::provider::Provider;
 use harness_providers::registry::ThinkingStyle;
 use harness_tools::bash::EnvScrubber;
@@ -118,10 +119,12 @@ pub struct Model {
     /// How the registry says the model reasons ([`ThinkingStyle::None`]
     /// for fake and unknown models; see [`Core::effort`]).
     pub thinking: ThinkingStyle,
+    /// The effort levels the model accepts (empty: unknown).
+    pub efforts: Vec<ReasoningEffort>,
 }
 
 /// Where the session's reasoning effort comes from (`/effort`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffortState {
     /// The `/effort` override for this session, if any.
     pub session: Option<Effort>,
@@ -132,17 +135,45 @@ pub struct EffortState {
     pub reasons: bool,
     /// How the model's provider requests reasoning.
     pub style: ThinkingStyle,
+    /// The levels the model accepts, least to most (empty: unknown).
+    pub efforts: Vec<Effort>,
 }
 
 impl EffortState {
-    /// The effort sent with the next request (`None`: the model default).
+    /// The effort asked for (`None`: the model default).
     pub fn effective(&self) -> Option<Effort> {
         self.session.or(self.agent)
     }
 
-    /// `low`, `medium`, `high` or `model default`.
+    /// The level sent: the effective effort, or the nearest level the
+    /// model accepts when it does not take that one.
+    pub fn sent(&self) -> Option<Effort> {
+        let e = self.effective()?;
+        if self.efforts.is_empty() || self.efforts.contains(&e) {
+            return Some(e);
+        }
+        self.efforts
+            .iter()
+            .copied()
+            .filter(|x| *x < e)
+            .max()
+            .or_else(|| self.efforts.iter().copied().filter(|x| *x > e).min())
+    }
+
+    /// The effective effort's name, or `model default`.
     pub fn label(&self) -> &'static str {
         effort_name(self.effective())
+    }
+
+    /// `ultra (sent as max)` when the model does not accept the level,
+    /// else [`EffortState::label`].
+    pub fn sent_label(&self) -> String {
+        match (self.effective(), self.sent()) {
+            (Some(e), Some(s)) if e != s => {
+                format!("{} (sent as {})", e.as_str(), s.as_str())
+            }
+            _ => self.label().to_owned(),
+        }
     }
 
     /// Where the effective effort comes from.
@@ -160,21 +191,19 @@ impl EffortState {
     pub fn status(&self) -> Option<String> {
         let e = self.effective()?;
         Some(if self.reasons {
-            format!("effort {}", effort_name(Some(e)))
+            match self.sent() {
+                Some(s) if s != e => format!("effort {}→{}", e.as_str(), s.as_str()),
+                _ => format!("effort {}", e.as_str()),
+            }
         } else {
             "no reasoning".into()
         })
     }
 }
 
-/// `low`, `medium`, `high`, or `model default` for `None`.
+/// The level's name, or `model default` for `None`.
 pub fn effort_name(effort: Option<Effort>) -> &'static str {
-    match effort {
-        Some(Effort::Low) => "low",
-        Some(Effort::Medium) => "medium",
-        Some(Effort::High) => "high",
-        None => "model default",
-    }
+    effort.map_or("model default", Effort::as_str)
 }
 
 /// Longest a turn waits for a cache pre-warm still in flight.
@@ -264,6 +293,7 @@ pub async fn resolve_model(
                 images: caps.images,
                 context_window: caps.context_window,
                 thinking: ThinkingStyle::None,
+                efforts: Vec::new(),
             };
             (fake.clone(), model, Vec::new())
         }
@@ -280,6 +310,11 @@ pub async fn resolve_model(
                 images: caps.images,
                 context_window: caps.context_window,
                 thinking: resolved.info.thinking,
+                efforts: if resolved.info.efforts.is_empty() {
+                    harness_providers::registry::default_efforts(&resolved.reference, true)
+                } else {
+                    resolved.info.efforts.clone()
+                },
             };
             (provider, model, resolved.warnings.clone())
         }
@@ -1071,6 +1106,12 @@ impl Core {
             agent: self.agent.effort,
             reasons: caps.thinking || self.model.thinking != ThinkingStyle::None,
             style: self.model.thinking,
+            efforts: self
+                .model
+                .efforts
+                .iter()
+                .filter_map(|e| Effort::parse(e.as_str()))
+                .collect(),
         }
     }
 

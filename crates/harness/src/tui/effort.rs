@@ -1,12 +1,13 @@
 //! `/effort`: the reasoning effort of the session's agent.
 //!
-//! `/effort low|medium|high` sets it for the rest of the session (the next
-//! request carries it and the session file keeps it for resume), `/effort
-//! default` restores the agent YAML's `effort` or the model default, and a
-//! bare `/effort` opens a panel with the active effort, where it comes
-//! from and how this model's provider receives it, with one button per
-//! choice. On a model that does not reason the effort is kept but nothing
-//! is sent, and the command says so.
+//! `/effort minimal|low|medium|high|xhigh|max|ultra` sets it for the rest
+//! of the session (the next request carries it and the session file keeps
+//! it for resume), `/effort default` restores the agent YAML's `effort` or
+//! the model default, and a bare `/effort` opens a panel with the active
+//! effort, where it comes from and how this model's provider receives it,
+//! with one button per level the model accepts. A level the model does not
+//! accept is sent as the nearest one it does, and the command says so. On
+//! a model that does not reason the effort is kept but nothing is sent.
 
 use harness_config::agents::Effort;
 use harness_providers::anthropic::request::effort_budget;
@@ -24,17 +25,29 @@ pub const TITLE: &str = "Reasoning effort";
 /// Panel button id prefix: `effort.set:<choice>`.
 pub const BUTTON_PREFIX: &str = "effort.set:";
 /// The `/effort` choices, in picker order.
-pub const CHOICES: [&str; 4] = ["default", "low", "medium", "high"];
+pub const CHOICES: [&str; 8] = [
+    "default", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+];
 
 /// Parses a choice: `Some(None)` is `default`.
 pub fn parse(choice: &str) -> Option<Option<Effort>> {
-    match choice.trim().to_ascii_lowercase().as_str() {
-        "default" => Some(None),
-        "low" => Some(Some(Effort::Low)),
-        "medium" => Some(Some(Effort::Medium)),
-        "high" => Some(Some(Effort::High)),
-        _ => None,
+    if choice.trim().eq_ignore_ascii_case("default") {
+        return Some(None);
     }
+    Effort::parse(choice).map(Some)
+}
+
+/// The panel's choices: `default` and the levels the model accepts (every
+/// level when they are unknown or the model does not reason).
+fn panel_choices(state: &EffortState) -> Vec<&'static str> {
+    let levels: Vec<Effort> = if state.reasons && !state.efforts.is_empty() {
+        state.efforts.clone()
+    } else {
+        Effort::ALL.to_vec()
+    };
+    std::iter::once("default")
+        .chain(levels.into_iter().map(Effort::as_str))
+        .collect()
 }
 
 /// Whether `id` is an `/effort` panel button.
@@ -96,9 +109,9 @@ async fn open(d: &mut Driver) {
         return;
     };
     let lines = lines(core);
-    let buttons = CHOICES
-        .iter()
-        .map(|c| PanelButton::new(format!("{BUTTON_PREFIX}{c}"), *c))
+    let buttons = panel_choices(&core.effort())
+        .into_iter()
+        .map(|c| PanelButton::new(format!("{BUTTON_PREFIX}{c}"), c))
         .collect();
     d.send(CoreEvent::Panel {
         title: TITLE.into(),
@@ -138,6 +151,18 @@ async fn set(d: &mut Driver, effort: Option<Effort>, from_panel: bool) {
             )
             .await
         }
+        (Some(e), true) if state.sent() != Some(e) => {
+            let sent = effort_name(state.sent());
+            d.notify(
+                Level::Info,
+                &format!("effort {}: sent as {sent}", state.label()),
+                Some(format!(
+                    "{model} does not take {}; the nearest level it takes is {sent}",
+                    state.label()
+                )),
+            )
+            .await
+        }
         _ => {
             d.notify(
                 Level::Info,
@@ -156,7 +181,7 @@ pub fn lines(core: &Core) -> Vec<String> {
     let mut v = vec![
         format!("agent   {}", core.agent.name),
         format!("model   {}", core.model.reference),
-        format!("effort  {} ({})", state.label(), state.source()),
+        format!("effort  {} ({})", state.sent_label(), state.source()),
     ];
     if state.session.is_some() {
         v.push(format!(
@@ -166,11 +191,22 @@ pub fn lines(core: &Core) -> Vec<String> {
     }
     v.push(String::new());
     v.push(wire(&state, &core.model.reference));
+    if state.reasons && !state.efforts.is_empty() {
+        let names: Vec<&str> = state.efforts.iter().map(|e| e.as_str()).collect();
+        v.push(format!(
+            "This model takes {}; other levels are sent as the nearest of these.",
+            names.join(", ")
+        ));
+    }
     v.push(String::new());
     v.push("default  the agent YAML's effort, else the model's own".into());
-    v.push("low      least thinking: fastest and cheapest".into());
+    v.push("minimal  barely any thinking (OpenAI, OpenRouter)".into());
+    v.push("low      little thinking: fast and cheap".into());
     v.push("medium   balanced".into());
-    v.push("high     most thinking: slowest and most expensive".into());
+    v.push("high     thorough".into());
+    v.push("xhigh    more than high (Claude 4.7+, newer OpenAI models)".into());
+    v.push("max      the most a Claude model offers".into());
+    v.push("ultra    above max, where a model offers it".into());
     v
 }
 
@@ -182,10 +218,12 @@ fn wire(state: &EffortState, reference: &str) -> String {
     match state.style {
         ThinkingStyle::Adaptive => "Sent as adaptive thinking with output_config.effort.".into(),
         ThinkingStyle::Budget => format!(
-            "Sent as a thinking token budget: low {}, medium {}, high {}.",
+            "Sent as a thinking token budget: low {}, medium {}, high {}, xhigh {}, max {}.",
             effort_budget(ReasoningEffort::Low),
             effort_budget(ReasoningEffort::Medium),
             effort_budget(ReasoningEffort::High),
+            effort_budget(ReasoningEffort::XHigh),
+            effort_budget(ReasoningEffort::Max),
         ),
         ThinkingStyle::Effort | ThinkingStyle::None => {
             if reference.starts_with("openrouter/") || reference.starts_with("openai/") {
@@ -207,10 +245,39 @@ mod tests {
         assert_eq!(parse(" LOW "), Some(Some(Effort::Low)));
         assert_eq!(parse("medium"), Some(Some(Effort::Medium)));
         assert_eq!(parse("high"), Some(Some(Effort::High)));
-        assert_eq!(parse("max"), None);
+        assert_eq!(parse("XHigh"), Some(Some(Effort::XHigh)));
+        assert_eq!(parse("ultra"), Some(Some(Effort::Ultra)));
+        assert_eq!(parse("extreme"), None);
         for c in CHOICES {
             assert!(parse(c).is_some(), "{c}");
         }
+        assert_eq!(CHOICES.len(), Effort::ALL.len() + 1);
+    }
+
+    #[test]
+    fn panel_offers_the_levels_the_model_takes() {
+        let mut s = EffortState {
+            session: Some(Effort::Ultra),
+            agent: None,
+            reasons: true,
+            style: ThinkingStyle::Adaptive,
+            efforts: vec![Effort::Low, Effort::Medium, Effort::High, Effort::Max],
+        };
+        assert_eq!(
+            panel_choices(&s),
+            ["default", "low", "medium", "high", "max"]
+        );
+        assert_eq!(s.sent(), Some(Effort::Max));
+        assert_eq!(s.sent_label(), "ultra (sent as max)");
+        assert_eq!(s.status().as_deref(), Some("effort ultra→max"));
+        s.session = Some(Effort::XHigh);
+        assert_eq!(s.sent(), Some(Effort::High));
+        s.session = Some(Effort::Minimal);
+        assert_eq!(s.sent(), Some(Effort::Low));
+        s.session = Some(Effort::Medium);
+        assert_eq!(s.status().as_deref(), Some("effort medium"));
+        s.efforts.clear();
+        assert_eq!(panel_choices(&s).len(), CHOICES.len());
     }
 
     #[test]
@@ -220,6 +287,7 @@ mod tests {
             agent: None,
             reasons,
             style,
+            efforts: Vec::new(),
         };
         assert!(wire(&s(ThinkingStyle::Adaptive, true), "anthropic/x").contains("output_config"));
         assert!(wire(&s(ThinkingStyle::Budget, true), "anthropic/x").contains("2048"));

@@ -3,8 +3,8 @@
 use serde_json::{Map, Value, json};
 
 use crate::model::{
-    ChatRequest, ContentBlock, ImageSource, Message, ReasoningEffort, Role, ThinkingConfig,
-    ToolChoice, ToolResultPart, ToolSpec,
+    ChatRequest, ContentBlock, ImageSource, Message, Role, ThinkingConfig, ToolChoice,
+    ToolResultPart, ToolSpec,
 };
 use crate::provider::ProviderError;
 
@@ -13,16 +13,13 @@ use super::PROVIDER_NAME;
 /// Maps the agent's reasoning settings to an OpenAI `reasoning.effort`
 /// value.
 ///
-/// An explicit effort wins. Otherwise a token budget is bucketed: up to
-/// 4096 tokens is `low`, up to 16384 is `medium`, anything larger is
-/// `high`. `None` means "let the model use its default".
+/// An explicit effort wins, under its own name (the provider then sends
+/// the nearest level the model accepts). Otherwise a token budget is
+/// bucketed: up to 4096 tokens is `low`, up to 16384 is `medium`, anything
+/// larger is `high`. `None` means "let the model use its default".
 pub fn effort_for(thinking: &ThinkingConfig) -> Option<&'static str> {
     if let Some(effort) = thinking.effort {
-        return Some(match effort {
-            ReasoningEffort::Low => "low",
-            ReasoningEffort::Medium => "medium",
-            ReasoningEffort::High => "high",
-        });
+        return Some(effort.as_str());
     }
     thinking.budget_tokens.map(|b| match b {
         0..=4096 => "low",
@@ -319,6 +316,7 @@ fn tool_output(content: &[ToolResultPart], is_error: bool) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::ReasoningEffort;
 
     #[test]
     fn effort_mapping() {

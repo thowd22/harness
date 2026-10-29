@@ -117,13 +117,16 @@ pub const THINKING_UPDATES_BETA: &str = "thinking-display-updates-2026-08-18";
 pub const PREWARM_PLACEHOLDER: &str = "warmup";
 
 /// What the builder needs to know about the target model.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ModelProfile {
     /// Model capabilities; `caching` gates breakpoints and
     /// `max_output_tokens` caps `max_tokens` when non-zero.
     pub capabilities: Capabilities,
     /// How thinking is requested.
     pub thinking: ThinkingStyle,
+    /// The `output_config.effort` levels the model accepts (empty:
+    /// unknown). Other levels are sent as the nearest accepted one.
+    pub efforts: Vec<ReasoningEffort>,
 }
 
 /// Request builder options.
@@ -151,11 +154,15 @@ impl Default for RequestOptions {
 }
 
 /// Thinking budget used for an effort level on budget-style models.
+/// `ultra` gets the `max` budget: no budget model goes further.
 pub fn effort_budget(effort: ReasoningEffort) -> u32 {
     match effort {
+        ReasoningEffort::Minimal => MIN_THINKING_BUDGET,
         ReasoningEffort::Low => 2_048,
         ReasoningEffort::Medium => 8_192,
         ReasoningEffort::High => 24_576,
+        ReasoningEffort::XHigh => 32_768,
+        ReasoningEffort::Max | ReasoningEffort::Ultra => 49_152,
     }
 }
 
@@ -168,11 +175,14 @@ pub fn budget_effort(budget: u32) -> ReasoningEffort {
     }
 }
 
-fn effort_str(effort: ReasoningEffort) -> &'static str {
-    match effort {
-        ReasoningEffort::Low => "low",
-        ReasoningEffort::Medium => "medium",
-        ReasoningEffort::High => "high",
+/// The `output_config.effort` value for `effort` on a model that accepts
+/// `supported`: the nearest accepted level, and never a level outside
+/// Claude's `low` to `max`.
+fn effort_str(effort: ReasoningEffort, supported: &[ReasoningEffort]) -> &'static str {
+    match effort.nearest(supported) {
+        ReasoningEffort::Minimal => "low",
+        ReasoningEffort::Ultra => "max",
+        e => e.as_str(),
     }
 }
 
@@ -215,7 +225,7 @@ pub fn build_body(
                 {
                     body.insert(
                         "output_config".into(),
-                        json!({"effort": effort_str(effort)}),
+                        json!({"effort": effort_str(effort, &profile.efforts)}),
                     );
                 }
             }
@@ -223,7 +233,12 @@ pub fn build_body(
                 let mut budget = thinking
                     .budget_tokens
                     .unwrap_or_else(|| {
-                        effort_budget(thinking.effort.unwrap_or(ReasoningEffort::Medium))
+                        effort_budget(
+                            thinking
+                                .effort
+                                .unwrap_or(ReasoningEffort::Medium)
+                                .nearest(&profile.efforts),
+                        )
                     })
                     .max(MIN_THINKING_BUDGET);
                 if max_tokens <= budget {
@@ -523,6 +538,10 @@ mod tests {
                 max_output_tokens: 128_000,
             },
             thinking,
+            efforts: crate::registry::default_efforts(
+                &crate::registry::ModelRef::new(PROVIDER, "claude-opus-5-5"),
+                true,
+            ),
         }
     }
 
@@ -743,6 +762,51 @@ mod tests {
         )
         .unwrap();
         assert!(body.get("thinking").is_none() && body.get("output_config").is_none());
+    }
+
+    #[test]
+    fn every_effort_level_is_sent_as_one_the_model_accepts() {
+        let mut req = ChatRequest::new("claude-opus-5-5");
+        req.messages.push(Message::user("hi"));
+        let sent = |req: &mut ChatRequest, p: &ModelProfile, e| {
+            req.thinking = Some(ThinkingConfig {
+                budget_tokens: None,
+                effort: Some(e),
+            });
+            build_body(req, p, &RequestOptions::default()).unwrap()["output_config"]["effort"]
+                .clone()
+        };
+        let p = profile(ThinkingStyle::Adaptive);
+        for (e, want) in [
+            (ReasoningEffort::Minimal, "low"),
+            (ReasoningEffort::Low, "low"),
+            (ReasoningEffort::Medium, "medium"),
+            (ReasoningEffort::High, "high"),
+            (ReasoningEffort::XHigh, "xhigh"),
+            (ReasoningEffort::Max, "max"),
+            (ReasoningEffort::Ultra, "max"),
+        ] {
+            assert_eq!(sent(&mut req, &p, e), json!(want), "{e}");
+        }
+        // Claude 4.6 has no xhigh: the level below is sent.
+        let mut p46 = profile(ThinkingStyle::Adaptive);
+        p46.efforts = crate::registry::default_efforts(
+            &crate::registry::ModelRef::new(PROVIDER, "claude-sonnet-4-6"),
+            true,
+        );
+        assert_eq!(sent(&mut req, &p46, ReasoningEffort::XHigh), json!("high"));
+        assert_eq!(sent(&mut req, &p46, ReasoningEffort::Ultra), json!("max"));
+        // Unknown levels on an unknown model still stay within low..max.
+        let mut unknown = profile(ThinkingStyle::Adaptive);
+        unknown.efforts.clear();
+        assert_eq!(
+            sent(&mut req, &unknown, ReasoningEffort::Ultra),
+            json!("max")
+        );
+        assert_eq!(
+            sent(&mut req, &unknown, ReasoningEffort::Minimal),
+            json!("low")
+        );
     }
 
     #[test]

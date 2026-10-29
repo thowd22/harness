@@ -215,16 +215,84 @@ pub enum ToolChoice {
     },
 }
 
-/// Requested reasoning effort for providers that use effort levels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// Requested reasoning effort, from least to most thinking. Models accept
+/// different subsets (see [`ReasoningEffort::nearest`]); the serialized
+/// names are the ones providers use on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ReasoningEffort {
-    /// Minimal reasoning.
+    /// Barely any reasoning (OpenAI GPT-5, OpenRouter).
+    Minimal,
+    /// Little reasoning.
     Low,
     /// Balanced reasoning.
     Medium,
-    /// Maximum reasoning.
+    /// Thorough reasoning.
     High,
+    /// More than high (Claude 4.7+, newer OpenAI models).
+    XHigh,
+    /// The most a Claude model offers.
+    Max,
+    /// Above max (some ChatGPT plan models).
+    Ultra,
+}
+
+impl ReasoningEffort {
+    /// Every level, least to most.
+    pub const ALL: [ReasoningEffort; 7] = [
+        Self::Minimal,
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::XHigh,
+        Self::Max,
+        Self::Ultra,
+    ];
+
+    /// The wire name: `minimal`, `low`, `medium`, `high`, `xhigh`, `max`
+    /// or `ultra`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+            Self::Ultra => "ultra",
+        }
+    }
+
+    /// Parses a wire name (case-insensitive).
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim();
+        Self::ALL
+            .into_iter()
+            .find(|e| e.as_str().eq_ignore_ascii_case(s))
+    }
+
+    /// The level to send to a model that accepts `supported`: this level
+    /// when accepted, else the highest accepted level below it, else the
+    /// lowest above it. An empty `supported` means "unknown", and the level
+    /// is kept.
+    pub fn nearest(self, supported: &[ReasoningEffort]) -> Self {
+        if supported.is_empty() || supported.contains(&self) {
+            return self;
+        }
+        supported
+            .iter()
+            .copied()
+            .filter(|e| *e < self)
+            .max()
+            .or_else(|| supported.iter().copied().filter(|e| *e > self).min())
+            .unwrap_or(self)
+    }
+}
+
+impl std::fmt::Display for ReasoningEffort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// Reasoning / extended-thinking settings. Providers map whichever field
@@ -444,6 +512,38 @@ pub struct Capabilities {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn effort_names_round_trip() {
+        for e in ReasoningEffort::ALL {
+            assert_eq!(ReasoningEffort::parse(e.as_str()), Some(e));
+            assert_eq!(serde_json::to_value(e).unwrap(), json!(e.as_str()));
+            assert_eq!(
+                serde_json::from_value::<ReasoningEffort>(json!(e.as_str())).unwrap(),
+                e
+            );
+        }
+        assert_eq!(
+            ReasoningEffort::parse(" XHigh "),
+            Some(ReasoningEffort::XHigh)
+        );
+        assert_eq!(ReasoningEffort::parse("extreme"), None);
+    }
+
+    #[test]
+    fn nearest_prefers_the_highest_level_below() {
+        use ReasoningEffort::*;
+        let claude = [Low, Medium, High, XHigh, Max];
+        assert_eq!(Ultra.nearest(&claude), Max);
+        assert_eq!(Minimal.nearest(&claude), Low);
+        assert_eq!(XHigh.nearest(&claude), XHigh);
+        let claude_4_6 = [Low, Medium, High, Max];
+        assert_eq!(XHigh.nearest(&claude_4_6), High);
+        let gpt5 = [Minimal, Low, Medium, High];
+        assert_eq!(Max.nearest(&gpt5), High);
+        assert_eq!(Minimal.nearest(&gpt5), Minimal);
+        assert_eq!(Max.nearest(&[]), Max);
+    }
 
     #[test]
     fn every_block_kind_round_trips_through_json() {

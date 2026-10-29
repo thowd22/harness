@@ -485,17 +485,25 @@ async fn count_tokens_accepts_a_gzip_body() {
 async fn every_effort_level_and_current_model_is_accepted() {
     let Some(key) = key() else { return };
     let p = provider(&key, |_| {});
-    let cases = [
-        (MODEL, ReasoningEffort::Low),
-        (MODEL, ReasoningEffort::Medium),
-        (MODEL, ReasoningEffort::High),
-        ("claude-sonnet-5-5", ReasoningEffort::Low),
-        ("claude-opus-5-5", ReasoningEffort::Low),
-    ];
+    // Every harness level on the test model (minimal and ultra go as low
+    // and max), xhigh and max on the larger models, a 4.6 model (no
+    // xhigh: sent as high) and a budget model at its largest budget.
+    let mut cases: Vec<(&str, ReasoningEffort)> =
+        ReasoningEffort::ALL.iter().map(|e| (MODEL, *e)).collect();
+    cases.extend([
+        ("claude-sonnet-5-5", ReasoningEffort::XHigh),
+        ("claude-opus-5-5", ReasoningEffort::Max),
+        ("claude-sonnet-4-6", ReasoningEffort::XHigh),
+        ("claude-haiku-4-5", ReasoningEffort::Max),
+    ]);
     for (model, effort) in cases {
         let mut req = ChatRequest::new(model);
         req.thinking = thinking(effort);
-        req.max_tokens = Some(2000);
+        req.max_tokens = Some(if model == "claude-haiku-4-5" {
+            60_000
+        } else {
+            2000
+        });
         req.messages.push(Message::user(
             "What is 17 * 23? Reply with the number only.",
         ));

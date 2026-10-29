@@ -443,7 +443,7 @@ two turns; cost is per session (2 turns, 7-12 calls).
 Arms: `std` = defaults (the coder sends no `reasoning` object; Opus 5.5
 still reasons adaptively); `fast` = `[provider.openrouter] service_tier =
 fast`; `nitro` = model `anthropic/claude-opus-5.5:nitro`; `eff-*` = a
-global `agents/coder.yaml` copy with `effort: low | medium | high`;
+global `agents/coder.yaml` copy with `effort: low | medium | high` (the levels then);
 `eff-med-excl` = effort medium + `reasoning_exclude = true`.
 
 | Arm | Calls | TTFT p50 | TTFT p90 | Call p50 | Call p90 | tok/s p50 per call | tok/s (stream) | Turn p50 | Turn p90 | Session wall | Cost per session |

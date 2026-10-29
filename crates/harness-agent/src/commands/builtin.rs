@@ -16,7 +16,7 @@ pub enum Builtin {
     Rename,
     /// `/model [model]`.
     Model,
-    /// `/effort [default|low|medium|high]`.
+    /// `/effort [default|minimal|low|medium|high|xhigh|max|ultra]`.
     Effort,
     /// `/mode [ask|auto-edit|auto]`.
     Mode,
@@ -169,7 +169,9 @@ impl Builtin {
             Self::Effort => vec![
                 ArgSpec::optional("effort")
                     .with_help("reasoning effort; default restores the agent's or model's own")
-                    .with_choices(&["default", "low", "medium", "high"]),
+                    .with_choices(&[
+                        "default", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+                    ]),
             ],
             Self::Mode => vec![
                 ArgSpec::optional("mode")

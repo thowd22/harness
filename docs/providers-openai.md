@@ -41,7 +41,14 @@ gpt = openai/gpt-5
     `Notice::from_event` while streaming.
 - **Effort.** The agent's `effort` (`ThinkingConfig::effort`, or the
   session's [`/effort`](commands.md#effort) choice) maps to
-  `reasoning.effort` (`low`, `medium`, `high`). If only a token budget is
+  `reasoning.effort`, as the nearest level the model takes. With Sign in
+  with ChatGPT the levels are the ones the plan's model list reports per
+  model (`supported_reasoning_levels`, for example `low` to `max`; the
+  list also offers `ultra`, which the API rejects, so `ultra` is sent as
+  `max`).
+  Otherwise they follow the model id: GPT-5 takes `minimal` to `high`,
+  GPT-5.1 `low` to `high`, GPT-5.2 and later `low` to `xhigh`, the
+  o-series `low` to `high`. If only a token budget is
   set, it is bucketed: up to 4096 tokens is `low`, up to 16384 is `medium`,
   and anything larger is `high`. With no setting, the model's default
   effort applies. Models that do not reason (`gpt-4o`, `gpt-4.1`,

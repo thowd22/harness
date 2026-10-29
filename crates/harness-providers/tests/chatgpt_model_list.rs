@@ -61,6 +61,22 @@ fn the_list_keeps_listed_api_models_in_server_order() {
     assert_eq!(luna.vision, Some(false));
     assert_eq!(luna.reasoning, Some(false));
 
+    // Effort levels come from `supported_reasoning_levels`, sorted, with
+    // names harness does not know (`turbo`) and `ultra`, which the
+    // Responses API rejects, left out.
+    use harness_providers::model::ReasoningEffort::*;
+    assert_eq!(
+        sol.efforts.as_deref(),
+        Some(&[Low, Medium, High, XHigh, Max][..])
+    );
+    assert_eq!(models[1].efforts.as_deref(), Some(&[Low, Medium, High][..]));
+    let info = live_model_info("openai", sol);
+    assert_eq!(info.efforts, [Low, Medium, High, XHigh, Max]);
+    assert_eq!(info.effort(Minimal), Low);
+    assert_eq!(info.effort(Ultra), Max);
+    // A model that does not reason accepts no level.
+    assert!(live_model_info("openai", luna).efforts.is_empty());
+
     let err = parse(ListKind::ChatGpt, &serde_json::json!({"data": []})).unwrap_err();
     assert!(err.to_string().contains("no `models` array"), "{err}");
 }

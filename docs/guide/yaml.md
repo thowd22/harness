@@ -63,7 +63,10 @@ verify: cargo test
 `mcp:<server>/<tool>` (for example `mcp:github/create_issue` or
 `mcp:db/*`) from servers defined in harness.ini (see
 [MCP servers](../mcp.md#tools-for-agents)); `memory` is `off`,
-`read` or `read-write`; `subagents: [researcher]` lets it delegate. Project
+`read` or `read-write`; `effort` is `minimal`, `low`, `medium`, `high`,
+`xhigh`, `max` or `ultra` (a level the model does not take is sent as the
+nearest one it does; see [`/effort`](../commands.md#effort));
+`subagents: [researcher]` lets it delegate. Project
 agents may only tighten what a global or built-in agent of the same name
 allows.
 

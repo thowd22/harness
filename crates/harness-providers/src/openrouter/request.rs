@@ -15,9 +15,9 @@ use serde_json::{Map, Value, json};
 
 use crate::anthropic::request::system_layers;
 use crate::model::{
-    ChatRequest, ContentBlock, ImageSource, Message, ReasoningEffort, Role, ToolChoice,
-    ToolResultPart,
+    ChatRequest, ContentBlock, ImageSource, Message, Role, ToolChoice, ToolResultPart,
 };
+use crate::registry::OPENROUTER_EFFORTS;
 
 use super::{CacheTtl, OpenRouterOptions, PROVIDER_NAME};
 
@@ -104,11 +104,9 @@ pub fn build_body(request: &ChatRequest, options: &OpenRouterOptions) -> Value {
     }
     if let Some(thinking) = &request.thinking {
         let reasoning = match (thinking.effort, thinking.budget_tokens) {
-            (Some(effort), _) => json!({"effort": match effort {
-                ReasoningEffort::Low => "low",
-                ReasoningEffort::Medium => "medium",
-                ReasoningEffort::High => "high",
-            }}),
+            // OpenRouter takes `minimal` to `xhigh` and maps them onto
+            // the upstream model.
+            (Some(effort), _) => json!({"effort": effort.nearest(&OPENROUTER_EFFORTS).as_str()}),
             (None, Some(budget)) => json!({"max_tokens": budget}),
             (None, None) => json!({"enabled": true}),
         };
@@ -343,7 +341,7 @@ fn assistant(m: &Message) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ThinkingConfig, ToolSpec};
+    use crate::model::{ReasoningEffort, ThinkingConfig, ToolSpec};
     use crate::openrouter::ServiceTier;
 
     fn opts() -> OpenRouterOptions {
@@ -453,6 +451,22 @@ mod tests {
         );
         r.thinking = None;
         assert!(build_body(&r, &exclude).get("reasoning").is_none());
+        for (e, want) in [
+            (ReasoningEffort::Minimal, "minimal"),
+            (ReasoningEffort::XHigh, "xhigh"),
+            (ReasoningEffort::Max, "xhigh"),
+            (ReasoningEffort::Ultra, "xhigh"),
+        ] {
+            r.thinking = Some(ThinkingConfig {
+                effort: Some(e),
+                budget_tokens: None,
+            });
+            assert_eq!(
+                build_body(&r, &OpenRouterOptions::default())["reasoning"],
+                json!({"effort": want}),
+                "{e}"
+            );
+        }
     }
 
     #[test]
