@@ -1,11 +1,11 @@
 ---
 id: TASK-168
 title: Support every reasoning effort level on every provider
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-10-28 03:14'
-updated_date: '2026-10-29 17:55'
+updated_date: '2026-10-29 18:08'
 labels:
   - providers
   - tui
@@ -60,3 +60,9 @@ Live ChatGPT plan checks (signed in again, 2026-10-29): gpt-6-astra xhigh ok, gp
 Also fixed: login::tests::logout_asks_and_removes_all_credential_keys used the default data dir and deleted the real ChatGPT tokens (the 2026-10-28 00:15 sign-out); it now has its own data_dir. Reproduced with seeded fake tokens in a sandbox HOME before and after.
 Validation: fmt, clippy -D warnings, nextest workspace 2153 passed / 24 skipped, doc tests, hermetic-guard and bench-guard ok; real token file intact after the run. Not committed yet.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Every effort level (minimal..ultra) works on every provider: levels per model come from live lists (Anthropic capabilities.effort, ChatGPT supported_reasoning_levels minus ultra, which the Responses API rejects) or per-family defaults, and an unsupported level is sent as the nearest accepted one for the main agent and subagents; /effort shows the levels and the sent level. Verified with unit tests, live Anthropic runs (all levels, xhigh/max, 4.6 clamping, Haiku 4.5 budgets) and live ChatGPT plan runs (astra xhigh, luna ultra→max, sol ultra→max, sol minimal). CI green on 3628d53.
+<!-- SECTION:FINAL_SUMMARY:END -->
